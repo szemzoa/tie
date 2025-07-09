@@ -22,6 +22,33 @@
 #include "predict.h"
 #include "tokenize.h"
 
+const char *system_prompt_with_tools = "<|im_start|>system\n"
+									   "You may call one or more functions to assist with the user query.\n"
+									   "You are provided with function signatures within <tools></tools> XML tags:\n"
+									   "<tools>\n"
+									   "{\n"
+									   "\"name\": \"set_lamp_state\",\n"
+									   "\"description\": \"Control a smart lamp\",\n"
+									   "\"parameters\": {\n"
+									   "\"type\": \"object\",\n"
+									   "\"properties\": {\n"
+									   "\"state\": {\n"
+									   "\"type\": \"string\",\n"
+									   "\"enum\": [\"on\", \"off\"],\n"
+									   "\"description\": \"Turn the lamp on or off\"\n"
+									   "}\n"
+									   "},\n"
+									   "\"required\": [\"state\"]\n"
+									   "}\n"
+									   "}\n"
+									   "</tools>\n"
+									   "For each function call, return a json object with function name and arguments "
+									   "within <tool_call></tool_call> XML tags:\n"
+									   "<tool_call>\n"
+									   "{\"name\": <function-name>, \"arguments\": <args-json-object>}\n"
+									   "</tool_call>\n"
+									   "<|im_end|>\n";
+
 int64_t elapsed_time_us(const struct timespec after, const struct timespec before)
 {
 	return ((int64_t)after.tv_sec - (int64_t)before.tv_sec) * (int64_t)1000000 +
@@ -45,24 +72,99 @@ void generate_output(struct ctx_t *ctx, int current_token)
 	fflush(stdout);
 }
 
+// C function that implements our tool
+char *set_lamp_state(const char *location)
+{
+	// In a real application, you'd make an API call here.
+	// For now, we'll return a hardcoded string.
+	static char weather_report[256];
+	snprintf(weather_report, sizeof(weather_report), "{\"state\": \"%s\"}", location);
+	return weather_report;
+}
+
+// Function to parse the tool call string and execute the tool
+char *execute_tool_from_buffer(char *tool_call_buffer)
+{
+	printf("--- Tool Call Detected ---\n");
+
+	replace_g_spaces(tool_call_buffer);
+
+	printf("Raw Call: %s\n", tool_call_buffer);
+
+	// Simple parsing using strstr
+	const char *name_field = "\"name\": \"";
+	const char *args_field = "\"state\": \"";
+
+	char function_name[64] = {0};
+	char location[128]	   = {0};
+
+	const char *name_start = strstr(tool_call_buffer, name_field);
+	if (name_start) {
+		sscanf(name_start + strlen(name_field), "%[^\"]", function_name);
+	}
+
+	const char *args_start = strstr(tool_call_buffer, args_field);
+	if (args_start) {
+		sscanf(args_start + strlen(args_field), "%[^\"]", location);
+	}
+
+	printf("Function: '%s', Location: '%s'\n", function_name, location);
+
+	// --- Execute the corresponding C function ---
+	char *tool_result = NULL;
+	if (strcmp(function_name, "set_lamp_state") == 0) {
+		tool_result = set_lamp_state(location);
+	} else {
+		tool_result = "{\"error\": \"Unknown tool requested.\"}";
+	}
+
+	printf("Tool Result: %s\n", tool_result);
+
+	return tool_result;
+}
+
 void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads)
 {
 	struct timespec start, end;
 	char			input_buf[2048];
 	char			prompt_buf[4096];
 	int				gen_len;
+	int				initial_prompt		   = 0;
+	bool			in_tool_call		   = false;
+	char			tool_call_buffer[1024] = {0}; // Buffer to accumulate the tool call string
+	char		   *tool_result;
+	int				tool_call_len		  = 0;
+	int				tool_call_start_token = vocab_lookup_token_id(ctx->root, "<tool_call>", 11);
+	int				tool_call_end_token	  = vocab_lookup_token_id(ctx->root, "</tool_call>", 12);
 
 	while (1) {
 		printf("\nYou: ");
 
-		if (!fgets(input_buf, sizeof(input_buf), stdin))
-			break;
+		if (tool_call_len == 0) {
+			if (!fgets(input_buf, sizeof(input_buf), stdin))
+				break;
 
-		if (strncmp(input_buf, "exit", 4) == 0)
-			break;
+			if (strncmp(input_buf, "exit", 4) == 0)
+				break;
 
-		// Build Qwen3-style chat input
-		snprintf(prompt_buf, sizeof(prompt_buf), "<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", input_buf);
+			if (initial_prompt == 0) {
+				initial_prompt = 1;
+
+				snprintf(prompt_buf, sizeof(prompt_buf), "%s", system_prompt_with_tools);
+			}
+
+			// Build Qwen3-style chat input
+			snprintf(prompt_buf, sizeof(prompt_buf), "%s<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n",
+					 prompt_buf, input_buf);
+
+		} else {
+			snprintf(prompt_buf, sizeof(prompt_buf),
+					 "<|im_start|>user\n<tool_response>%s</tool_response> /think<|im_end|>\n<|im_start|>assistant\n",
+					 tool_result);
+			printf("new prompt: %s\n", prompt_buf);
+
+			tool_call_len = 0;
+		}
 
 		/* --- Setup Buffers --- */
 		int *generated_tokens = calloc(max_new_tokens, sizeof(int));
@@ -75,6 +177,8 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 		/* --- Tokenizer --- */
 		size_t prompt_len	 = 0;
 		int	  *prompt_tokens = tokenize_bpe(ctx, prompt_buf, &prompt_len);
+
+		memset((void *)&prompt_buf, 0, sizeof(prompt_buf));
 
 		/* --- Prompt Processing --- */
 		printf("--- Prompt Processing at pos: %u (Matrix Mode) ---\n", ctx->kv_pos);
@@ -126,14 +230,32 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 												prompt_tokens, prompt_len, generated_tokens, gen_len,
 												ctx->model->repetition_penalty);
 
-			if (gen_len < max_new_tokens)
-				generated_tokens[gen_len++] = next_token;
+			if (next_token == tool_call_start_token) {
+				in_tool_call = true;
+			}
+
+			if (next_token == tool_call_end_token) {
+				in_tool_call = false;
+				//				break;
+			}
+
+			if (in_tool_call) {
+				// If we are inside a tool call, append the token's string to our buffer
+				const char *token_str = get_token_string(ctx->pool, next_token);
+				int			token_len = strlen(token_str);
+				if (tool_call_len + token_len < sizeof(tool_call_buffer)) {
+					strcat(tool_call_buffer, token_str);
+					tool_call_len += token_len;
+				}
+			}
 
 			// 3. Print the token and check for EOS
 			generate_output(ctx, next_token);
 
+			if (gen_len < max_new_tokens)
+				generated_tokens[gen_len++] = next_token;
+
 			if (next_token == ctx->model->eos_token) {
-				//			ctx->kv_pos++;
 				printf("\n--- EOS token reached ---\n");
 				break;
 			}
@@ -146,22 +268,24 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 			for (int l = 0; l < ctx->model->num_layers; l++) {
 				transformer_layer_unified(ctx, l, 1, use_threads);
 			}
-
 			ctx->kv_pos++;
 		}
 
-		clock_gettime(CLOCK_REALTIME, &end);
-		printf("\n--- Generation End --- %u tokens, %llu msec, tps: %.01f --- %u\n", gen_len,
-			   elapsed_time_us(end, start) / 1000,
-			   (float)(((float)gen_len) / (float)(elapsed_time_us(end, start) / 1000.0 / 1000.0)), ctx->kv_pos);
+		if (tool_call_len > 0) {
+			tool_result = execute_tool_from_buffer(tool_call_buffer);
 
+		} else {
+			clock_gettime(CLOCK_REALTIME, &end);
+			printf("\n--- Generation End --- %u tokens, %llu msec, tps: %.01f --- %u\n", gen_len,
+				   elapsed_time_us(end, start) / 1000,
+				   (float)(((float)gen_len) / (float)(elapsed_time_us(end, start) / 1000.0 / 1000.0)), ctx->kv_pos);
+		}
 		free(generated_tokens);
 	}
 }
 
 static void print_usage(void)
 {
-
 	printf("parameters:\r\n");
 	printf("\t -h (help)\r\n");
 	printf("\t -m [model file]\r\n");
@@ -170,39 +294,37 @@ static void print_usage(void)
 
 int main(int argc, char *argv[])
 {
-    struct ctx_t *ctx;
-    int opt;
-    int num_threads = 1;
-    char *model_path;
+	struct ctx_t *ctx;
+	int			  opt;
+	int			  num_threads = 1;
+	char		 *model_path;
 
 	printf("Tiny Inference Engine\n");
 	if (argc < 3) {
-	    print_usage();
-	    exit(EXIT_SUCCESS);
+		print_usage();
+		exit(EXIT_SUCCESS);
 	}
 
 	while ((opt = getopt(argc, argv, "t:m:h")) != -1) {
+		switch (opt) {
+			case 't':
+				num_threads = atoi(optarg);
+				break;
 
-	    switch(opt) {
+			case 'h':
+				print_usage();
+				exit(EXIT_SUCCESS);
+				break;
 
-		case 't':
-		    num_threads = atoi(optarg);
-		    break;
+			case 'm':
+				model_path = optarg;
+				break;
 
-		case 'h':
-		    print_usage();
-		    exit(EXIT_SUCCESS);
-		    break;
-
-		case 'm':
-		    model_path = optarg;
-		    break;
-
-		case '?':
-		    print_usage();
-		    exit(EXIT_FAILURE);
-		    break;
-	    }
+			case '?':
+				print_usage();
+				exit(EXIT_FAILURE);
+				break;
+		}
 	}
 
 	srand(time(NULL));
