@@ -7,7 +7,7 @@
 
 // A struct to hold a token's index and its probability.
 typedef struct {
-	int	  index;
+	int index;
 	float prob;
 } ProbIndex;
 
@@ -66,7 +66,7 @@ static float *softmax(float *logits, int size)
 // Samples a token index from a probability distribution.
 int sample_from_probs(float *probs, int size)
 {
-	float r	  = (float)rand() / RAND_MAX;
+	float r = (float)rand() / RAND_MAX;
 	float cdf = 0.0f;
 	for (int i = 0; i < size; i++) {
 		cdf += probs[i];
@@ -90,7 +90,7 @@ int top_k_sampling(float *probs, int size, int k)
 
 	for (int i = 0; i < size; i++) {
 		pi[i].index = i;
-		pi[i].prob	= probs[i];
+		pi[i].prob = probs[i];
 	}
 	qsort(pi, size, sizeof(ProbIndex), compare_prob);
 
@@ -104,9 +104,9 @@ int top_k_sampling(float *probs, int size, int k)
 	}
 
 	// Sample from the truncated and renormalized distribution
-	float r		= (float)rand() / RAND_MAX;
-	float cdf	= 0.0f;
-	int	  index = pi[k - 1].index; // Default to the last token in the top-k set
+	float r = (float)rand() / RAND_MAX;
+	float cdf = 0.0f;
+	int index = pi[k - 1].index; // Default to the last token in the top-k set
 	for (int i = 0; i < k; i++) {
 		cdf += pi[i].prob;
 		if (cdf >= r) {
@@ -127,13 +127,13 @@ int nucleus_sampling(float *probs, int size, float p)
 
 	for (int i = 0; i < size; i++) {
 		pi[i].index = i;
-		pi[i].prob	= probs[i];
+		pi[i].prob = probs[i];
 	}
 	qsort(pi, size, sizeof(ProbIndex), compare_prob);
 
 	// Find the cutoff point for the nucleus
 	float cum_prob = 0.0f;
-	int	  cutoff   = 0;
+	int cutoff = 0;
 	for (int i = 0; i < size; i++) {
 		cum_prob += pi[i].prob;
 		if (cum_prob >= p) {
@@ -154,9 +154,9 @@ int nucleus_sampling(float *probs, int size, float p)
 	}
 
 	// Sample from the nucleus
-	float r		= (float)rand() / RAND_MAX;
-	float cdf	= 0.0f;
-	int	  index = pi[cutoff - 1].index; // Default to the last token in the nucleus
+	float r = (float)rand() / RAND_MAX;
+	float cdf = 0.0f;
+	int index = pi[cutoff - 1].index; // Default to the last token in the nucleus
 	for (int i = 0; i < cutoff; i++) {
 		cdf += pi[i].prob;
 		if (cdf >= r) {
@@ -171,7 +171,7 @@ int nucleus_sampling(float *probs, int size, float p)
 // Returns the index of the maximum value in an array (greedy sampling).
 int argmax(float *array, int size)
 {
-	int	  max_idx = 0;
+	int max_idx = 0;
 	float max_val = array[0];
 	for (int i = 1; i < size; i++) {
 		if (array[i] > max_val) {
@@ -183,8 +183,8 @@ int argmax(float *array, int size)
 }
 
 int predict_next_token(float *logits, int vocab_size, const char *method, float temperature, int k, float p,
-					   const int *prompt_tokens, int prompt_len, const int *generated_tokens, int gen_len,
-					   float repetition_penalty)
+		       const int *prompt_tokens, int prompt_len, const int *generated_tokens, int gen_len,
+		       float repetition_penalty)
 {
 	// 1. Apply repetition penalty to the logits
 	if (repetition_penalty != 1.0f) {
@@ -239,7 +239,7 @@ int predict_next_token(float *logits, int vocab_size, const char *method, float 
 }
 
 int sample_top_k_with_penalty(const float *logits_in, int vocab_size, const int *prev_tokens, int num_prev_tokens,
-							  int top_k, float temperature, float repetition_penalty, unsigned int seed)
+			      int top_k, float temperature, float repetition_penalty, unsigned int seed)
 {
 	if (top_k <= 0 || top_k > vocab_size)
 		top_k = vocab_size;
@@ -274,24 +274,24 @@ int sample_top_k_with_penalty(const float *logits_in, int vocab_size, const int 
 			if (logits[j] > logits[i]) {
 				// Swap logits
 				float tmp_val = logits[i];
-				logits[i]	  = logits[j];
-				logits[j]	  = tmp_val;
+				logits[i] = logits[j];
+				logits[j] = tmp_val;
 
 				// Swap indices
 				int tmp_idx = indices[i];
-				indices[i]	= indices[j];
-				indices[j]	= tmp_idx;
+				indices[i] = indices[j];
+				indices[j] = tmp_idx;
 			}
 		}
 	}
 
 	// Step 4: Softmax over top-k
-	float  max_logit = logits[0];
-	float  sum_exp	 = 0.0f;
-	float *probs	 = (float *)malloc(sizeof(float) * top_k);
+	float max_logit = logits[0];
+	float sum_exp = 0.0f;
+	float *probs = (float *)malloc(sizeof(float) * top_k);
 
 	for (int i = 0; i < top_k; ++i) {
-		float x	 = logits[i] - max_logit;
+		float x = logits[i] - max_logit;
 		probs[i] = expf(x);
 		sum_exp += probs[i];
 	}
@@ -301,7 +301,7 @@ int sample_top_k_with_penalty(const float *logits_in, int vocab_size, const int 
 	}
 
 	// Step 5: Sample from top-k
-	float r	  = (float)rand_r(&seed) / RAND_MAX;
+	float r = (float)rand_r(&seed) / RAND_MAX;
 	float cum = 0.0f;
 	for (int i = 0; i < top_k; ++i) {
 		cum += probs[i];

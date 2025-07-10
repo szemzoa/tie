@@ -6,6 +6,13 @@
 #include "gguf.h"
 #include "model.h"
 
+typedef char* (*tool_func_t)(const char*);
+
+struct tool_entry_t {
+  const char* name;
+  tool_func_t func;
+};
+
 struct tfmem_t {
 	float *hidden_state;
 	float *normed_qkv_input;
@@ -25,20 +32,20 @@ struct tfmem_t {
 typedef struct {
 	float *k;
 	float *v;
-	int	   size;
+	int size;
 } LayerKVCache;
 
 typedef struct {
 	float *sin; // [max_pos][head_dim]
 	float *cos;
-	int	   max_pos;
-	int	   head_dim;
+	int max_pos;
+	int head_dim;
 } rope_cache_t;
 
 struct ctx_t {
-	int		 fd;
-	size_t	 file_size;
-	void	*mapped_data;
+	int fd;
+	size_t file_size;
+	void *mapped_data;
 	uint8_t *fptr;
 
 	uint64_t tensor_count;
@@ -46,18 +53,19 @@ struct ctx_t {
 	uint64_t metadata_kv_count;
 
 	struct gguf_metadata_kv_t *metadata;
-	Tensor					  *tensors;
+	Tensor *tensors;
 
 	struct tfmem_t mem;
-	LayerKVCache  *kv_cache;
-	rope_cache_t  *rope_cache;
+	LayerKVCache *kv_cache;
+	rope_cache_t *rope_cache;
 
 	Qwen3Model *model;
 
 	uint32_t kv_pos;
 
-	TrieNode   *root;
+	TrieNode *root;
 	StringPool *pool;
 };
+
 
 #endif

@@ -12,10 +12,10 @@
 
 int model_create(struct ctx_t *ctx)
 {
-	char	 tensor_name_buffer[256];
+	char tensor_name_buffer[256];
 	uint64_t tensor_mapped = 0;
 	uint64_t size64;
-	void	*raw_weight_ptr;
+	void *raw_weight_ptr;
 
 	ctx->model = malloc(sizeof(Qwen3Model));
 	if (!ctx->model) {
@@ -69,11 +69,11 @@ int model_create(struct ctx_t *ctx)
 	}
 	tensor_mapped++;
 
-#define LOAD_WEIGHT(field, name_fmt_str)                                                                \
-	snprintf(tensor_name_buffer, sizeof(tensor_name_buffer), name_fmt_str, block_idx);                  \
-	if ((ctx->model->layers[block_idx].field = get_tensor(ctx, tensor_name_buffer, &size64)) == NULL) { \
-		goto _tensor_load_error;                                                                        \
-	}                                                                                                   \
+#define LOAD_WEIGHT(field, name_fmt_str)                                                                               \
+	snprintf(tensor_name_buffer, sizeof(tensor_name_buffer), name_fmt_str, block_idx);                             \
+	if ((ctx->model->layers[block_idx].field = get_tensor(ctx, tensor_name_buffer, &size64)) == NULL) {            \
+		goto _tensor_load_error;                                                                               \
+	}                                                                                                              \
 	tensor_mapped++;
 
 	for (uint32_t block_idx = 0; block_idx < ctx->model->num_layers; block_idx++) {
@@ -197,17 +197,17 @@ void model_cleanup(struct ctx_t *ctx)
 
 int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penality)
 {
-	ctx->model->yarn_scale_factor  = yarn_scale_factor;
+	ctx->model->yarn_scale_factor = yarn_scale_factor;
 	ctx->model->repetition_penalty = repetiton_penality;
-	ctx->model->attn_scale		   = 1.0f / sqrtf(ctx->model->head_dim);
+	ctx->model->attn_scale = 1.0f / sqrtf(ctx->model->head_dim);
 
 	printf("Initializing Qwen3 model with the following configuration:\n");
 	printf("Embed Dim: %d, Layers: %d, Heads: %d, KV Heads: %d, Head Dim: %d\n", ctx->model->embed_dim,
-		   ctx->model->num_layers, ctx->model->num_heads, ctx->model->num_kv_heads, ctx->model->head_dim);
+	       ctx->model->num_layers, ctx->model->num_heads, ctx->model->num_kv_heads, ctx->model->head_dim);
 	printf("FFN Dim: %d, Rope Base: %.1f, Seq Len: %d, Vocab: %llu, Yarn Scale: "
-		   "%.2f, eps: %f\n",
-		   ctx->model->ffn_dim, ctx->model->rope_freq_base, ctx->model->seq_length, ctx->model->vocab_size,
-		   ctx->model->yarn_scale_factor, ctx->model->norm_eps);
+	       "%.2f, eps: %f\n",
+	       ctx->model->ffn_dim, ctx->model->rope_freq_base, ctx->model->seq_length, ctx->model->vocab_size,
+	       ctx->model->yarn_scale_factor, ctx->model->norm_eps);
 
 	printf("Initializing Qwen3 model KV cache\n");
 	ctx->kv_cache = calloc(ctx->model->num_layers, sizeof(LayerKVCache));
@@ -248,31 +248,32 @@ int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penal
 
 	rope_cache_init(ctx, ctx->model->seq_length, ctx->model->head_dim, ctx->model->rope_freq_base);
 
-	int q_dim  = ctx->model->num_heads * ctx->model->head_dim;
+	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
 	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
 
-	ctx->mem.hidden_state	  = aligned_alloc(32, ctx->model->embed_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
+	ctx->mem.hidden_state = aligned_alloc(32, ctx->model->embed_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
 	ctx->mem.normed_qkv_input = aligned_alloc(32, ctx->model->embed_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
-	ctx->mem.Q				  = aligned_alloc(32, q_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
-	ctx->mem.K				  = aligned_alloc(32, kv_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
-	ctx->mem.V				  = aligned_alloc(32, kv_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
-	ctx->mem.attn_output	  = aligned_alloc(32, q_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
+	ctx->mem.Q = aligned_alloc(32, q_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
+	ctx->mem.K = aligned_alloc(32, kv_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
+	ctx->mem.V = aligned_alloc(32, kv_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
+	ctx->mem.attn_output = aligned_alloc(32, q_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
 	ctx->mem.attn_proj_output = aligned_alloc(32, ctx->model->embed_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
 	ctx->mem.normed_ffn_input = aligned_alloc(32, ctx->model->embed_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
 	ctx->mem.gate_proj_output = aligned_alloc(32, ctx->model->ffn_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
-	ctx->mem.up_proj_output	  = aligned_alloc(32, ctx->model->ffn_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
-	ctx->mem.ffn_down_output  = aligned_alloc(32, ctx->model->embed_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
-	ctx->mem.logits			  = aligned_alloc(32, ctx->model->vocab_size * sizeof(float));
+	ctx->mem.up_proj_output = aligned_alloc(32, ctx->model->ffn_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
+	ctx->mem.ffn_down_output = aligned_alloc(32, ctx->model->embed_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
+	ctx->mem.logits = aligned_alloc(32, ctx->model->vocab_size * sizeof(float));
 
 	for (int t = 0; t < thread_pool->num_threads; t++) {
-		if ((ctx->mem.attn_scores_buffer[t] = aligned_alloc(32, (long long)ctx->model->seq_length * sizeof(float))) ==
-			NULL)
+		if ((ctx->mem.attn_scores_buffer[t] =
+			     aligned_alloc(32, (long long)ctx->model->seq_length * sizeof(float)))
+		    == NULL)
 			goto _init_error_free_kv_cache;
 	}
 
-	if (!ctx->mem.attn_output || !ctx->mem.attn_proj_output || !ctx->mem.normed_ffn_input ||
-		!ctx->mem.gate_proj_output || !ctx->mem.up_proj_output || !ctx->mem.ffn_down_output || !ctx->mem.Q ||
-		!ctx->mem.K || !ctx->mem.V || !ctx->mem.normed_qkv_input || !ctx->mem.hidden_state || !ctx->mem.logits) {
+	if (!ctx->mem.attn_output || !ctx->mem.attn_proj_output || !ctx->mem.normed_ffn_input
+	    || !ctx->mem.gate_proj_output || !ctx->mem.up_proj_output || !ctx->mem.ffn_down_output || !ctx->mem.Q
+	    || !ctx->mem.K || !ctx->mem.V || !ctx->mem.normed_qkv_input || !ctx->mem.hidden_state || !ctx->mem.logits) {
 		goto _init_error_free_kv_cache;
 	}
 

@@ -148,7 +148,7 @@ int gguf_read_metadata_type_fp64(struct ctx_t *ctx, struct gguf_metadata_kv_t *m
 int gguf_read_metadata_type_string(struct ctx_t *ctx, struct gguf_metadata_kv_t *metadata)
 {
 	uint64_t size;
-	char	*str;
+	char *str;
 
 	size = *(uint64_t *)ctx->fptr;
 	ctx->fptr += sizeof(uint64_t);
@@ -180,7 +180,7 @@ int gguf_read_metadata_type_array(struct ctx_t *ctx, struct gguf_metadata_kv_t *
 
 	size = *(uint64_t *)ctx->fptr;
 	ctx->fptr += sizeof(uint64_t);
-	metadata->size		 = size;
+	metadata->size = size;
 	metadata->arr_offset = ctx->fptr;
 
 	for (i = 0; i < size; i++) {
@@ -203,7 +203,7 @@ int gguf_read_metadata_type_array(struct ctx_t *ctx, struct gguf_metadata_kv_t *
 int gguf_get_metadata_value(struct ctx_t *ctx, char *key, void *value)
 {
 	struct gguf_metadata_kv_t *metadata;
-	uint64_t				   i = 0;
+	uint64_t i = 0;
 
 	for (i = 0; i < ctx->metadata_kv_count; i++) {
 		metadata = &ctx->metadata[i];
@@ -220,7 +220,7 @@ int gguf_get_metadata_value(struct ctx_t *ctx, char *key, void *value)
 int gguf_get_metadata_size(struct ctx_t *ctx, char *key, uint64_t *size)
 {
 	struct gguf_metadata_kv_t *metadata;
-	uint64_t				   i = 0;
+	uint64_t i = 0;
 
 	for (i = 0; i < ctx->metadata_kv_count; i++) {
 		metadata = &ctx->metadata[i];
@@ -238,93 +238,93 @@ int gguf_get_metadata_size(struct ctx_t *ctx, char *key, uint64_t *size)
 char *tensor_get_type_name(uint32_t type)
 {
 	switch (type) {
-		case GGML_TYPE_F32:
-			return "f32";
-			break;
-		case GGML_TYPE_F16:
-			return "f16";
-			break;
-		case GGML_TYPE_Q4_0:
-			return "q4_0";
-			break;
-		case GGML_TYPE_Q4_1:
-			return "q4_1";
-			break;
-		case GGML_TYPE_Q5_0:
-			return "q5_0";
-			break;
-		case GGML_TYPE_Q5_1:
-			return "q5_1";
-			break;
-		case GGML_TYPE_Q8_0:
-			return "q8_0";
-			break;
-		case GGML_TYPE_Q8_1:
-			return "q8_1";
-			break;
-		case GGML_TYPE_Q2_K:
-			return "q2_K";
-			break;
-		case GGML_TYPE_Q3_K:
-			return "q3_K";
-			break;
-		case GGML_TYPE_Q4_K:
-			return "q4_K";
-			break;
-		case GGML_TYPE_Q5_K:
-			return "q5_K";
-			break;
-		case GGML_TYPE_Q6_K:
-			return "q6_K";
-			break;
-		case GGML_TYPE_Q8_K:
-			return "q8_K";
-			break;
-		case GGML_TYPE_IQ2_XXS:
-			return "iq2_XXS";
-			break;
-		case GGML_TYPE_IQ2_XS:
-			return "iq2_XS";
-			break;
-		case GGML_TYPE_IQ3_XXS:
-			return "iq3_XXS";
-			break;
-		case GGML_TYPE_IQ1_S:
-			return "iq1_S";
-			break;
-		case GGML_TYPE_IQ4_NL:
-			return "iq4_NL";
-			break;
-		case GGML_TYPE_IQ3_S:
-			return "iq3_S";
-			break;
-		case GGML_TYPE_IQ2_S:
-			return "iq2_S";
-			break;
-		case GGML_TYPE_IQ4_XS:
-			return "iq4_XS";
-			break;
-		case GGML_TYPE_I8:
-			return "i8";
-			break;
-		case GGML_TYPE_I16:
-			return "i16";
-			break;
-		case GGML_TYPE_I32:
-			return "i32";
-			break;
-		case GGML_TYPE_I64:
-			return "i64";
-			break;
-		case GGML_TYPE_F64:
-			return "f64";
-			break;
-		case GGML_TYPE_IQ1_M:
-			return "iq1_M";
-			break;
-		case GGML_TYPE_BF16:
-			return "bf16";
-			break;
+	case GGML_TYPE_F32:
+		return "f32";
+		break;
+	case GGML_TYPE_F16:
+		return "f16";
+		break;
+	case GGML_TYPE_Q4_0:
+		return "q4_0";
+		break;
+	case GGML_TYPE_Q4_1:
+		return "q4_1";
+		break;
+	case GGML_TYPE_Q5_0:
+		return "q5_0";
+		break;
+	case GGML_TYPE_Q5_1:
+		return "q5_1";
+		break;
+	case GGML_TYPE_Q8_0:
+		return "q8_0";
+		break;
+	case GGML_TYPE_Q8_1:
+		return "q8_1";
+		break;
+	case GGML_TYPE_Q2_K:
+		return "q2_K";
+		break;
+	case GGML_TYPE_Q3_K:
+		return "q3_K";
+		break;
+	case GGML_TYPE_Q4_K:
+		return "q4_K";
+		break;
+	case GGML_TYPE_Q5_K:
+		return "q5_K";
+		break;
+	case GGML_TYPE_Q6_K:
+		return "q6_K";
+		break;
+	case GGML_TYPE_Q8_K:
+		return "q8_K";
+		break;
+	case GGML_TYPE_IQ2_XXS:
+		return "iq2_XXS";
+		break;
+	case GGML_TYPE_IQ2_XS:
+		return "iq2_XS";
+		break;
+	case GGML_TYPE_IQ3_XXS:
+		return "iq3_XXS";
+		break;
+	case GGML_TYPE_IQ1_S:
+		return "iq1_S";
+		break;
+	case GGML_TYPE_IQ4_NL:
+		return "iq4_NL";
+		break;
+	case GGML_TYPE_IQ3_S:
+		return "iq3_S";
+		break;
+	case GGML_TYPE_IQ2_S:
+		return "iq2_S";
+		break;
+	case GGML_TYPE_IQ4_XS:
+		return "iq4_XS";
+		break;
+	case GGML_TYPE_I8:
+		return "i8";
+		break;
+	case GGML_TYPE_I16:
+		return "i16";
+		break;
+	case GGML_TYPE_I32:
+		return "i32";
+		break;
+	case GGML_TYPE_I64:
+		return "i64";
+		break;
+	case GGML_TYPE_F64:
+		return "f64";
+		break;
+	case GGML_TYPE_IQ1_M:
+		return "iq1_M";
+		break;
+	case GGML_TYPE_BF16:
+		return "bf16";
+		break;
 	}
 
 	return NULL;
@@ -333,7 +333,7 @@ char *tensor_get_type_name(uint32_t type)
 
 void gguf_dump_metadata(struct ctx_t *ctx)
 {
-	uint64_t				   i = 0;
+	uint64_t i = 0;
 	struct gguf_metadata_kv_t *metadata;
 	struct gguf_mdata_array_t *array;
 
@@ -344,58 +344,58 @@ void gguf_dump_metadata(struct ctx_t *ctx)
 		printf("kv - #%3llu %-45s ", i, metadata->name);
 
 		switch (metadata->type) {
-			case GGUF_METADATA_VALUE_TYPE_UINT8:
-				printf("u8\t = %u\n", *(uint8_t *)metadata->data);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_UINT8:
+			printf("u8\t = %u\n", *(uint8_t *)metadata->data);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_INT8:
-				printf("i8\t = %i\n", *(int8_t *)metadata->data);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_INT8:
+			printf("i8\t = %i\n", *(int8_t *)metadata->data);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_UINT16:
-				printf("u16\t = %u\n", *(uint16_t *)metadata->data);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_UINT16:
+			printf("u16\t = %u\n", *(uint16_t *)metadata->data);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_INT16:
-				printf("i16\t = %i\n", *(int16_t *)metadata->data);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_INT16:
+			printf("i16\t = %i\n", *(int16_t *)metadata->data);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_UINT32:
-				printf("u32\t = %u\n", *(uint32_t *)metadata->data);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_UINT32:
+			printf("u32\t = %u\n", *(uint32_t *)metadata->data);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_INT32:
-				printf("i32\t = %i\n", *(int32_t *)metadata->data);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_INT32:
+			printf("i32\t = %i\n", *(int32_t *)metadata->data);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_FLOAT32:
-				printf("fp32\t = %lf\n", *(float *)metadata->data);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_FLOAT32:
+			printf("fp32\t = %lf\n", *(float *)metadata->data);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_BOOL:
-				printf("bool\t = %s\n", *(uint8_t *)metadata->data == 0 ? "false" : "true");
-				break;
+		case GGUF_METADATA_VALUE_TYPE_BOOL:
+			printf("bool\t = %s\n", *(uint8_t *)metadata->data == 0 ? "false" : "true");
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_STRING:
-				printf("str\t = %.*s\n", 64, (char *)metadata->data);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_STRING:
+			printf("str\t = %.*s\n", 64, (char *)metadata->data);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_ARRAY:
-				array = (struct gguf_mdata_array_t *)metadata->data;
-				printf("arr\t = \n");
-				break;
+		case GGUF_METADATA_VALUE_TYPE_ARRAY:
+			array = (struct gguf_mdata_array_t *)metadata->data;
+			printf("arr\t = \n");
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_UINT64:
-				printf("u64\t = %llu\n", *(uint64_t *)metadata->data);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_UINT64:
+			printf("u64\t = %llu\n", *(uint64_t *)metadata->data);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_INT64:
-				printf("i64\t = %lli\n", *(int64_t *)metadata->data);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_INT64:
+			printf("i64\t = %lli\n", *(int64_t *)metadata->data);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_FLOAT64:
-				printf("fp64\t = %lf\n", *(double *)metadata->data);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_FLOAT64:
+			printf("fp64\t = %lf\n", *(double *)metadata->data);
+			break;
 		}
 	}
 }
@@ -403,7 +403,7 @@ void gguf_dump_metadata(struct ctx_t *ctx)
 void gguf_free_metadata(struct ctx_t *ctx)
 {
 	struct gguf_metadata_kv_t *metadata;
-	uint64_t				   i;
+	uint64_t i;
 
 	for (i = 0; i < ctx->metadata_kv_count; i++) {
 		metadata = &ctx->metadata[i];
@@ -420,13 +420,14 @@ void gguf_free_metadata(struct ctx_t *ctx)
 
 int gguf_read_metadata(struct ctx_t *ctx)
 {
-	uint64_t				   i;
+	uint64_t i;
 	struct gguf_metadata_kv_t *metadata;
-	uint64_t				   key_len;
-	int						   rc;
+	uint64_t key_len;
+	int rc;
 
 	if ((ctx->metadata =
-			 (struct gguf_metadata_kv_t *)calloc(ctx->metadata_kv_count, sizeof(struct gguf_metadata_kv_t))) == NULL) {
+		     (struct gguf_metadata_kv_t *)calloc(ctx->metadata_kv_count, sizeof(struct gguf_metadata_kv_t)))
+	    == NULL) {
 		perror("error alloc metadata info, OOM\n");
 		return -1;
 	}
@@ -450,59 +451,59 @@ int gguf_read_metadata(struct ctx_t *ctx)
 		ctx->fptr += sizeof(uint32_t);
 
 		switch (metadata->type) {
-			case GGUF_METADATA_VALUE_TYPE_UINT8:
-				rc = gguf_read_metadata_type_uint8(ctx, metadata);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_UINT8:
+			rc = gguf_read_metadata_type_uint8(ctx, metadata);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_INT8:
-				rc = gguf_read_metadata_type_int8(ctx, metadata);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_INT8:
+			rc = gguf_read_metadata_type_int8(ctx, metadata);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_UINT16:
-				rc = gguf_read_metadata_type_uint16(ctx, metadata);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_UINT16:
+			rc = gguf_read_metadata_type_uint16(ctx, metadata);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_INT16:
-				rc = gguf_read_metadata_type_int16(ctx, metadata);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_INT16:
+			rc = gguf_read_metadata_type_int16(ctx, metadata);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_UINT32:
-				rc = gguf_read_metadata_type_uint32(ctx, metadata);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_UINT32:
+			rc = gguf_read_metadata_type_uint32(ctx, metadata);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_INT32:
-				rc = gguf_read_metadata_type_int32(ctx, metadata);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_INT32:
+			rc = gguf_read_metadata_type_int32(ctx, metadata);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_FLOAT32:
-				rc = gguf_read_metadata_type_fp32(ctx, metadata);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_FLOAT32:
+			rc = gguf_read_metadata_type_fp32(ctx, metadata);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_BOOL:
-				rc = gguf_read_metadata_type_uint8(ctx, metadata);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_BOOL:
+			rc = gguf_read_metadata_type_uint8(ctx, metadata);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_STRING:
-				rc = gguf_read_metadata_type_string(ctx, metadata);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_STRING:
+			rc = gguf_read_metadata_type_string(ctx, metadata);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_ARRAY:
-				rc = gguf_read_metadata_type_array(ctx, metadata);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_ARRAY:
+			rc = gguf_read_metadata_type_array(ctx, metadata);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_UINT64:
-				rc = gguf_read_metadata_type_uint64(ctx, metadata);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_UINT64:
+			rc = gguf_read_metadata_type_uint64(ctx, metadata);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_INT64:
-				rc = gguf_read_metadata_type_int64(ctx, metadata);
-				break;
+		case GGUF_METADATA_VALUE_TYPE_INT64:
+			rc = gguf_read_metadata_type_int64(ctx, metadata);
+			break;
 
-			case GGUF_METADATA_VALUE_TYPE_FLOAT64:
-				rc = gguf_read_metadata_type_fp64(ctx, metadata);
-				break;
-			default:
-				rc = -1;
+		case GGUF_METADATA_VALUE_TYPE_FLOAT64:
+			rc = gguf_read_metadata_type_fp64(ctx, metadata);
+			break;
+		default:
+			rc = -1;
 		}
 	}
 
@@ -527,7 +528,7 @@ void dump_tensors(struct ctx_t *ctx)
 		printf("tensor #%4llu name: %32s, ", i, ctx->tensors[i].name);
 		printf("type: %6s, ", tensor_get_type_name(tensor->type));
 		printf("shape: [ %llu,\t%llu,\t%llu,\t%llu ],", tensor->dimensions[0], tensor->dimensions[1],
-			   tensor->dimensions[2], tensor->dimensions[3]);
+		       tensor->dimensions[2], tensor->dimensions[3]);
 		printf("\tsize: %.02f MB, offset: %llu\n", (float)tensor->size / 1024 / 1024, tensor->offset);
 	}
 }
@@ -557,116 +558,116 @@ uint64_t calculate_tensor_size(uint32_t type, uint64_t *dims, uint32_t n_dims)
 		return 0;
 
 	switch (type) {
-		case GGML_TYPE_F32:
-			return n_elements * 4;
-		case GGML_TYPE_F16:
-			return n_elements * 2;
-		case GGML_TYPE_BF16:
-			return n_elements * 2;
-		case GGML_TYPE_I8:
-			return n_elements * 1;
-		case GGML_TYPE_I16:
-			return n_elements * 2;
-		case GGML_TYPE_I32:
-			return n_elements * 4;
-		case GGML_TYPE_I64:
-			return n_elements * 8;
-		case GGML_TYPE_F64:
-			return n_elements * 8;
-		case GGML_TYPE_Q4_0: {
-			const int QK		 = 32;
-			const int block_size = 18; // 2 (delta) + 16 (quants)
-			uint64_t  blocks	 = (n_elements + QK - 1) / QK;
-			return blocks * block_size;
-		}
-		case GGML_TYPE_Q4_1: {
-			const int QK		 = 32;
-			const int block_size = 20; // 2 (delta) + 2 (min) + 16 (quants)
-			uint64_t  blocks	 = (n_elements + QK - 1) / QK;
-			return blocks * block_size;
-		}
-		case GGML_TYPE_Q5_0: {
-			const int QK		 = 32;
-			const int block_size = 22; // 2 (delta) + 4 (qh) + 16 (qs)
-			uint64_t  blocks	 = (n_elements + QK - 1) / QK;
-			return blocks * block_size;
-		}
-		case GGML_TYPE_Q5_1: {
-			const int QK		 = 32;
-			const int block_size = 24; // 2 (delta) + 2 (min) + 4 (qh) + 16 (qs)
-			uint64_t  blocks	 = (n_elements + QK - 1) / QK;
-			return blocks * block_size;
-		}
-		case GGML_TYPE_Q8_0: {
-			const int QK		 = 32;
-			const int block_size = 34; // 2 (delta) + 32 (quants)
-			uint64_t  blocks	 = (n_elements + QK - 1) / QK;
-			return blocks * block_size;
-		}
-		case GGML_TYPE_Q8_1: {
-			const int QK		 = 32;
-			const int block_size = 40; // 4 (delta) + 4 (sum) + 32 (quants)
-			uint64_t  blocks	 = (n_elements + QK - 1) / QK;
-			return blocks * block_size;
-		}
-		case GGML_TYPE_Q2_K: {
-			const int QK_K		 = 256;
-			const int block_size = 84; // 16 (scales) + 64 (quants) + 4 (d, dmin)
-			uint64_t  blocks	 = (n_elements + QK_K - 1) / QK_K;
-			return blocks * block_size;
-		}
-		case GGML_TYPE_Q3_K: {
-			const int QK_K		 = 256;
-			const int block_size = 100; // 32 (hmask) + 64 (qs) + 2 (scales) + 2 (d)
-			uint64_t  blocks	 = (n_elements + QK_K - 1) / QK_K;
-			return blocks * block_size;
-		}
-		case GGML_TYPE_Q4_K: {
-			const int QK_K		 = 256;
-			const int block_size = 148; // 2 (d) + 2 (m) + 128 (qs) + 16 (scales)
-			uint64_t  blocks	 = (n_elements + QK_K - 1) / QK_K;
-			return blocks * block_size;
-		}
-		case GGML_TYPE_Q5_K: {
-			const int QK_K		 = 256;
-			const int block_size = 176; // validated from offsets
-			uint64_t  blocks	 = (n_elements + QK_K - 1) / QK_K;
-			return blocks * block_size;
-		}
-		case GGML_TYPE_Q6_K: {
-			const int QK_K		 = 256;
-			const int block_size = 210; // 128 (ql) + 64 (qh) + 16 (scales) + 2 (d)
-			uint64_t  blocks	 = (n_elements + QK_K - 1) / QK_K;
-			return blocks * block_size;
-		}
-		case GGML_TYPE_Q8_K: {
-			const int QK_K		 = 256;
-			const int block_size = 280; // 256 (qs) + 16 (scales) + 8 (d)
-			uint64_t  blocks	 = (n_elements + QK_K - 1) / QK_K;
-			return blocks * block_size;
-		}
-		case GGML_TYPE_IQ2_XXS:
-		case GGML_TYPE_IQ2_XS:
-		case GGML_TYPE_IQ3_XXS:
-		case GGML_TYPE_IQ1_S:
-		case GGML_TYPE_IQ4_NL:
-		case GGML_TYPE_IQ3_S:
-		case GGML_TYPE_IQ2_S:
-		case GGML_TYPE_IQ4_XS:
-		case GGML_TYPE_IQ1_M: {
-			fprintf(stderr, "Integer quantization type %u not fully supported\n", type);
-			return 0;
-		}
-		default:
-			fprintf(stderr, "Unsupported tensor type: %u\n", type);
-			return 0;
+	case GGML_TYPE_F32:
+		return n_elements * 4;
+	case GGML_TYPE_F16:
+		return n_elements * 2;
+	case GGML_TYPE_BF16:
+		return n_elements * 2;
+	case GGML_TYPE_I8:
+		return n_elements * 1;
+	case GGML_TYPE_I16:
+		return n_elements * 2;
+	case GGML_TYPE_I32:
+		return n_elements * 4;
+	case GGML_TYPE_I64:
+		return n_elements * 8;
+	case GGML_TYPE_F64:
+		return n_elements * 8;
+	case GGML_TYPE_Q4_0: {
+		const int QK = 32;
+		const int block_size = 18; // 2 (delta) + 16 (quants)
+		uint64_t blocks = (n_elements + QK - 1) / QK;
+		return blocks * block_size;
+	}
+	case GGML_TYPE_Q4_1: {
+		const int QK = 32;
+		const int block_size = 20; // 2 (delta) + 2 (min) + 16 (quants)
+		uint64_t blocks = (n_elements + QK - 1) / QK;
+		return blocks * block_size;
+	}
+	case GGML_TYPE_Q5_0: {
+		const int QK = 32;
+		const int block_size = 22; // 2 (delta) + 4 (qh) + 16 (qs)
+		uint64_t blocks = (n_elements + QK - 1) / QK;
+		return blocks * block_size;
+	}
+	case GGML_TYPE_Q5_1: {
+		const int QK = 32;
+		const int block_size = 24; // 2 (delta) + 2 (min) + 4 (qh) + 16 (qs)
+		uint64_t blocks = (n_elements + QK - 1) / QK;
+		return blocks * block_size;
+	}
+	case GGML_TYPE_Q8_0: {
+		const int QK = 32;
+		const int block_size = 34; // 2 (delta) + 32 (quants)
+		uint64_t blocks = (n_elements + QK - 1) / QK;
+		return blocks * block_size;
+	}
+	case GGML_TYPE_Q8_1: {
+		const int QK = 32;
+		const int block_size = 40; // 4 (delta) + 4 (sum) + 32 (quants)
+		uint64_t blocks = (n_elements + QK - 1) / QK;
+		return blocks * block_size;
+	}
+	case GGML_TYPE_Q2_K: {
+		const int QK_K = 256;
+		const int block_size = 84; // 16 (scales) + 64 (quants) + 4 (d, dmin)
+		uint64_t blocks = (n_elements + QK_K - 1) / QK_K;
+		return blocks * block_size;
+	}
+	case GGML_TYPE_Q3_K: {
+		const int QK_K = 256;
+		const int block_size = 100; // 32 (hmask) + 64 (qs) + 2 (scales) + 2 (d)
+		uint64_t blocks = (n_elements + QK_K - 1) / QK_K;
+		return blocks * block_size;
+	}
+	case GGML_TYPE_Q4_K: {
+		const int QK_K = 256;
+		const int block_size = 148; // 2 (d) + 2 (m) + 128 (qs) + 16 (scales)
+		uint64_t blocks = (n_elements + QK_K - 1) / QK_K;
+		return blocks * block_size;
+	}
+	case GGML_TYPE_Q5_K: {
+		const int QK_K = 256;
+		const int block_size = 176; // validated from offsets
+		uint64_t blocks = (n_elements + QK_K - 1) / QK_K;
+		return blocks * block_size;
+	}
+	case GGML_TYPE_Q6_K: {
+		const int QK_K = 256;
+		const int block_size = 210; // 128 (ql) + 64 (qh) + 16 (scales) + 2 (d)
+		uint64_t blocks = (n_elements + QK_K - 1) / QK_K;
+		return blocks * block_size;
+	}
+	case GGML_TYPE_Q8_K: {
+		const int QK_K = 256;
+		const int block_size = 280; // 256 (qs) + 16 (scales) + 8 (d)
+		uint64_t blocks = (n_elements + QK_K - 1) / QK_K;
+		return blocks * block_size;
+	}
+	case GGML_TYPE_IQ2_XXS:
+	case GGML_TYPE_IQ2_XS:
+	case GGML_TYPE_IQ3_XXS:
+	case GGML_TYPE_IQ1_S:
+	case GGML_TYPE_IQ4_NL:
+	case GGML_TYPE_IQ3_S:
+	case GGML_TYPE_IQ2_S:
+	case GGML_TYPE_IQ4_XS:
+	case GGML_TYPE_IQ1_M: {
+		fprintf(stderr, "Integer quantization type %u not fully supported\n", type);
+		return 0;
+	}
+	default:
+		fprintf(stderr, "Unsupported tensor type: %u\n", type);
+		return 0;
 	}
 }
 
 int gguf_map_weights(struct ctx_t *ctx)
 {
 	// Read tensor metadata
-	ctx->tensors		 = (Tensor *)calloc(ctx->tensor_count, sizeof(Tensor));
+	ctx->tensors = (Tensor *)calloc(ctx->tensor_count, sizeof(Tensor));
 	uint64_t data_offset = 0; // Will be set after alignment
 
 	for (uint64_t i = 0; i < ctx->tensor_count; i++) {
@@ -713,8 +714,8 @@ int gguf_map_weights(struct ctx_t *ctx)
 	}
 
 	// Align to 32-byte boundary
-	ctx->fptr				= (uint8_t *)(((uintptr_t)ctx->fptr + 31) & ~31);
-	data_offset				= ctx->fptr - (uint8_t *)ctx->mapped_data;
+	ctx->fptr = (uint8_t *)(((uintptr_t)ctx->fptr + 31) & ~31);
+	data_offset = ctx->fptr - (uint8_t *)ctx->mapped_data;
 	ctx->tensor_data_offset = data_offset;
 
 	// After reading all tensor metadata (name, n_dims, dimensions, type, offset)
@@ -743,8 +744,8 @@ int gguf_map_weights(struct ctx_t *ctx)
 int gguf_read(struct ctx_t *ctx, char *path)
 {
 	struct stat st;
-	uint32_t	magic;
-	uint32_t	version;
+	uint32_t magic;
+	uint32_t version;
 
 	ctx->fd = open(path, O_RDONLY);
 
@@ -813,9 +814,9 @@ static inline bool is_special_token_fast(const char *s, size_t len)
 int gguf_metadata_read_tokens_embed(struct ctx_t *ctx, char *key)
 {
 	struct gguf_metadata_kv_t *metadata;
-	char					   token[512];
-	uint64_t				   i;
-	uint64_t				   str_len;
+	char token[512];
+	uint64_t i;
+	uint64_t str_len;
 
 	for (i = 0; i < ctx->metadata_kv_count; i++) {
 		metadata = &ctx->metadata[i];
@@ -835,7 +836,7 @@ _gguf_metadata_token_embed_found:
 		return -1;
 	}
 
-	ctx->fptr			   = metadata->arr_offset;
+	ctx->fptr = metadata->arr_offset;
 	ctx->model->vocab_size = metadata->size;
 
 	for (i = 0; i < metadata->size; i++) {
@@ -873,8 +874,8 @@ _gguf_metadata_token_embed_found:
 int gguf_metadata_read_merges(struct ctx_t *ctx, char *key)
 {
 	struct gguf_metadata_kv_t *metadata = NULL;
-	char					   merge_str[512];
-	uint64_t				   i, str_len;
+	char merge_str[512];
+	uint64_t i, str_len;
 
 	// 1. Find metadata entry
 	for (i = 0; i < ctx->metadata_kv_count; i++) {
@@ -896,7 +897,7 @@ int gguf_metadata_read_merges(struct ctx_t *ctx, char *key)
 
 	memset((void *)&bpe_merges_map, 0, sizeof(bpe_merge_map_t));
 
-	ctx->fptr				= metadata->arr_offset;
+	ctx->fptr = metadata->arr_offset;
 	ctx->model->merges_size = metadata->size;
 
 	for (i = 0; i < metadata->size; i++) {
@@ -918,8 +919,8 @@ int gguf_metadata_read_merges(struct ctx_t *ctx, char *key)
 			printf("Malformed merge pair: %s\n", merge_str);
 			return -1;
 		}
-		*space			  = '\0';
-		const char *left  = merge_str;
+		*space = '\0';
+		const char *left = merge_str;
 		const char *right = space + 1;
 
 		// 3. Lookup token IDs

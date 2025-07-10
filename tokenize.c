@@ -8,8 +8,8 @@
 #include "tokenize.h"
 #include "main.h"
 
-char			 merge_pool[MAX_SPANS][128];
-bpe_merge_map_t	 bpe_merges_map;
+char merge_pool[MAX_SPANS][128];
+bpe_merge_map_t bpe_merges_map;
 SpecialTokenList special_tokens;
 
 TrieNode *create_node()
@@ -30,7 +30,7 @@ StringPool *create_string_pool(size_t initial_capacity)
 		free(pool);
 		return NULL;
 	}
-	pool->size	   = 0;
+	pool->size = 0;
 	pool->capacity = initial_capacity;
 	return pool;
 }
@@ -38,11 +38,12 @@ StringPool *create_string_pool(size_t initial_capacity)
 int append_to_pool(StringPool *pool, const char *str, size_t len)
 {
 	if (pool->size + len + 1 > pool->capacity) {
-		size_t new_capacity = pool->capacity * 2 > pool->size + len + 1 ? pool->capacity * 2 : pool->size + len + 1;
-		char  *new_data		= (char *)realloc(pool->data, new_capacity);
+		size_t new_capacity =
+			pool->capacity * 2 > pool->size + len + 1 ? pool->capacity * 2 : pool->size + len + 1;
+		char *new_data = (char *)realloc(pool->data, new_capacity);
 		if (!new_data)
 			return 0;
-		pool->data	   = new_data;
+		pool->data = new_data;
 		pool->capacity = new_capacity;
 	}
 	memcpy(pool->data + pool->size, str, len);
@@ -54,8 +55,8 @@ int append_to_pool(StringPool *pool, const char *str, size_t len)
 
 const char *get_token_string(const StringPool *pool, int token_id)
 {
-	const char *ptr	  = pool->data;
-	int			count = 0;
+	const char *ptr = pool->data;
+	int count = 0;
 	if (token_id < 0)
 		return NULL;
 	while (count < token_id) {
@@ -138,7 +139,7 @@ int vocab_lookup_token_id(TrieNode *root, const char *token, size_t len)
 	TrieNode *node = root;
 	for (size_t i = 0; i < len; i++) {
 		unsigned char byte = (unsigned char)token[i];
-		node			   = node->children[byte];
+		node = node->children[byte];
 		if (!node)
 			return -1;
 	}
@@ -157,8 +158,8 @@ static inline uint64_t hash64(uint64_t x)
 
 void bpe_map_insert(bpe_merge_map_t *map, uint64_t key, uint32_t rank)
 {
-	uint64_t h	 = hash64(key);
-	size_t	 idx = h & (BPE_MAP_CAPACITY - 1);
+	uint64_t h = hash64(key);
+	size_t idx = h & (BPE_MAP_CAPACITY - 1);
 	while (map->table[idx].occupied) {
 		if (map->table[idx].key == key) {
 			map->table[idx].rank = rank;
@@ -166,15 +167,15 @@ void bpe_map_insert(bpe_merge_map_t *map, uint64_t key, uint32_t rank)
 		}
 		idx = (idx + 1) & (BPE_MAP_CAPACITY - 1);
 	}
-	map->table[idx].key		 = key;
-	map->table[idx].rank	 = rank;
+	map->table[idx].key = key;
+	map->table[idx].rank = rank;
 	map->table[idx].occupied = true;
 }
 
 bool bpe_map_lookup(const bpe_merge_map_t *map, uint64_t key, uint32_t *out_rank)
 {
-	uint64_t h	 = hash64(key);
-	size_t	 idx = h & (BPE_MAP_CAPACITY - 1);
+	uint64_t h = hash64(key);
+	size_t idx = h & (BPE_MAP_CAPACITY - 1);
 	while (map->table[idx].occupied) {
 		if (map->table[idx].key == key) {
 			*out_rank = map->table[idx].rank;
@@ -187,10 +188,10 @@ bool bpe_map_lookup(const bpe_merge_map_t *map, uint64_t key, uint32_t *out_rank
 
 int tokenize_step(TrieNode *root, const char *input, size_t len, size_t *pos, int *token_id)
 {
-	TrieNode *node			 = root;
-	int		  last_token_id	 = -1;
-	size_t	  last_match_len = 0;
-	size_t	  match_len		 = 0;
+	TrieNode *node = root;
+	int last_token_id = -1;
+	size_t last_match_len = 0;
+	size_t match_len = 0;
 
 	// Ensure we do not go past the input buffer
 	while ((*pos + match_len) < len) {
@@ -203,7 +204,7 @@ int tokenize_step(TrieNode *root, const char *input, size_t len, size_t *pos, in
 		match_len++;
 
 		if (node->token_id != -1) {
-			last_token_id  = node->token_id;
+			last_token_id = node->token_id;
 			last_match_len = match_len;
 		}
 	}
@@ -237,7 +238,7 @@ char *preprocess_input(const char *text, size_t len, size_t *out_len)
 			out[j++] = text[i];
 		}
 	}
-	out[j]	 = '\0'; // Null-terminate the output string
+	out[j] = '\0'; // Null-terminate the output string
 	*out_len = j;
 	return out;
 }
@@ -245,16 +246,18 @@ char *preprocess_input(const char *text, size_t len, size_t *out_len)
 int *tokenize_bpe(struct ctx_t *ctx, const char *text, size_t *num_tokens)
 {
 	TokenChunk chunks[MAX_CHUNKS];
-	int		   chunk_count = 0;
-	size_t	   text_len	   = strlen(text);
-	size_t	   p		   = 0;
+	int chunk_count = 0;
+	size_t text_len = strlen(text);
+	size_t p = 0;
 	while (p < text_len) {
 		bool matched = false;
 		for (int s = 0; s < special_tokens.count; s++) {
 			SpecialToken *sp = &special_tokens.specials[s];
 			if (p + sp->length <= text_len && memcmp(&text[p], sp->text, sp->length) == 0) {
-				chunks[chunk_count++] =
-					(TokenChunk){.ptr = &text[p], .len = sp->length, .is_special = true, .token_id = sp->token_id};
+				chunks[chunk_count++] = (TokenChunk){.ptr = &text[p],
+								     .len = sp->length,
+								     .is_special = true,
+								     .token_id = sp->token_id};
 				p += sp->length;
 				matched = true;
 				break;
@@ -278,39 +281,42 @@ int *tokenize_bpe(struct ctx_t *ctx, const char *text, size_t *num_tokens)
 				p++;
 			}
 			size_t non_special_len = p - start;
-			chunks[chunk_count++]  = (TokenChunk){.ptr = &text[start], .len = non_special_len, .is_special = false};
+			chunks[chunk_count++] =
+				(TokenChunk){.ptr = &text[start], .len = non_special_len, .is_special = false};
 		}
 	}
 
 	BpeTokenSpan spans[MAX_SPANS];
-	int			 span_count = 0;
+	int span_count = 0;
 
 	for (int i = 0; i < chunk_count; i++) {
 		TokenChunk *c = &chunks[i];
 
 		if (c->is_special) {
-			spans[span_count++] =
-				(BpeTokenSpan){.token_id = c->token_id, .start = c->ptr, .length = c->len, .is_special = true};
+			spans[span_count++] = (BpeTokenSpan){
+				.token_id = c->token_id, .start = c->ptr, .length = c->len, .is_special = true};
 			continue;
 		}
 
 		size_t pre_len;
-		char  *processed = preprocess_input(c->ptr, c->len, &pre_len);
+		char *processed = preprocess_input(c->ptr, c->len, &pre_len);
 		if (!processed)
 			return NULL;
 
 		size_t p = 0;
 		while (p < pre_len) {
-			int	   token_id;
+			int token_id;
 			size_t prev_p = p;
 			if (tokenize_step(ctx->root, processed, pre_len, &p, &token_id)) {
-				spans[span_count++] = (BpeTokenSpan){.token_id	 = token_id,
-													 .start		 = &processed[prev_p],
-													 .length	 = (int)(p - prev_p),
-													 .is_special = false};
+				spans[span_count++] = (BpeTokenSpan){.token_id = token_id,
+								     .start = &processed[prev_p],
+								     .length = (int)(p - prev_p),
+								     .is_special = false};
 			} else {
-				spans[span_count++] = (BpeTokenSpan){
-					.token_id = (unsigned char)processed[p], .start = &processed[p], .length = 1, .is_special = false};
+				spans[span_count++] = (BpeTokenSpan){.token_id = (unsigned char)processed[p],
+								     .start = &processed[p],
+								     .length = 1,
+								     .is_special = false};
 				p++;
 			}
 		}
@@ -335,7 +341,7 @@ int *tokenize_bpe(struct ctx_t *ctx, const char *text, size_t *num_tokens)
 			if (bpe_map_lookup(&bpe_merges_map, key, &rank)) {
 				if (rank < best_rank) {
 					best_rank = rank;
-					best_idx  = i;
+					best_idx = i;
 				}
 			}
 		}
@@ -360,9 +366,9 @@ int *tokenize_bpe(struct ctx_t *ctx, const char *text, size_t *num_tokens)
 			break;
 		}
 
-		spans[best_idx].token_id   = merged_id;
-		spans[best_idx].start	   = buf;
-		spans[best_idx].length	   = merged_len;
+		spans[best_idx].token_id = merged_id;
+		spans[best_idx].start = buf;
+		spans[best_idx].length = merged_len;
 		spans[best_idx].is_special = false;
 
 		for (int i = best_idx + 1; i < span_count - 1; i++) {

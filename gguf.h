@@ -38,61 +38,61 @@ enum gguf_metadata_value_type {
 };
 
 enum ggml_type {
-	GGML_TYPE_F32	  = 0,
-	GGML_TYPE_F16	  = 1,
-	GGML_TYPE_Q4_0	  = 2,
-	GGML_TYPE_Q4_1	  = 3,
-	GGML_TYPE_Q5_0	  = 6,
-	GGML_TYPE_Q5_1	  = 7,
-	GGML_TYPE_Q8_0	  = 8,
-	GGML_TYPE_Q8_1	  = 9,
-	GGML_TYPE_Q2_K	  = 10,
-	GGML_TYPE_Q3_K	  = 11,
-	GGML_TYPE_Q4_K	  = 12,
-	GGML_TYPE_Q5_K	  = 13,
-	GGML_TYPE_Q6_K	  = 14,
-	GGML_TYPE_Q8_K	  = 15,
+	GGML_TYPE_F32 = 0,
+	GGML_TYPE_F16 = 1,
+	GGML_TYPE_Q4_0 = 2,
+	GGML_TYPE_Q4_1 = 3,
+	GGML_TYPE_Q5_0 = 6,
+	GGML_TYPE_Q5_1 = 7,
+	GGML_TYPE_Q8_0 = 8,
+	GGML_TYPE_Q8_1 = 9,
+	GGML_TYPE_Q2_K = 10,
+	GGML_TYPE_Q3_K = 11,
+	GGML_TYPE_Q4_K = 12,
+	GGML_TYPE_Q5_K = 13,
+	GGML_TYPE_Q6_K = 14,
+	GGML_TYPE_Q8_K = 15,
 	GGML_TYPE_IQ2_XXS = 16,
-	GGML_TYPE_IQ2_XS  = 17,
+	GGML_TYPE_IQ2_XS = 17,
 	GGML_TYPE_IQ3_XXS = 18,
-	GGML_TYPE_IQ1_S	  = 19,
-	GGML_TYPE_IQ4_NL  = 20,
-	GGML_TYPE_IQ3_S	  = 21,
-	GGML_TYPE_IQ2_S	  = 22,
-	GGML_TYPE_IQ4_XS  = 23,
-	GGML_TYPE_I8	  = 24,
-	GGML_TYPE_I16	  = 25,
-	GGML_TYPE_I32	  = 26,
-	GGML_TYPE_I64	  = 27,
-	GGML_TYPE_F64	  = 28,
-	GGML_TYPE_IQ1_M	  = 29,
-	GGML_TYPE_BF16	  = 30,
-	GGML_TYPE_TQ1_0	  = 34,
-	GGML_TYPE_TQ2_0	  = 35,
-	GGML_TYPE_COUNT	  = 39,
+	GGML_TYPE_IQ1_S = 19,
+	GGML_TYPE_IQ4_NL = 20,
+	GGML_TYPE_IQ3_S = 21,
+	GGML_TYPE_IQ2_S = 22,
+	GGML_TYPE_IQ4_XS = 23,
+	GGML_TYPE_I8 = 24,
+	GGML_TYPE_I16 = 25,
+	GGML_TYPE_I32 = 26,
+	GGML_TYPE_I64 = 27,
+	GGML_TYPE_F64 = 28,
+	GGML_TYPE_IQ1_M = 29,
+	GGML_TYPE_BF16 = 30,
+	GGML_TYPE_TQ1_0 = 34,
+	GGML_TYPE_TQ2_0 = 35,
+	GGML_TYPE_COUNT = 39,
 };
 
 typedef struct Tensor {
-	char	*name;
+	char *name;
 	uint64_t dimensions[4];
 	uint32_t n_dims;
 	uint32_t type;
-	void	*data;
+	void *data;
 	uint64_t offset;
 	uint64_t size;
 } Tensor;
 
 struct gguf_metadata_kv_t {
-	char	*name;
+	char *name;
 	uint32_t type;
 	uint64_t size;
-	void	*arr_offset;
-	void	*data;
+	void *arr_offset;
+	void *data;
 };
 
 struct ctx_t;
 
-extern int	gguf_read(struct ctx_t *ctx, char *path);
+extern int gguf_read(struct ctx_t *ctx, char *path);
 extern void gguf_close(struct ctx_t *ctx);
 
 extern int gguf_read_metadata_type_string(struct ctx_t *ctx, struct gguf_metadata_kv_t *metadata);
@@ -101,7 +101,7 @@ extern int gguf_get_metadata_size(struct ctx_t *ctx, char *key, uint64_t *size);
 extern int gguf_metadata_read_tokens_embed(struct ctx_t *ctx, char *key);
 extern int gguf_metadata_read_merges(struct ctx_t *ctx, char *key);
 
-extern int	 gguf_map_weights(struct ctx_t *ctx);
+extern int gguf_map_weights(struct ctx_t *ctx);
 extern void *get_tensor(struct ctx_t *ctx_ptr, const char *name, uint64_t *size_bytes);
 
 extern void dump_tensors(struct ctx_t *ctx);

@@ -11,7 +11,7 @@ inline float bf16_to_fp32(uint16_t bf16)
 {
 	union {
 		uint32_t u;
-		float	 f;
+		float f;
 	} converter;
 	converter.u = ((uint32_t)bf16) << 16;
 	return converter.f;
@@ -22,7 +22,7 @@ float *convert_bf16_to_f32(void *bf16_ptr, size_t count)
 	if (!bf16_ptr)
 		return NULL;
 	uint16_t *bf16 = (uint16_t *)bf16_ptr;
-	float	 *f32  = malloc(count * sizeof(float));
+	float *f32 = malloc(count * sizeof(float));
 	if (!f32) {
 		fprintf(stderr, "Failed to allocate memory for FP32 conversion.\n");
 		return NULL;
@@ -37,21 +37,21 @@ float *convert_bf16_to_f32(void *bf16_ptr, size_t count)
 void rms_norm_avx2(float *__restrict o, const float *__restrict x, const float *__restrict weight, int size, float eps)
 {
 	__m256 sum = _mm256_setzero_ps();
-	int	   i   = 0;
+	int i = 0;
 
 	// Sum of squares using 8-wide FMA
 	for (; i <= size - 8; i += 8) {
 		__m256 x_vec = _mm256_loadu_ps(&x[i]);
-		sum			 = _mm256_fmadd_ps(x_vec, x_vec, sum);
+		sum = _mm256_fmadd_ps(x_vec, x_vec, sum);
 	}
 
 	// Horizontal reduction of 8 floats
-	__m128 low	  = _mm256_castps256_ps128(sum);
-	__m128 high	  = _mm256_extractf128_ps(sum, 1);
+	__m128 low = _mm256_castps256_ps128(sum);
+	__m128 high = _mm256_extractf128_ps(sum, 1);
 	__m128 sum128 = _mm_add_ps(low, high);
-	sum128		  = _mm_hadd_ps(sum128, sum128);
-	sum128		  = _mm_hadd_ps(sum128, sum128);
-	float ss	  = _mm_cvtss_f32(sum128);
+	sum128 = _mm_hadd_ps(sum128, sum128);
+	sum128 = _mm_hadd_ps(sum128, sum128);
+	float ss = _mm_cvtss_f32(sum128);
 
 	// Tail loop
 	for (; i < size; ++i) {
@@ -61,13 +61,13 @@ void rms_norm_avx2(float *__restrict o, const float *__restrict x, const float *
 	float inv_rms = 1.0f / sqrtf(ss / size + eps);
 
 	// Scale + weight
-	i			 = 0;
+	i = 0;
 	__m256 scale = _mm256_set1_ps(inv_rms);
 	for (; i <= size - 8; i += 8) {
 		__m256 x_vec = _mm256_loadu_ps(&x[i]);
 		__m256 w_vec = _mm256_loadu_ps(&weight[i]);
-		__m256 out	 = _mm256_mul_ps(x_vec, w_vec);
-		out			 = _mm256_mul_ps(out, scale);
+		__m256 out = _mm256_mul_ps(x_vec, w_vec);
+		out = _mm256_mul_ps(out, scale);
 		_mm256_storeu_ps(&o[i], out);
 	}
 
@@ -93,32 +93,32 @@ inline __m256 load_bf16_as_f32(const uint16_t *src)
 }
 
 void mat_vec_bf16_avx2_row(const float *__restrict x, const uint16_t *__restrict w_bf16, float *__restrict o,
-						   int in_dim, int start_row, int end_row)
+			   int in_dim, int start_row, int end_row)
 {
 	for (int i = start_row; i < end_row; i++) {
 		const uint16_t *w_row = &w_bf16[i * in_dim];
 
 		__m256 acc = _mm256_setzero_ps();
-		int	   j   = 0;
+		int j = 0;
 		for (; j <= in_dim - 8; j += 8) {
-			__m256 w	 = load_bf16_as_f32(&w_row[j]);
+			__m256 w = load_bf16_as_f32(&w_row[j]);
 			__m256 x_vec = _mm256_loadu_ps(&x[j]);
-			acc			 = _mm256_fmadd_ps(x_vec, w, acc);
+			acc = _mm256_fmadd_ps(x_vec, w, acc);
 		}
 
 		// Horizontally add 8 floats
-		__m128 low	  = _mm256_castps256_ps128(acc);
-		__m128 high	  = _mm256_extractf128_ps(acc, 1);
+		__m128 low = _mm256_castps256_ps128(acc);
+		__m128 high = _mm256_extractf128_ps(acc, 1);
 		__m128 sum128 = _mm_add_ps(low, high);
-		sum128		  = _mm_hadd_ps(sum128, sum128);
-		sum128		  = _mm_hadd_ps(sum128, sum128);
-		float sum	  = _mm_cvtss_f32(sum128);
+		sum128 = _mm_hadd_ps(sum128, sum128);
+		sum128 = _mm_hadd_ps(sum128, sum128);
+		float sum = _mm_cvtss_f32(sum128);
 
 		// Tail
 		for (; j < in_dim; j++) {
 			uint32_t w_bits = ((uint32_t)w_row[j]) << 16;
-			float	 w		= *((float *)&w_bits);
-			sum				= fmaf(x[j], w, sum);
+			float w = *((float *)&w_bits);
+			sum = fmaf(x[j], w, sum);
 		}
 
 		o[i] = sum;
@@ -126,32 +126,32 @@ void mat_vec_bf16_avx2_row(const float *__restrict x, const uint16_t *__restrict
 }
 
 void mat_vec_bf16_avx2(const float *__restrict x, const uint16_t *__restrict w_bf16, float *__restrict o, int in_dim,
-					   int out_dim)
+		       int out_dim)
 {
 	for (int i = 0; i < out_dim; i++) {
 		const uint16_t *w_row = &w_bf16[i * in_dim];
 
 		__m256 acc = _mm256_setzero_ps();
-		int	   j   = 0;
+		int j = 0;
 		for (; j <= in_dim - 8; j += 8) {
-			__m256 w	 = load_bf16_as_f32(&w_row[j]);
+			__m256 w = load_bf16_as_f32(&w_row[j]);
 			__m256 x_vec = _mm256_loadu_ps(&x[j]);
-			acc			 = _mm256_fmadd_ps(x_vec, w, acc);
+			acc = _mm256_fmadd_ps(x_vec, w, acc);
 		}
 
 		// Horizontally add 8 floats
-		__m128 low	  = _mm256_castps256_ps128(acc);
-		__m128 high	  = _mm256_extractf128_ps(acc, 1);
+		__m128 low = _mm256_castps256_ps128(acc);
+		__m128 high = _mm256_extractf128_ps(acc, 1);
 		__m128 sum128 = _mm_add_ps(low, high);
-		sum128		  = _mm_hadd_ps(sum128, sum128);
-		sum128		  = _mm_hadd_ps(sum128, sum128);
-		float sum	  = _mm_cvtss_f32(sum128);
+		sum128 = _mm_hadd_ps(sum128, sum128);
+		sum128 = _mm_hadd_ps(sum128, sum128);
+		float sum = _mm_cvtss_f32(sum128);
 
 		// Tail
 		for (; j < in_dim; j++) {
 			uint32_t w_bits = ((uint32_t)w_row[j]) << 16;
-			float	 w		= *((float *)&w_bits);
-			sum				= fmaf(x[j], w, sum);
+			float w = *((float *)&w_bits);
+			sum = fmaf(x[j], w, sum);
 		}
 
 		o[i] = sum;
@@ -161,22 +161,22 @@ void mat_vec_bf16_avx2(const float *__restrict x, const uint16_t *__restrict w_b
 float dot_product_f32_avx2(const float *__restrict a, const float *__restrict b, int size)
 {
 	__m256 sum_vec = _mm256_setzero_ps(); // Initialize 8-lane sum to zero
-	int	   i;
+	int i;
 
 	// Process 8 elements at a time
 	for (i = 0; i <= size - 8; i += 8) {
-		__m256 a_vec = _mm256_loadu_ps(a + i); // Unaligned load of 8 floats from a
-		__m256 b_vec = _mm256_loadu_ps(b + i); // Unaligned load of 8 floats from b
-		sum_vec		 = _mm256_fmadd_ps(a_vec, b_vec, sum_vec); // sum += a * b
+		__m256 a_vec = _mm256_loadu_ps(a + i);		  // Unaligned load of 8 floats from a
+		__m256 b_vec = _mm256_loadu_ps(b + i);		  // Unaligned load of 8 floats from b
+		sum_vec = _mm256_fmadd_ps(a_vec, b_vec, sum_vec); // sum += a * b
 	}
 
 	// Horizontal sum of 8 lanes
-	__m128 sum_low	= _mm256_castps256_ps128(sum_vec); // Lower 4 lanes
+	__m128 sum_low = _mm256_castps256_ps128(sum_vec);    // Lower 4 lanes
 	__m128 sum_high = _mm256_extractf128_ps(sum_vec, 1); // Upper 4 lanes
-	__m128 sum_4	= _mm_add_ps(sum_low, sum_high); // Sum lower + upper
-	__m128 sum_2	= _mm_hadd_ps(sum_4, sum_4); // Horizontal add: [s0+s1, s2+s3, ...]
-	__m128 sum_1	= _mm_hadd_ps(sum_2, sum_2); // Final sum: [s0+s1+s2+s3, ...]
-	float  sum		= _mm_cvtss_f32(sum_1); // Extract single float
+	__m128 sum_4 = _mm_add_ps(sum_low, sum_high);	     // Sum lower + upper
+	__m128 sum_2 = _mm_hadd_ps(sum_4, sum_4);	     // Horizontal add: [s0+s1, s2+s3, ...]
+	__m128 sum_1 = _mm_hadd_ps(sum_2, sum_2);	     // Final sum: [s0+s1+s2+s3, ...]
+	float sum = _mm_cvtss_f32(sum_1);		     // Extract single float
 
 	// Handle remaining elements (size % 8)
 	for (; i < size; i++) {
@@ -190,22 +190,22 @@ void mat_vec_avx2(const float *x, const float *w, float *o, int in_dim, int out_
 {
 	for (int i = 0; i < out_dim; i++) {
 		const float *w_row = &w[i * in_dim];
-		__m256		 acc   = _mm256_setzero_ps();
+		__m256 acc = _mm256_setzero_ps();
 
 		int j = 0;
 		for (; j <= in_dim - 8; j += 8) {
 			__m256 w_vec = _mm256_loadu_ps(&w_row[j]); // 8 floats from weight row
-			__m256 x_vec = _mm256_loadu_ps(&x[j]); // 8 floats from input vector
-			acc			 = _mm256_fmadd_ps(x_vec, w_vec, acc); // acc += x * w
+			__m256 x_vec = _mm256_loadu_ps(&x[j]);	   // 8 floats from input vector
+			acc = _mm256_fmadd_ps(x_vec, w_vec, acc);  // acc += x * w
 		}
 
 		// Horizontal sum of acc
-		__m128 low	  = _mm256_castps256_ps128(acc);
-		__m128 high	  = _mm256_extractf128_ps(acc, 1);
+		__m128 low = _mm256_castps256_ps128(acc);
+		__m128 high = _mm256_extractf128_ps(acc, 1);
 		__m128 sum128 = _mm_add_ps(low, high);
-		sum128		  = _mm_hadd_ps(sum128, sum128);
-		sum128		  = _mm_hadd_ps(sum128, sum128);
-		float sum	  = _mm_cvtss_f32(sum128);
+		sum128 = _mm_hadd_ps(sum128, sum128);
+		sum128 = _mm_hadd_ps(sum128, sum128);
+		float sum = _mm_cvtss_f32(sum128);
 
 		// Tail
 		for (; j < in_dim; j++) {
@@ -220,22 +220,22 @@ void mat_vec_avx2_row(const float *x, const float *w, float *o, int in_dim, int 
 {
 	for (int i = start_row; i < end_row; i++) {
 		const float *w_row = &w[i * in_dim];
-		__m256		 acc   = _mm256_setzero_ps();
+		__m256 acc = _mm256_setzero_ps();
 
 		int j = 0;
 		for (; j <= in_dim - 8; j += 8) {
 			__m256 w_vec = _mm256_loadu_ps(&w_row[j]); // 8 floats from weight row
-			__m256 x_vec = _mm256_loadu_ps(&x[j]); // 8 floats from input vector
-			acc			 = _mm256_fmadd_ps(x_vec, w_vec, acc); // acc += x * w
+			__m256 x_vec = _mm256_loadu_ps(&x[j]);	   // 8 floats from input vector
+			acc = _mm256_fmadd_ps(x_vec, w_vec, acc);  // acc += x * w
 		}
 
 		// Horizontal sum of acc
-		__m128 low	  = _mm256_castps256_ps128(acc);
-		__m128 high	  = _mm256_extractf128_ps(acc, 1);
+		__m128 low = _mm256_castps256_ps128(acc);
+		__m128 high = _mm256_extractf128_ps(acc, 1);
 		__m128 sum128 = _mm_add_ps(low, high);
-		sum128		  = _mm_hadd_ps(sum128, sum128);
-		sum128		  = _mm_hadd_ps(sum128, sum128);
-		float sum	  = _mm_cvtss_f32(sum128);
+		sum128 = _mm_hadd_ps(sum128, sum128);
+		sum128 = _mm_hadd_ps(sum128, sum128);
+		float sum = _mm_cvtss_f32(sum128);
 
 		// Tail
 		for (; j < in_dim; j++) {
@@ -248,7 +248,7 @@ void mat_vec_avx2_row(const float *x, const float *w, float *o, int in_dim, int 
 #endif
 
 void mat_vec_bf16_row(const float *__restrict x, const uint16_t *__restrict w_bf16, float *__restrict o, int in_dim,
-					  int start_row, int end_row)
+		      int start_row, int end_row)
 {
 #ifdef CONFIG_ENABLE_AVX2
 	if (__builtin_cpu_supports("avx2")) {
@@ -256,8 +256,8 @@ void mat_vec_bf16_row(const float *__restrict x, const uint16_t *__restrict w_bf
 	}
 #endif
 	for (int i = start_row; i < end_row; i++) {
-		float			sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
-		int				j	  = 0;
+		float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
+		int j = 0;
 		const uint16_t *w_row = &w_bf16[i * in_dim];
 
 		for (; j <= in_dim - 4; j += 4) {
@@ -282,8 +282,8 @@ void mat_vec_bf16_row(const float *__restrict x, const uint16_t *__restrict w_bf
 		// Tail case
 		for (; j < in_dim; j++) {
 			uint32_t w_bits = ((uint32_t)w_row[j]) << 16;
-			float	 w		= *((float *)&w_bits);
-			sum				= fmaf(x[j], w, sum);
+			float w = *((float *)&w_bits);
+			sum = fmaf(x[j], w, sum);
 		}
 
 		o[i] = sum;
@@ -291,7 +291,7 @@ void mat_vec_bf16_row(const float *__restrict x, const uint16_t *__restrict w_bf
 }
 
 void mat_vec_bf16(const float *__restrict x, const uint16_t *__restrict w_bf16, float *__restrict o, int in_dim,
-				  int out_dim)
+		  int out_dim)
 {
 #ifdef CONFIG_ENABLE_AVX2
 	if (__builtin_cpu_supports("avx2")) {
@@ -299,8 +299,8 @@ void mat_vec_bf16(const float *__restrict x, const uint16_t *__restrict w_bf16, 
 	}
 #endif
 	for (int i = 0; i < out_dim; i++) {
-		float			sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
-		int				j	  = 0;
+		float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
+		int j = 0;
 		const uint16_t *w_row = &w_bf16[i * in_dim];
 
 		for (; j <= in_dim - 4; j += 4) {
@@ -325,8 +325,8 @@ void mat_vec_bf16(const float *__restrict x, const uint16_t *__restrict w_bf16, 
 		// Tail case
 		for (; j < in_dim; j++) {
 			uint32_t w_bits = ((uint32_t)w_row[j]) << 16;
-			float	 w		= *((float *)&w_bits);
-			sum				= fmaf(x[j], w, sum);
+			float w = *((float *)&w_bits);
+			sum = fmaf(x[j], w, sum);
 		}
 
 		o[i] = sum;
@@ -334,7 +334,7 @@ void mat_vec_bf16(const float *__restrict x, const uint16_t *__restrict w_bf16, 
 }
 
 void mat_vec_row(const float *__restrict x, const float *__restrict w, float *__restrict o, int in_dim, int start_row,
-				 int end_row)
+		 int end_row)
 {
 #ifdef CONFIG_ENABLE_AVX2
 	if (__builtin_cpu_supports("avx2")) {
@@ -343,7 +343,7 @@ void mat_vec_row(const float *__restrict x, const float *__restrict w, float *__
 #endif
 	for (int i = start_row; i < end_row; i++) {
 		float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
-		int	  j = 0;
+		int j = 0;
 		for (; j <= in_dim - 4; j += 4) {
 			sum0 += x[j] * w[i * in_dim + j];
 			sum1 += x[j + 1] * w[i * in_dim + j + 1];
@@ -368,7 +368,7 @@ void mat_vec(const float *__restrict x, const float *__restrict w, float *__rest
 #endif
 	for (int i = 0; i < out_dim; i++) {
 		float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
-		int	  j = 0;
+		int j = 0;
 		for (; j <= in_dim - 4; j += 4) {
 			sum0 += x[j] * w[i * in_dim + j];
 			sum1 += x[j + 1] * w[i * in_dim + j + 1];
@@ -420,7 +420,7 @@ void parallel_mat_vec_bf16(const float *x, const uint16_t *w_bf16, float *o, int
 
 	for (int t = 0; t < num_threads; t++) {
 		int start_row = t * rows_per_thread;
-		int end_row	  = start_row + rows_per_thread;
+		int end_row = start_row + rows_per_thread;
 
 		if (start_row >= out_dim) {
 			break; // No more rows to process.
@@ -466,7 +466,7 @@ void parallel_mat_vec(const float *x, const float *w, float *o, int in_dim, int 
 
 	for (int t = 0; t < num_threads; t++) {
 		int start_row = t * rows_per_thread;
-		int end_row	  = start_row + rows_per_thread;
+		int end_row = start_row + rows_per_thread;
 
 		if (start_row >= out_dim) {
 			break; // No more rows to process.
@@ -482,7 +482,8 @@ void parallel_mat_vec(const float *x, const float *w, float *o, int in_dim, int 
 			continue;
 		}
 
-		*task = (mat_vec_task_t){.x = x, .w = w, .o = o, .in_dim = in_dim, .start_row = start_row, .end_row = end_row};
+		*task = (mat_vec_task_t){
+			.x = x, .w = w, .o = o, .in_dim = in_dim, .start_row = start_row, .end_row = end_row};
 
 		thread_pool_submit(thread_pool, process_mat_vec_task, task);
 	}
@@ -495,7 +496,7 @@ static void process_mat_mat_task(void *arg)
 	mat_mat_task_t *task = (mat_mat_task_t *)arg;
 	for (int i = task->start_row; i < task->end_row; ++i) {
 		const float *x_row = task->X + (long long)i * task->in_dim;
-		float		*o_row = task->O + (long long)i * task->out_dim;
+		float *o_row = task->O + (long long)i * task->out_dim;
 		// We call the original mat_vec, not the parallel version,
 		// because the parallelism is now handled at this higher level.
 		mat_vec_bf16(x_row, task->W, o_row, task->in_dim, task->out_dim);
@@ -504,7 +505,7 @@ static void process_mat_mat_task(void *arg)
 }
 
 void parallel_mat_mat_bf16(const float *X, const uint16_t *W, float *O, int prompt_len, int in_dim, int out_dim,
-						   int use_threads)
+			   int use_threads)
 {
 	if (prompt_len > 1) {
 		if (use_threads == 0) {
@@ -515,12 +516,12 @@ void parallel_mat_mat_bf16(const float *X, const uint16_t *W, float *O, int prom
 			return;
 		}
 
-		int num_threads		= thread_pool->num_threads;
+		int num_threads = thread_pool->num_threads;
 		int rows_per_thread = (prompt_len + num_threads - 1) / num_threads;
 
 		for (int t = 0; t < num_threads; t++) {
 			int start_row = t * rows_per_thread;
-			int end_row	  = start_row + rows_per_thread;
+			int end_row = start_row + rows_per_thread;
 
 			if (start_row >= prompt_len) {
 				break;
@@ -536,13 +537,13 @@ void parallel_mat_mat_bf16(const float *X, const uint16_t *W, float *O, int prom
 			}
 
 			*task = (mat_mat_task_t){
-				.X			 = X,
-				.W			 = W,
-				.O			 = O,
-				.in_dim		 = in_dim,
-				.out_dim	 = out_dim,
-				.start_row	 = start_row,
-				.end_row	 = end_row,
+				.X = X,
+				.W = W,
+				.O = O,
+				.in_dim = in_dim,
+				.out_dim = out_dim,
+				.start_row = start_row,
+				.end_row = end_row,
 				.use_threads = 0 // The sub-task uses a sequential mat-vec
 			};
 

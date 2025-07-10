@@ -21,10 +21,10 @@ thread_pool_t *thread_pool_create(int num_threads)
 		return NULL;
 
 	pool->task_queue_count = 0;
-	pool->task_head		   = 0;
-	pool->task_tail		   = 0;
-	pool->running		   = true;
-	pool->num_threads	   = num_threads;
+	pool->task_head = 0;
+	pool->task_tail = 0;
+	pool->running = true;
+	pool->num_threads = num_threads;
 	// --- FIX: Initialize new members ---
 	pool->active_tasks = 0;
 
@@ -60,7 +60,7 @@ static void *thread_pool_worker(void *arg)
 		}
 
 		// Get task
-		task_t task		= pool->tasks[pool->task_head];
+		task_t task = pool->tasks[pool->task_head];
 		pool->task_head = (pool->task_head + 1) % MAX_TASKS;
 		atomic_fetch_sub(&pool->task_queue_count, 1);
 
@@ -97,7 +97,7 @@ void thread_pool_submit(thread_pool_t *pool, task_func_t func, void *arg)
 
 	// Add task
 	pool->tasks[pool->task_tail] = (task_t){func, arg};
-	pool->task_tail				 = (pool->task_tail + 1) % MAX_TASKS;
+	pool->task_tail = (pool->task_tail + 1) % MAX_TASKS;
 	atomic_fetch_add(&pool->task_queue_count, 1);
 
 	// --- FIX: Increment active task counter ---
