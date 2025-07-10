@@ -25,13 +25,11 @@ thread_pool_t *thread_pool_create(int num_threads)
 	pool->task_tail = 0;
 	pool->running = true;
 	pool->num_threads = num_threads;
-	// --- FIX: Initialize new members ---
 	pool->active_tasks = 0;
 
 	pthread_mutex_init(&pool->mutex, NULL);
 	pthread_cond_init(&pool->cond_not_empty, NULL);
 	pthread_cond_init(&pool->cond_not_full, NULL);
-	// --- FIX: Initialize new condition variable ---
 	pthread_cond_init(&pool->cond_all_done, NULL);
 
 	for (int i = 0; i < num_threads; i++) {
@@ -72,7 +70,6 @@ static void *thread_pool_worker(void *arg)
 			task.func(task.arg);
 		}
 
-		// --- FIX: Signal task completion ---
 		pthread_mutex_lock(&pool->mutex);
 		atomic_fetch_sub(&pool->active_tasks, 1);
 		if (atomic_load(&pool->active_tasks) == 0) {
@@ -100,7 +97,6 @@ void thread_pool_submit(thread_pool_t *pool, task_func_t func, void *arg)
 	pool->task_tail = (pool->task_tail + 1) % MAX_TASKS;
 	atomic_fetch_add(&pool->task_queue_count, 1);
 
-	// --- FIX: Increment active task counter ---
 	atomic_fetch_add(&pool->active_tasks, 1);
 
 	pthread_cond_signal(&pool->cond_not_empty);
@@ -110,7 +106,6 @@ void thread_pool_submit(thread_pool_t *pool, task_func_t func, void *arg)
 // Wait for all tasks to complete
 void thread_pool_wait(thread_pool_t *pool)
 {
-	// --- FIX: Use condition variable for a robust, non-busy wait ---
 	pthread_mutex_lock(&pool->mutex);
 	while (atomic_load(&pool->active_tasks) > 0) {
 		pthread_cond_wait(&pool->cond_all_done, &pool->mutex);
@@ -139,7 +134,7 @@ void thread_pool_destroy(thread_pool_t *pool)
 	pthread_mutex_destroy(&pool->mutex);
 	pthread_cond_destroy(&pool->cond_not_empty);
 	pthread_cond_destroy(&pool->cond_not_full);
-	// --- FIX: Destroy the new condition variable ---
+
 	pthread_cond_destroy(&pool->cond_all_done);
 	free(pool);
 }

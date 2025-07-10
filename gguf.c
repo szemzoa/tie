@@ -807,7 +807,6 @@ void gguf_close(struct ctx_t *ctx)
 
 static inline bool is_special_token_fast(const char *s, size_t len)
 {
-	//	return len >= 4 && s[0] == '<' && s[1] == '|' && s[len - 1] == '>';
 	return len >= 6 && s[0] == '<' && s[len - 1] == '>';
 }
 

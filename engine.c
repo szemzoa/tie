@@ -63,7 +63,6 @@ void rope_cache_init(struct ctx_t *ctx, int max_pos, int head_dim, float base)
 		float scaled_pos = (float)pos * ctx->model->yarn_scale_factor;
 
 		for (int i = 0; i < head_dim / 2; ++i) {
-			// FIX: Use passed-in head_dim, not model's embed_dim
 			float exponent = (2.0f * (float)i) / (float)head_dim;
 			float inv_freq = 1.0f / powf(base, exponent);
 			float angle = scaled_pos * inv_freq;
@@ -359,7 +358,6 @@ static void process_attention_batch_task(void *arg)
 
 	// Each thread processes a *range* of query tokens from the prompt batch
 	for (int i = task->start_token_idx; i < task->end_token_idx; i++) {
-		// **THE CRITICAL FIX IS HERE**
 		// Calculate the token's absolute position in the entire conversation
 		int absolute_pos = batch_start_pos + i;
 
@@ -595,7 +593,7 @@ int transformer_layer_unified(struct ctx_t *ctx, int layer_idx, int batch_len, b
 	memcpy(cache->k + (long long)start_pos * kv_dim, ctx->mem.K, (long long)batch_len * kv_dim * sizeof(float));
 	memcpy(cache->v + (long long)start_pos * kv_dim, ctx->mem.V, (long long)batch_len * kv_dim * sizeof(float));
 
-	// Step 5: Multi-Head Attention Calculation (Corrected)
+	// Step 5: Multi-Head Attention Calculation
 	attention_unified(ctx, batch_len, layer_idx, start_pos, use_threads);
 
 	// Step 6: Output projection and residual add

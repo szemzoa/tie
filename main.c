@@ -87,13 +87,11 @@ void generate_output(struct ctx_t *ctx, int current_token)
 }
 
 // C function that implements our tool
-static char *set_lamp_state(const char *location)
+static char *set_lamp_state(const char *state)
 {
-	// In a real application, you'd make an API call here.
-	// For now, we'll return a hardcoded string.
-	static char weather_report[256];
-	snprintf(weather_report, sizeof(weather_report), "{\"state\": \"%s\"}", location);
-	return weather_report;
+	static char tool_result[256];
+	snprintf(tool_result, sizeof(tool_result), "{\"state\": \"%s\"}", state);
+	return tool_result;
 }
 
 // Function to parse the tool call string and execute the tool

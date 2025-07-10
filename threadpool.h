@@ -15,7 +15,7 @@ typedef struct {
 typedef struct {
 	pthread_t threads[MAX_THREADS];
 	task_t tasks[MAX_TASKS];
-	atomic_int task_queue_count; // Renamed for clarity
+	atomic_int task_queue_count;
 	atomic_int task_head;
 	atomic_int task_tail;
 	pthread_mutex_t mutex;
@@ -24,7 +24,6 @@ typedef struct {
 	atomic_bool running;
 	int num_threads;
 
-	// --- FIX: Add state for proper waiting ---
 	atomic_int active_tasks;      // Tasks submitted but not yet finished
 	pthread_cond_t cond_all_done; // To signal when active_tasks is zero
 } thread_pool_t;
