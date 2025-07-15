@@ -90,10 +90,8 @@ MIT — use it for research, experimentation, or as a foundation for your own CP
 
 ## Notes
 
-- Uses memory-mapped GGUF loading for most tensors
-- Currently supports bf16 model only
-- Planning to add quantized kernel support and more tools
-- Not intended for production-scale workloads, but hackable
+- Currently supports BF16 and Q6_K models only
+- Hackable
 
 ---
 

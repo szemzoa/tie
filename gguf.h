@@ -72,7 +72,7 @@ enum ggml_type {
 	GGML_TYPE_COUNT = 39,
 };
 
-typedef struct Tensor {
+typedef struct gguf_tensor_t {
 	char *name;
 	uint64_t dimensions[4];
 	uint32_t n_dims;
@@ -80,7 +80,7 @@ typedef struct Tensor {
 	void *data;
 	uint64_t offset;
 	uint64_t size;
-} Tensor;
+} gguf_tensor;
 
 struct gguf_metadata_kv_t {
 	char *name;
@@ -89,6 +89,15 @@ struct gguf_metadata_kv_t {
 	void *arr_offset;
 	void *data;
 };
+
+// A block of Q6_K quantized weights.
+typedef struct {
+    uint8_t ql[128];      // quants, lower 4 bits
+    uint8_t qh[64];       // quants, upper 2 bits
+    int8_t  scales[16];   // scales, 4-bit+4-bit, signed
+    uint16_t d;           // super-block scale (fp16)
+} block_q6_k;
+
 
 struct ctx_t;
 
@@ -102,7 +111,8 @@ extern int gguf_metadata_read_tokens_embed(struct ctx_t *ctx, char *key);
 extern int gguf_metadata_read_merges(struct ctx_t *ctx, char *key);
 
 extern int gguf_map_weights(struct ctx_t *ctx);
-extern void *get_tensor(struct ctx_t *ctx_ptr, const char *name, uint64_t *size_bytes);
+extern void *get_tensor_data_ptr(struct ctx_t *ctx_ptr, const char *name, uint64_t *size_bytes);
+extern gguf_tensor *get_tensor(struct ctx_t *ctx_ptr, const char *name);
 
 extern void dump_tensors(struct ctx_t *ctx);
 

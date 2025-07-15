@@ -5,9 +5,9 @@ TARGET = tie
 BUILD_REVISION_H = "build_revision.h"
 BUILD_REVISION_D = "BUILD_REVISION"
 
-SRCS = threadpool.c main.c gguf.c maths.c predict.c tokenize.c model.c engine.c
+SRCS = threadpool.c gguf.c maths.c predict.c tokenize.c model.c engine.c main.c
 
-CC_ARGS= -g -O3 -mfma -mavx2 -ffast-math -fno-associative-math -march=native  -ffp-contract=fast -Wall -Wno-pointer-sign -Wno-unused-label -funsigned-char -std=c11 $(INCLUDE_DIRS)
+CC_ARGS= -g -O3 -mfma -mavx2 -ffast-math -fno-associative-math -march=native -ffp-contract=fast -Wall -Wno-pointer-sign -Wno-unused-label -funsigned-char $(INCLUDE_DIRS)
 
 INCLUDE_DIRS= -I ./
 
@@ -33,7 +33,6 @@ OBJS = $(BUILD_OBJS) $(EXT_OBJS)
 # Compiler flags to generate dependency files.
 GENDEPFLAGS = -MD -MP -MF .dep/$(@F).d
 
-#UFP_VERSION = $(shell grep UFP_APP_VERSION ufp.h | cut -d '"' -f 2)"-"$(shell /bin/cat .build_revision)
 
 all: begin build
 

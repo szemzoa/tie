@@ -56,7 +56,7 @@ typedef struct {
 	int count;
 } SpecialTokenList;
 
-struct ctx_t *ctx;
+extern struct ctx_t *ctx;
 
 extern char merge_pool[MAX_SPANS][128];
 extern bpe_merge_map_t bpe_merges_map;

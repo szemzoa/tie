@@ -1,19 +1,28 @@
 #ifndef __MODEL_H__
 #define __MODEL_H__
 
+#include "gguf.h"
+
 typedef struct {
-	uint16_t *attn_q;
-	uint16_t *attn_k;
-	uint16_t *attn_v;
-	uint16_t *attn_out;
-	uint16_t *ffn_gate;
-	uint16_t *ffn_up;
-	uint16_t *ffn_down;
-	float *attn_norm;
-	float *attn_q_norm;
-	float *attn_k_norm;
-	float *ffn_norm;
-} LayerWeights;
+	enum ggml_type type; // The data type (Q6_K, BF16, etc.)
+	void *data;	      // Can point to mmap'd region or malloc'd buffer
+	bool is_mmaped;	      // Flag to know if we need to free() it
+	size_t size_in_bytes; // Total size of the tensor data
+} Tensor;
+
+typedef struct {
+	Tensor attn_norm;
+	Tensor attn_q;
+	Tensor attn_k;
+	Tensor attn_v;
+	Tensor attn_q_norm;
+	Tensor attn_k_norm;
+	Tensor attn_out;
+	Tensor ffn_norm;
+	Tensor ffn_gate;
+	Tensor ffn_up;
+	Tensor ffn_down;
+} layer_weights;
 
 typedef struct {
 	int embed_dim;
@@ -31,18 +40,17 @@ typedef struct {
 
 	float yarn_scale_factor;
 	float repetition_penalty;
-
-	float *token_embd;
-	float *output_norm;
-
-	LayerWeights *layers;
-
 	float attn_scale;
+
+	Tensor token_embd;
+	Tensor output_norm;
+	layer_weights *layers;
+
 } Qwen3Model;
 
-extern int model_create(struct ctx_t *ctx);
+extern int model_create(struct ctx_t *ctx, int use_mmap);
 extern int compare_weights(char *filename, int file_size, int py_offset, int size, float *c_weights);
-extern void model_cleanup(struct ctx_t *ctx);
+extern void model_cleanup(struct ctx_t *ctx, int use_mmap);
 extern int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penality);
 
 #endif

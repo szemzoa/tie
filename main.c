@@ -52,16 +52,11 @@ const char *system_prompt_with_tools =
 
 static char *set_lamp_state(const char *location);
 
-struct tool_entry_t tool_calls[] = {
-    {
-	.name = "set_lamp_state",
-	.func = set_lamp_state,
-    },
-    {
-	.name = NULL,
-	.func = NULL
-    }
-};
+struct tool_entry_t tool_calls[] = {{
+					    .name = "set_lamp_state",
+					    .func = set_lamp_state,
+				    },
+				    {.name = NULL, .func = NULL}};
 
 int64_t elapsed_time_us(const struct timespec after, const struct timespec before)
 {
@@ -125,10 +120,11 @@ char *execute_tool_from_buffer(char *tool_call_buffer)
 	// --- Execute the corresponding C function ---
 	char *tool_result = NULL;
 
-	for (int i = 0; tool_calls[i].name; i++) {
-		if (strcmp(tool_calls[i].name, function_name) == 0)
+	for (int i = 0; tool_calls[i].name != NULL; i++) {
+		if (strcmp(tool_calls[i].name, function_name) == 0) {
 			tool_result = tool_calls[i].func(location);
 			goto _tool_call_found;
+		}
 	}
 
 	tool_result = "{\"error\": \"Unknown tool requested.\"}";
@@ -141,17 +137,18 @@ _tool_call_found:
 
 void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads)
 {
-	struct timespec start, end;
 	char input_buf[2048];
 	char prompt_buf[4096];
+	struct timespec start, end;
 	int gen_len;
-	int initial_prompt = 0;
+	int initial_prompt = 1;
 	bool in_tool_call = false;
 	char tool_call_buffer[1024] = {0}; // Buffer to accumulate the tool call string
 	char *tool_result;
 	int tool_call_len = 0;
 	int tool_call_start_token = vocab_lookup_token_id(ctx->root, "<tool_call>", 11);
 	int tool_call_end_token = vocab_lookup_token_id(ctx->root, "</tool_call>", 12);
+
 
 	while (1) {
 		printf("\nYou: ");
@@ -163,24 +160,26 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 			if (strncmp(input_buf, "exit", 4) == 0)
 				break;
 
-			if (initial_prompt == 0) {
-				initial_prompt = 1;
+			if (initial_prompt == 1) {
+				initial_prompt = 0;
 
-				snprintf(prompt_buf, sizeof(prompt_buf), "%s", system_prompt_with_tools);
+				// Build Qwen3-style chat input
+				snprintf(prompt_buf, sizeof(prompt_buf),
+					 "%s<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", system_prompt_with_tools, input_buf);
+			} else {
+
+				// Build Qwen3-style chat input
+				snprintf(prompt_buf, sizeof(prompt_buf),
+				         "<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", input_buf);
 			}
-
-			// Build Qwen3-style chat input
-			snprintf(prompt_buf, sizeof(prompt_buf),
-				 "%s<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", prompt_buf, input_buf);
-
 		} else {
 			snprintf(
 				prompt_buf, sizeof(prompt_buf),
 				"<|im_start|>user\n<tool_response>%s</tool_response><|im_end|>\n<|im_start|>assistant\n",
 				tool_result);
-			printf("new prompt: %s\n", prompt_buf);
 
 			tool_call_len = 0;
+			tool_call_buffer[0] = '\0';
 		}
 
 		/* --- Setup Buffers --- */
@@ -203,9 +202,12 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 
 		// 1. Unified Embedding Lookup for the prompt
 		for (int i = 0; i < prompt_len; i++) {
-			memcpy(ctx->mem.hidden_state + (long long)i * ctx->model->embed_dim,
-			       &ctx->model->token_embd[(long long)prompt_tokens[i] * ctx->model->embed_dim],
-			       ctx->model->embed_dim * sizeof(float));
+
+			// Get the destination pointer for this token's embedding in the workspace
+			float *dest = ctx->mem.hidden_state + (long long)i * ctx->model->embed_dim;
+
+			// Call the dispatcher to fetch and dequantize the row
+			get_embedding_row(&ctx->model->token_embd, prompt_tokens[i], dest, ctx->model->embed_dim);
 		}
 
 		// 2. Unified Layer Processing for the prompt
@@ -237,13 +239,12 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 				break;
 			}
 
-			// 1. Calculate logits from the final hidden state of
-			// the previous token
-			rms_norm(ctx->mem.normed_ffn_input, ctx->mem.hidden_state, ctx->model->output_norm,
+			// 1. Calculate logits from the final hidden state of the previous token
+			rms_norm(ctx->mem.normed_ffn_input, ctx->mem.hidden_state, ctx->model->output_norm.data,
 				 ctx->model->embed_dim, ctx->model->norm_eps);
 
-			parallel_mat_vec(ctx->mem.normed_ffn_input, ctx->model->token_embd, ctx->mem.logits,
-					 ctx->model->embed_dim, ctx->model->vocab_size, use_threads);
+			parallel_mat_vec_unified(ctx->mem.normed_ffn_input, &ctx->model->token_embd, ctx->mem.logits,
+						 ctx->model->embed_dim, ctx->model->vocab_size, use_threads);
 
 			// 2. Sample the next token
 			int next_token = predict_next_token(ctx->mem.logits, ctx->model->vocab_size, "temperature",
@@ -251,8 +252,7 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 							    generated_tokens, gen_len, ctx->model->repetition_penalty);
 
 			if (in_tool_call) {
-				// If we are inside a tool call, append the
-				// token's string to our buffer
+				// If we are inside a tool call, append the token's string to our buffer
 				const char *token_str = get_token_string(ctx->pool, next_token);
 				int token_len = strlen(token_str);
 				if (tool_call_len + token_len < sizeof(tool_call_buffer)) {
@@ -269,7 +269,6 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 				in_tool_call = false;
 			}
 
-
 			// 3. Print the token and check for EOS
 			generate_output(ctx, next_token);
 
@@ -281,14 +280,12 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 				break;
 			}
 
-			// 4. Unified Embedding Lookup for the single generated
-			// token
-			memcpy(ctx->mem.hidden_state,
-			       &ctx->model->token_embd[(long long)next_token * ctx->model->embed_dim],
-			       ctx->model->embed_dim * sizeof(float));
+			// 4. Unified Embedding Lookup for the single generated token
+			// The destination is the beginning of the hidden_state buffer
+			get_embedding_row(&ctx->model->token_embd, next_token, ctx->mem.hidden_state,
+					  ctx->model->embed_dim);
 
-			// 5. Unified Layer Processing for the single token
-			// (batch_len = 1)
+			// 5. Unified Layer Processing for the single token (batch_len = 1)
 			for (int l = 0; l < ctx->model->num_layers; l++) {
 				transformer_layer_unified(ctx, l, 1, use_threads);
 			}
@@ -297,7 +294,6 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 
 		if (tool_call_len > 0) {
 			tool_result = execute_tool_from_buffer(tool_call_buffer);
-
 		} else {
 			clock_gettime(CLOCK_REALTIME, &end);
 			printf("\n--- Generation End --- %u tokens, %llu msec, tps: %.01f --- %u\n", gen_len,
@@ -323,6 +319,7 @@ int main(int argc, char *argv[])
 	int opt;
 	int num_threads = 1;
 	char *model_path;
+	int use_mmap = 0;
 
 	printf("Tiny Inference Engine\n");
 	if (argc < 3) {
@@ -359,11 +356,11 @@ int main(int argc, char *argv[])
 
 	if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma")) {
 		printf("init: AVX2 and FMA supported\n");
-	} else
-#endif
-	{
-		printf("init: AVX2 and FMA NOT supported\n");
+	} else {
+		printf("init: AVX2 and FMA not supported\n");
+		exit(EXIT_FAILURE);
 	}
+#endif
 
 	if ((ctx = malloc(sizeof(struct ctx_t))) == NULL)
 		return -1;
@@ -376,9 +373,9 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
-	if (model_create(ctx) != 0) {
-		free(ctx);
+	if (model_create(ctx, use_mmap) != 0) {
 		gguf_close(ctx);
+		free(ctx);
 		return -1;
 	}
 
@@ -394,7 +391,7 @@ int main(int argc, char *argv[])
 	generate_interactive(ctx, 8192, 1);
 
 _cleanup:
-	model_cleanup(ctx);
+	model_cleanup(ctx, use_mmap);
 
 	gguf_close(ctx);
 	free(ctx);

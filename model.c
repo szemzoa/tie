@@ -1,6 +1,7 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <unistd.h>
 #include <string.h>
 #include <math.h>
 
@@ -10,12 +11,43 @@
 #include "maths.h"
 #include "engine.h"
 
-int model_create(struct ctx_t *ctx)
+
+int load_tensor(struct ctx_t *ctx, char *name, Tensor *tensor, int use_mmap)
+{
+	gguf_tensor *ggtensor;
+
+	if ((ggtensor = get_tensor(ctx, name)) == NULL) {
+		fprintf(stderr, "Failed to load %s\n", name);
+		return -1;
+	}
+
+	// Populate the Tensor struct
+	tensor->type = ggtensor->type; // e.g., GGUF_TYPE_Q6_K
+	tensor->size_in_bytes = ggtensor->size;
+
+	if (use_mmap) {
+		// Point directly into the mapped file data
+		tensor->data = ggtensor->data;
+		tensor->is_mmaped = true;
+	} else {
+		// Allocate new memory and read the tensor data from the file
+		tensor->data = aligned_alloc(128, ggtensor->size);
+		if (!tensor->data) {
+			printf("%s OOM\n", __FUNCTION__);
+			return -1;
+		}
+
+		pread(ctx->fd, tensor->data, ggtensor->size, ggtensor->offset + ctx->tensor_data_offset);
+		tensor->is_mmaped = false;
+	}
+
+	ctx->tensor_loaded++;
+	return 0;
+}
+
+int model_create(struct ctx_t *ctx, int use_mmap)
 {
 	char tensor_name_buffer[256];
-	uint64_t tensor_mapped = 0;
-	uint64_t size64;
-	void *raw_weight_ptr;
 
 	ctx->model = malloc(sizeof(Qwen3Model));
 	if (!ctx->model) {
@@ -47,53 +79,50 @@ int model_create(struct ctx_t *ctx)
 		return -1;
 	}
 
-	if ((ctx->model->layers = calloc(ctx->model->num_layers, sizeof(LayerWeights))) == NULL) {
+	ctx->tensor_loaded = 0;
+
+	// TODO free!
+	if (load_tensor(ctx, "token_embd.weight", &ctx->model->token_embd, use_mmap) != 0) {
+		fprintf(stderr, "Failed to load token_embd.weight\n");
+		return -1;
+	}
+
+	if (load_tensor(ctx, "output_norm.weight", &ctx->model->output_norm, use_mmap) != 0) {
+		fprintf(stderr, "Failed to load token_embd.weight\n");
+		return -1;
+	}
+
+	if ((ctx->model->layers = calloc(ctx->model->num_layers, sizeof(layer_weights))) == NULL) {
 		free(ctx->model);
-		perror("Failed to allocate LayerWeights array");
+		perror("Failed to allocate layer_weights array");
 		return -1;
 	}
 
-	if ((raw_weight_ptr = get_tensor(ctx, "token_embd.weight", &size64)) == NULL) {
-		fprintf(stderr, "Failed to load token_embd.weight\n");
-		return -1;
-	}
-	if ((ctx->model->token_embd = convert_bf16_to_f32(raw_weight_ptr, size64 / 2)) == NULL) {
-		fprintf(stderr, "Failed to load token_embd.weight\n");
-		return -1;
-	}
-	tensor_mapped++;
-
-	if ((ctx->model->output_norm = get_tensor(ctx, "output_norm.weight", &size64)) == NULL) {
-		fprintf(stderr, "Failed to load output_norm.weight\n");
-		goto _tensor_load_error;
-	}
-	tensor_mapped++;
-
-#define LOAD_WEIGHT(field, name_fmt_str)                                                                               \
+#define LOAD_LAYER_WEIGHT(field, name_fmt_str)                                                                         \
 	snprintf(tensor_name_buffer, sizeof(tensor_name_buffer), name_fmt_str, block_idx);                             \
-	if ((ctx->model->layers[block_idx].field = get_tensor(ctx, tensor_name_buffer, &size64)) == NULL) {            \
+	if (load_tensor(ctx, tensor_name_buffer, &ctx->model->layers[block_idx].field, use_mmap) != 0) {               \
+		fprintf(stderr, "Failed to load %s\n", tensor_name_buffer);                                            \
 		goto _tensor_load_error;                                                                               \
-	}                                                                                                              \
-	tensor_mapped++;
+	}
 
 	for (uint32_t block_idx = 0; block_idx < ctx->model->num_layers; block_idx++) {
-		LOAD_WEIGHT(attn_q, "blk.%u.attn_q.weight");
-		LOAD_WEIGHT(attn_k, "blk.%u.attn_k.weight");
-		LOAD_WEIGHT(attn_v, "blk.%u.attn_v.weight");
-		LOAD_WEIGHT(attn_norm, "blk.%u.attn_norm.weight");
-		LOAD_WEIGHT(attn_q_norm, "blk.%u.attn_q_norm.weight");
-		LOAD_WEIGHT(attn_k_norm, "blk.%u.attn_k_norm.weight");
-		LOAD_WEIGHT(attn_out, "blk.%u.attn_output.weight");
-		LOAD_WEIGHT(ffn_gate, "blk.%u.ffn_gate.weight");
-		LOAD_WEIGHT(ffn_up, "blk.%u.ffn_up.weight");
-		LOAD_WEIGHT(ffn_down, "blk.%u.ffn_down.weight");
-		LOAD_WEIGHT(ffn_norm, "blk.%u.ffn_norm.weight");
+		LOAD_LAYER_WEIGHT(attn_q, "blk.%u.attn_q.weight");
+		LOAD_LAYER_WEIGHT(attn_k, "blk.%u.attn_k.weight");
+		LOAD_LAYER_WEIGHT(attn_v, "blk.%u.attn_v.weight");
+		LOAD_LAYER_WEIGHT(attn_norm, "blk.%u.attn_norm.weight");
+		LOAD_LAYER_WEIGHT(attn_q_norm, "blk.%u.attn_q_norm.weight");
+		LOAD_LAYER_WEIGHT(attn_k_norm, "blk.%u.attn_k_norm.weight");
+		LOAD_LAYER_WEIGHT(attn_out, "blk.%u.attn_output.weight");
+		LOAD_LAYER_WEIGHT(ffn_gate, "blk.%u.ffn_gate.weight");
+		LOAD_LAYER_WEIGHT(ffn_up, "blk.%u.ffn_up.weight");
+		LOAD_LAYER_WEIGHT(ffn_down, "blk.%u.ffn_down.weight");
+		LOAD_LAYER_WEIGHT(ffn_norm, "blk.%u.ffn_norm.weight");
 	}
 
-#undef LOAD_WEIGHT
+#undef LOAD_LAYER_WEIGHT
 
-	if (ctx->tensor_count != tensor_mapped) {
-		printf("Tensor load failed!!!! load: %llu, all: %llu", tensor_mapped, ctx->tensor_count);
+	if (ctx->tensor_count != ctx->tensor_loaded) {
+		printf("Tensor load failed!!!! load: %llu, all: %llu", ctx->tensor_loaded, ctx->tensor_count);
 		goto _tensor_load_error;
 	}
 
@@ -160,7 +189,7 @@ int compare_weights(char *filename, int file_size, int py_offset, int size, floa
 }
 #endif
 
-void model_cleanup(struct ctx_t *ctx)
+void model_cleanup(struct ctx_t *ctx, int use_mmap)
 {
 	free(ctx->mem.hidden_state);
 	free(ctx->mem.normed_qkv_input);
@@ -187,10 +216,29 @@ void model_cleanup(struct ctx_t *ctx)
 	}
 	free(ctx->kv_cache);
 
+	if (use_mmap == 1) {
+		free(ctx->model->token_embd.data);
+		free(ctx->model->output_norm.data);
+
+		for (uint32_t block_idx = 0; block_idx < ctx->model->num_layers; block_idx++) {
+			free(ctx->model->layers[block_idx].attn_q.data);
+			free(ctx->model->layers[block_idx].attn_k.data);
+			free(ctx->model->layers[block_idx].attn_v.data);
+			free(ctx->model->layers[block_idx].attn_norm.data);
+			free(ctx->model->layers[block_idx].attn_q_norm.data);
+			free(ctx->model->layers[block_idx].attn_k_norm.data);
+			free(ctx->model->layers[block_idx].attn_out.data);
+			free(ctx->model->layers[block_idx].ffn_gate.data);
+			free(ctx->model->layers[block_idx].ffn_up.data);
+			free(ctx->model->layers[block_idx].ffn_down.data);
+			free(ctx->model->layers[block_idx].ffn_norm.data);
+		}
+	}
+
 	free(ctx->model->layers);
-	free(ctx->model->token_embd);
 	free(ctx->model);
 	free(ctx->rope_cache);
+
 	free_trie(ctx->root);
 	free_string_pool(ctx->pool);
 }

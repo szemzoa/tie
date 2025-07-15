@@ -1,5 +1,6 @@
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
@@ -93,35 +94,6 @@ inline float silu_lookup(float x)
 
 	// Use FMA for better interpolation precision
 	return fmaf(silu_table[idx + 1] - silu_table[idx], frac, silu_table[idx]);
-}
-
-void rms_norm(float *__restrict o, const float *__restrict x, const float *__restrict weight, int size, float eps)
-{
-#ifdef CONFIG_ENABLE_AVX2
-	if (__builtin_cpu_supports("avx2")) {
-		return rms_norm_avx2(o, x, weight, size, eps);
-	}
-#endif
-	// Unrolled accumulation for faster reduction
-	float ss0 = 0.0f, ss1 = 0.0f, ss2 = 0.0f, ss3 = 0.0f;
-	int i = 0;
-	for (; i <= size - 4; i += 4) {
-		ss0 = fmaf(x[i + 0], x[i + 0], ss0);
-		ss1 = fmaf(x[i + 1], x[i + 1], ss1);
-		ss2 = fmaf(x[i + 2], x[i + 2], ss2);
-		ss3 = fmaf(x[i + 3], x[i + 3], ss3);
-	}
-	float ss = ss0 + ss1 + ss2 + ss3;
-	for (; i < size; i++) {
-		ss = fmaf(x[i], x[i], ss);
-	}
-
-	float inv_rms = 1.0f / sqrtf(ss / size + eps);
-
-	// Apply weight and scale
-	for (int i = 0; i < size; ++i) {
-		o[i] = x[i] * weight[i] * inv_rms;
-	}
 }
 
 static void apply_rope_cache(struct ctx_t *ctx, float *x, int pos, int head_dim)
@@ -539,7 +511,7 @@ void attention_unified(struct ctx_t *ctx, int batch_len, int layer_idx, int star
 int transformer_layer_unified(struct ctx_t *ctx, int layer_idx, int batch_len, bool use_threads)
 {
 	float *x = ctx->mem.hidden_state;
-	LayerWeights *l = &ctx->model->layers[layer_idx];
+	layer_weights *l = &ctx->model->layers[layer_idx];
 	LayerKVCache *cache = &ctx->kv_cache[layer_idx];
 	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
 	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
@@ -551,17 +523,17 @@ int transformer_layer_unified(struct ctx_t *ctx, int layer_idx, int batch_len, b
 	// Step 1: RMSNorm on input
 	for (int i = 0; i < batch_len; i++) {
 		rms_norm(ctx->mem.normed_qkv_input + (long long)i * ctx->model->embed_dim,
-			 x + (long long)i * ctx->model->embed_dim, l->attn_norm, ctx->model->embed_dim,
+			 x + (long long)i * ctx->model->embed_dim, l->attn_norm.data, ctx->model->embed_dim,
 			 ctx->model->norm_eps);
 	}
 
 	// Step 2: Compute Q/K/V Matrices
-	parallel_mat_mat_bf16(ctx->mem.normed_qkv_input, l->attn_q, ctx->mem.Q, batch_len, ctx->model->embed_dim, q_dim,
-			      use_threads);
-	parallel_mat_mat_bf16(ctx->mem.normed_qkv_input, l->attn_k, ctx->mem.K, batch_len, ctx->model->embed_dim,
-			      kv_dim, use_threads);
-	parallel_mat_mat_bf16(ctx->mem.normed_qkv_input, l->attn_v, ctx->mem.V, batch_len, ctx->model->embed_dim,
-			      kv_dim, use_threads);
+	parallel_mat_mat_unified(ctx->mem.normed_qkv_input, &l->attn_q, ctx->mem.Q, batch_len, ctx->model->embed_dim,
+				 q_dim, use_threads);
+	parallel_mat_mat_unified(ctx->mem.normed_qkv_input, &l->attn_k, ctx->mem.K, batch_len, ctx->model->embed_dim,
+				 kv_dim, use_threads);
+	parallel_mat_mat_unified(ctx->mem.normed_qkv_input, &l->attn_v, ctx->mem.V, batch_len, ctx->model->embed_dim,
+				 kv_dim, use_threads);
 
 	// Step 3: Apply RoPE
 	for (int i = 0; i < batch_len; i++) {
@@ -573,16 +545,18 @@ int transformer_layer_unified(struct ctx_t *ctx, int layer_idx, int batch_len, b
 
 		for (int h = 0; h < ctx->model->num_heads; h++) {
 			float *q_head = q_token_row + h * ctx->model->head_dim;
-			if (l->attn_q_norm) {
-				rms_norm(q_head, q_head, l->attn_q_norm, ctx->model->head_dim, ctx->model->norm_eps);
+			if (l->attn_q_norm.data) {
+				rms_norm(q_head, q_head, l->attn_q_norm.data, ctx->model->head_dim,
+					 ctx->model->norm_eps);
 			}
 			// Use the absolute position for RoPE
 			apply_rope_cache(ctx, q_head, absolute_pos, ctx->model->head_dim);
 		}
 		for (int h = 0; h < ctx->model->num_kv_heads; h++) {
 			float *k_head = k_token_row + h * ctx->model->head_dim;
-			if (l->attn_k_norm) {
-				rms_norm(k_head, k_head, l->attn_k_norm, ctx->model->head_dim, ctx->model->norm_eps);
+			if (l->attn_k_norm.data) {
+				rms_norm(k_head, k_head, l->attn_k_norm.data, ctx->model->head_dim,
+					 ctx->model->norm_eps);
 			}
 			// Use the absolute position for RoPE
 			apply_rope_cache(ctx, k_head, absolute_pos, ctx->model->head_dim);
@@ -597,8 +571,8 @@ int transformer_layer_unified(struct ctx_t *ctx, int layer_idx, int batch_len, b
 	attention_unified(ctx, batch_len, layer_idx, start_pos, use_threads);
 
 	// Step 6: Output projection and residual add
-	parallel_mat_mat_bf16(ctx->mem.attn_output, l->attn_out, ctx->mem.attn_proj_output, batch_len, q_dim,
-			      ctx->model->embed_dim, use_threads);
+	parallel_mat_mat_unified(ctx->mem.attn_output, &l->attn_out, ctx->mem.attn_proj_output, batch_len, q_dim,
+				 ctx->model->embed_dim, use_threads);
 
 	for (long long i = 0; i < (long long)batch_len * ctx->model->embed_dim; i++) {
 		x[i] = add_residual(x[i], ctx->mem.attn_proj_output[i]);
@@ -608,15 +582,16 @@ int transformer_layer_unified(struct ctx_t *ctx, int layer_idx, int batch_len, b
 	// Step 1: RMSNorm
 	for (int i = 0; i < batch_len; i++) {
 		rms_norm(ctx->mem.normed_ffn_input + (long long)i * ctx->model->embed_dim,
-			 x + (long long)i * ctx->model->embed_dim, l->ffn_norm, ctx->model->embed_dim,
+			 x + (long long)i * ctx->model->embed_dim, l->ffn_norm.data, ctx->model->embed_dim,
 			 ctx->model->norm_eps);
 	}
 
 	// Step 2: Gate + Up projections
-	parallel_mat_mat_bf16(ctx->mem.normed_ffn_input, l->ffn_gate, ctx->mem.gate_proj_output, batch_len,
-			      ctx->model->embed_dim, ctx->model->ffn_dim, use_threads);
-	parallel_mat_mat_bf16(ctx->mem.normed_ffn_input, l->ffn_up, ctx->mem.up_proj_output, batch_len,
-			      ctx->model->embed_dim, ctx->model->ffn_dim, use_threads);
+	parallel_mat_mat_unified(ctx->mem.normed_ffn_input, &l->ffn_gate, ctx->mem.gate_proj_output, batch_len,
+				 ctx->model->embed_dim, ctx->model->ffn_dim, use_threads);
+	parallel_mat_mat_unified(ctx->mem.normed_ffn_input, &l->ffn_up, ctx->mem.up_proj_output, batch_len,
+				 ctx->model->embed_dim, ctx->model->ffn_dim, use_threads);
+
 
 	// Step 3: SwiGLU activation
 	for (long long i = 0; i < (long long)batch_len * ctx->model->ffn_dim; i++) {
@@ -624,8 +599,8 @@ int transformer_layer_unified(struct ctx_t *ctx, int layer_idx, int batch_len, b
 	}
 
 	// Step 4: Down projection
-	parallel_mat_mat_bf16(ctx->mem.gate_proj_output, l->ffn_down, ctx->mem.ffn_down_output, batch_len,
-			      ctx->model->ffn_dim, ctx->model->embed_dim, use_threads);
+	parallel_mat_mat_unified(ctx->mem.gate_proj_output, &l->ffn_down, ctx->mem.ffn_down_output, batch_len,
+				 ctx->model->ffn_dim, ctx->model->embed_dim, use_threads);
 
 	// Step 5: Residual add
 	for (long long i = 0; i < (long long)batch_len * ctx->model->embed_dim; i++) {
@@ -633,4 +608,62 @@ int transformer_layer_unified(struct ctx_t *ctx, int layer_idx, int batch_len, b
 	}
 
 	return 0;
+}
+
+/**
+ * @brief Retrieves a single token's embedding vector from a tensor.
+ *
+ * This function acts as a dispatcher. It checks the tensor's type and calls
+ * the appropriate internal logic to dequantize or convert the embedding row
+ * into a standard float32 vector.
+ *
+ * @param tensor The token embedding tensor.
+ * @param row_index The token ID whose embedding vector to retrieve.
+ * @param dest The destination float buffer to write the vector to.
+ * @param embed_dim The dimension of the embedding vector.
+ */
+void get_embedding_row(const Tensor *tensor, int row_index, float *dest, int embed_dim)
+{
+	switch (tensor->type) {
+
+	case GGML_TYPE_BF16: {
+		// The tensor data is BF16, so we dequantize it.
+		uint16_t *src = (uint16_t *)tensor->data;
+		long long row_offset = (long long)row_index * embed_dim;
+
+		for (int i = 0; i < embed_dim; i++) {
+			dest[i] = bf16_to_fp32(src[row_offset + i]);
+		}
+		break;
+	}
+
+	case GGML_TYPE_F32: {
+		// The tensor is already F32, so we can just copy it.
+		float *src = (float *)tensor->data;
+		long long row_offset = (long long)row_index * embed_dim;
+
+		memcpy(dest, src + row_offset, embed_dim * sizeof(float));
+		break;
+	}
+
+	case GGML_TYPE_Q6_K: {
+		// The tensor is Q6_K, so we must dequantize the blocks for this row.
+		const int K = 256; // Q6_K block size
+		int blocks_per_row = embed_dim / K;
+
+		block_q6_k *src = (block_q6_k *)tensor->data;
+		long long row_block_offset = (long long)row_index * blocks_per_row;
+
+		for (int block_idx = 0; block_idx < blocks_per_row; block_idx++) {
+			// Dequantize one block from the source and place it in the correct
+			// location in the destination buffer.
+			dequantize_row_q6_k(&src[row_block_offset + block_idx], dest + block_idx * K, K);
+		}
+		break;
+	}
+
+	default:
+		fprintf(stderr, "Error: Unsupported tensor type %d for embedding lookup\n", tensor->type);
+		break;
+	}
 }

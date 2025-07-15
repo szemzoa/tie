@@ -48,12 +48,13 @@ struct ctx_t {
 	void *mapped_data;
 	uint8_t *fptr;
 
+	uint64_t tensor_loaded;
 	uint64_t tensor_count;
 	uint64_t tensor_data_offset;
 	uint64_t metadata_kv_count;
 
 	struct gguf_metadata_kv_t *metadata;
-	Tensor *tensors;
+	gguf_tensor *tensors;
 
 	struct tfmem_t mem;
 	LayerKVCache *kv_cache;
@@ -66,6 +67,5 @@ struct ctx_t {
 	TrieNode *root;
 	StringPool *pool;
 };
-
 
 #endif

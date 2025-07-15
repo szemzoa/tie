@@ -523,21 +523,22 @@ void dump_tensors(struct ctx_t *ctx)
 	uint64_t i;
 
 	for (i = 0; i < ctx->tensor_count; i++) {
-		Tensor *tensor = &ctx->tensors[i];
+		gguf_tensor *tensor = &ctx->tensors[i];
 
 		printf("tensor #%4llu name: %32s, ", i, ctx->tensors[i].name);
 		printf("type: %6s, ", tensor_get_type_name(tensor->type));
 		printf("shape: [ %llu,\t%llu,\t%llu,\t%llu ],", tensor->dimensions[0], tensor->dimensions[1],
 		       tensor->dimensions[2], tensor->dimensions[3]);
 		printf("\tsize: %.02f MB, offset: %llu\n", (float)tensor->size / 1024 / 1024, tensor->offset);
+//		printf("\tsize: %llu, offset: %llu\n", tensor->size, tensor->offset);
 	}
 }
 #endif
 
-void *get_tensor(struct ctx_t *ctx_ptr, const char *name, uint64_t *size_bytes)
+void *get_tensor_data_ptr(struct ctx_t *ctx_ptr, const char *name, uint64_t *size_bytes)
 {
 	for (uint64_t i = 0; i < ctx_ptr->tensor_count; i++) {
-		Tensor *t = &ctx_ptr->tensors[i];
+		gguf_tensor *t = &ctx_ptr->tensors[i];
 		if (strcmp(t->name, name) == 0) {
 			*size_bytes = t->size;
 			return t->data;
@@ -545,6 +546,19 @@ void *get_tensor(struct ctx_t *ctx_ptr, const char *name, uint64_t *size_bytes)
 	}
 	fprintf(stderr, "Warning: Tensor '%s' not found in gguf file.\n", name);
 	*size_bytes = 0;
+	return NULL;
+}
+
+gguf_tensor *get_tensor(struct ctx_t *ctx_ptr, const char *name)
+{
+	for (uint64_t i = 0; i < ctx_ptr->tensor_count; i++) {
+		gguf_tensor *t = &ctx_ptr->tensors[i];
+		if (strcmp(t->name, name) == 0) {
+			return t;
+		}
+	}
+
+	fprintf(stderr, "Warning: Tensor '%s' not found in gguf file.\n", name);
 	return NULL;
 }
 
@@ -636,7 +650,7 @@ uint64_t calculate_tensor_size(uint32_t type, uint64_t *dims, uint32_t n_dims)
 	}
 	case GGML_TYPE_Q6_K: {
 		const int QK_K = 256;
-		const int block_size = 210; // 128 (ql) + 64 (qh) + 16 (scales) + 2 (d)
+		const int block_size = sizeof(block_q6_k);
 		uint64_t blocks = (n_elements + QK_K - 1) / QK_K;
 		return blocks * block_size;
 	}
@@ -667,11 +681,11 @@ uint64_t calculate_tensor_size(uint32_t type, uint64_t *dims, uint32_t n_dims)
 int gguf_map_weights(struct ctx_t *ctx)
 {
 	// Read tensor metadata
-	ctx->tensors = (Tensor *)calloc(ctx->tensor_count, sizeof(Tensor));
+	ctx->tensors = (gguf_tensor *)calloc(ctx->tensor_count, sizeof(gguf_tensor));
 	uint64_t data_offset = 0; // Will be set after alignment
 
 	for (uint64_t i = 0; i < ctx->tensor_count; i++) {
-		Tensor *tensor = &ctx->tensors[i];
+		gguf_tensor *tensor = &ctx->tensors[i];
 
 		uint64_t name_len = *(uint64_t *)ctx->fptr;
 		ctx->fptr += sizeof(uint64_t);
@@ -721,14 +735,14 @@ int gguf_map_weights(struct ctx_t *ctx)
 	// After reading all tensor metadata (name, n_dims, dimensions, type, offset)
 	// and after calculating ctx->tensor_data_offset (the aligned start of the tensor data block)
 	for (uint64_t i = 0; i < ctx->tensor_count; i++) {
-		Tensor *tensor = &ctx->tensors[i];
+		gguf_tensor *tensor = &ctx->tensors[i];
 		// tensor->offset IS THE OFFSET FROM THE START OF THE TENSOR DATA BLOCK
 		tensor->data = (uint8_t *)ctx->mapped_data + ctx->tensor_data_offset + tensor->offset;
 	}
 
 	// Check if the last tensor is within bounds
 	if (ctx->tensor_count > 0) {
-		Tensor *last_tensor = &ctx->tensors[ctx->tensor_count - 1];
+		gguf_tensor *last_tensor = &ctx->tensors[ctx->tensor_count - 1];
 
 		if (ctx->tensor_data_offset + last_tensor->offset + last_tensor->size > ctx->file_size) {
 			fprintf(stderr, "Error: End of last tensor exceeds file size.\n");
