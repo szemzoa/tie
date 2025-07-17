@@ -207,7 +207,7 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 	char prompt_buf[4096];
 	struct timespec start, end;
 	int gen_len;
-	int initial_prompt = 0;
+	int initial_prompt = 1;
 	bool in_tool_call = false;
 	char tool_call_buffer[1024] = {0}; // Buffer to accumulate the tool call string
 	char *tool_result;
