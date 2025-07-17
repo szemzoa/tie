@@ -6,11 +6,11 @@
 #include "gguf.h"
 #include "model.h"
 
-typedef char* (*tool_func_t)(const char*);
+typedef char *(*tool_func_t)(const char *);
 
 struct tool_entry_t {
-  const char* name;
-  tool_func_t func;
+	const char *name;
+	tool_func_t func;
 };
 
 struct tfmem_t {
@@ -66,6 +66,13 @@ struct ctx_t {
 
 	TrieNode *root;
 	StringPool *pool;
+
+	char **token_table; // Points to each token string in pool->data
+	int *token_lens;    // Length of each token
+	int token_count;    // Total number of tokens
+
+	unsigned int utf8_state;
+	unsigned int utf8_codepoint;
 };
 
 #endif

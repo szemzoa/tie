@@ -53,23 +53,20 @@ int append_to_pool(StringPool *pool, const char *str, size_t len)
 	return 1;
 }
 
-const char *get_token_string(const StringPool *pool, int token_id)
+const char *get_token_string(const struct ctx_t *ctx, int token_id)
 {
-	const char *ptr = pool->data;
-	int count = 0;
-	if (token_id < 0)
+	if (token_id < 0 || token_id >= ctx->token_count)
 		return NULL;
-	while (count < token_id) {
-		while (*ptr != '\0' && ptr < pool->data + pool->size)
-			ptr++;
-		if (ptr >= pool->data + pool->size)
-			return NULL;
-		ptr++;
-		count++;
-	}
-	if (ptr >= pool->data + pool->size)
-		return NULL;
-	return ptr;
+
+	return ctx->token_table[token_id];
+}
+
+int get_token_string_length(const struct ctx_t *ctx, int token_id)
+{
+	if (token_id < 0 || token_id >= ctx->token_count) 
+		return 0;
+
+	return ctx->token_lens[token_id];
 }
 
 void insert_token(TrieNode *root, const char *token, size_t len, int token_id)
@@ -116,22 +113,6 @@ void replace_g_spaces(char *s)
 			p++;
 		}
 	}
-}
-
-int get_token_string_length(StringPool *pool, int token_id)
-{
-	const char *start = get_token_string(pool, token_id);
-	if (!start)
-		return 0;
-	size_t len = 0;
-	while ((unsigned char)start[len] >= 0x20 || start[len] == 0x09 || start[len] == 0x0A) {
-		len++;
-		if ((size_t)start + len >= (size_t)pool->data + pool->size)
-			break;
-		if (start[len] == '\0')
-			break;
-	}
-	return (int)len;
 }
 
 int vocab_lookup_token_id(TrieNode *root, const char *token, size_t len)

@@ -530,7 +530,7 @@ void dump_tensors(struct ctx_t *ctx)
 		printf("shape: [ %llu,\t%llu,\t%llu,\t%llu ],", tensor->dimensions[0], tensor->dimensions[1],
 		       tensor->dimensions[2], tensor->dimensions[3]);
 		printf("\tsize: %.02f MB, offset: %llu\n", (float)tensor->size / 1024 / 1024, tensor->offset);
-//		printf("\tsize: %llu, offset: %llu\n", tensor->size, tensor->offset);
+		//		printf("\tsize: %llu, offset: %llu\n", tensor->size, tensor->offset);
 	}
 }
 #endif
@@ -819,6 +819,21 @@ void gguf_close(struct ctx_t *ctx)
 	close(ctx->fd);
 }
 
+
+int init_token_table(struct ctx_t *ctx, int num_tokens)
+{
+	ctx->token_table = calloc(num_tokens, sizeof(char *));
+	ctx->token_lens = calloc(num_tokens, sizeof(int));
+	ctx->token_count = num_tokens;
+
+	if (!ctx->token_table || !ctx->token_lens) {
+		fprintf(stderr, "Failed to allocate token table\n");
+		return -1;
+	}
+
+	return 0;
+}
+
 static inline bool is_special_token_fast(const char *s, size_t len)
 {
 	return len >= 6 && s[0] == '<' && s[len - 1] == '>';
@@ -826,23 +841,20 @@ static inline bool is_special_token_fast(const char *s, size_t len)
 
 int gguf_metadata_read_tokens_embed(struct ctx_t *ctx, char *key)
 {
-	struct gguf_metadata_kv_t *metadata;
-	char token[512];
+	struct gguf_metadata_kv_t *metadata = NULL;
 	uint64_t i;
-	uint64_t str_len;
 
 	for (i = 0; i < ctx->metadata_kv_count; i++) {
-		metadata = &ctx->metadata[i];
-
 		if (!strcmp(ctx->metadata[i].name, key)) {
-			goto _gguf_metadata_token_embed_found;
+			metadata = &ctx->metadata[i];
+			break;
 		}
 	}
 
-	printf("Failed to read %s\n", key);
-	return -1;
-
-_gguf_metadata_token_embed_found:
+	if (!metadata) {
+		printf("Failed to read %s\n", key);
+		return -1;
+	}
 
 	if (metadata->type != GGUF_METADATA_VALUE_TYPE_ARRAY) {
 		printf("%s has invalid type\n", key);
@@ -852,30 +864,36 @@ _gguf_metadata_token_embed_found:
 	ctx->fptr = metadata->arr_offset;
 	ctx->model->vocab_size = metadata->size;
 
+	if (init_token_table(ctx, ctx->model->vocab_size) != 0) {
+		printf("Failed to init token table\n");
+		return -1;
+	}
+
 	for (i = 0; i < metadata->size; i++) {
-		str_len = *(uint64_t *)ctx->fptr;
+		uint64_t str_len = *(uint64_t *)ctx->fptr;
 		ctx->fptr += sizeof(uint64_t);
 
-		memcpy(token, ctx->fptr, str_len);
-		token[str_len] = '\0';
+		const char *raw_token = (const char *)ctx->fptr;
 
-		// Append to string pool
-		if (!append_to_pool(ctx->pool, token, str_len)) {
+		char *token_ptr = ctx->pool->data + ctx->pool->size;
+		if (!append_to_pool(ctx->pool, raw_token, str_len)) {
 			printf("Failed to append token %llu to pool\n", i);
 			return -1;
 		}
 
-		char *token_in_pool = ctx->pool->data + (ctx->pool->size - str_len - 1);
-		insert_token(ctx->root, token_in_pool, str_len, (int)i);
+		ctx->token_table[i] = token_ptr;
+		ctx->token_lens[i] = str_len;
 
-		// Detect special tokens (cheap inline check)
-		if (is_special_token_fast(token, str_len)) {
+		insert_token(ctx->root, token_ptr, str_len, (int)i);
+
+		// Detect special tokens
+		if (is_special_token_fast(token_ptr, str_len)) {
 			if (special_tokens.count >= MAX_SPECIAL_TOKENS) {
 				printf("Too many special tokens\n");
 				return -1;
 			}
 			special_tokens.specials[special_tokens.count++] =
-				(SpecialToken){.text = token_in_pool, .length = str_len, .token_id = (int)i};
+				(SpecialToken){.text = token_ptr, .length = str_len, .token_id = (int)i};
 		}
 
 		ctx->fptr += str_len;

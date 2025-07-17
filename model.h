@@ -44,6 +44,7 @@ typedef struct {
 
 	Tensor token_embd;
 	Tensor output_norm;
+	Tensor output;
 	layer_weights *layers;
 
 } Qwen3Model;

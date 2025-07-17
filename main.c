@@ -64,21 +64,87 @@ int64_t elapsed_time_us(const struct timespec after, const struct timespec befor
 	       + ((int64_t)after.tv_nsec - (int64_t)before.tv_nsec) / 1000;
 }
 
+unsigned int decode_utf8(unsigned int *state, unsigned int *codep, unsigned char byte)
+{
+	if (*state == 0) {	   // Expecting start of a new character
+		if (byte < 0x80) { // 0xxxxxxx (ASCII)
+			*codep = byte;
+			return *codep;
+		} else if ((byte & 0xE0) == 0xC0) { // 110xxxxx 10xxxxxx (2-byte)
+			*state = 1;
+			*codep = byte & 0x1F;
+		} else if ((byte & 0xF0) == 0xE0) { // 1110xxxx 10xxxxxx 10xxxxxx (3-byte)
+			*state = 2;
+			*codep = byte & 0x0F;
+		} else if ((byte & 0xF8) == 0xF0) { // 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx (4-byte)
+			*state = 3;
+			*codep = byte & 0x07;
+		} else {
+			return 0xFFFD; // Invalid start byte
+		}
+	} else { // Expecting a continuation byte 10xxxxxx
+		if ((byte & 0xC0) == 0x80) {
+			*codep = (*codep << 6) | (byte & 0x3F);
+			(*state)--;
+			if (*state == 0) {
+				return *codep;
+			}
+		} else {
+			*state = 0;
+			*codep = 0; // Invalid sequence, reset
+			return 0xFFFD;
+		}
+	}
+	return 0; // Incomplete character
+}
+
+int encode_utf8(unsigned int codepoint, char *out)
+{
+	if (codepoint <= 0x7F) {
+		out[0] = codepoint;
+		return 1;
+	} else if (codepoint <= 0x7FF) {
+		out[0] = 0xC0 | (codepoint >> 6);
+		out[1] = 0x80 | (codepoint & 0x3F);
+		return 2;
+	} else if (codepoint <= 0xFFFF) {
+		out[0] = 0xE0 | (codepoint >> 12);
+		out[1] = 0x80 | ((codepoint >> 6) & 0x3F);
+		out[2] = 0x80 | (codepoint & 0x3F);
+		return 3;
+	} else if (codepoint <= 0x10FFFF) {
+		out[0] = 0xF0 | (codepoint >> 18);
+		out[1] = 0x80 | ((codepoint >> 12) & 0x3F);
+		out[2] = 0x80 | ((codepoint >> 6) & 0x3F);
+		out[3] = 0x80 | (codepoint & 0x3F);
+		return 4;
+	}
+	return 0;
+}
+
 void generate_output(struct ctx_t *ctx, int current_token)
 {
-	const char *p = get_token_string(ctx->pool, current_token);
-	int len = get_token_string_length(ctx->pool, current_token);
+	const char *p = get_token_string(ctx, current_token);
+	int len = get_token_string_length(ctx, current_token);
 
-	char buf[256] = {0};
-	if (len > 255)
-		len = 255; // Safety limit
+#ifdef DEBUG_TOKENS
+	printf("\n[DEBUG] token_str: %s, token_id=%d: ", p, current_token);
+	for (int i = 0; i < len; i++) {
+		printf("%02X ", (unsigned char)p[i]);
+	}
+	printf("\n");
+#endif
 
-	memcpy(buf, p, len);
-	buf[len] = '\0'; // Null-terminate safely
+	for (char *c = (char *)p; *c != '\0'; c++) {
+		unsigned int result = decode_utf8(&ctx->utf8_state, &ctx->utf8_codepoint, (unsigned char)*c);
+		if (result != 0 && result != 0xFFFD) {
+			printf("%c", result); // Print the complete Unicode character
+		} else if (result == 0xFFFD) {
+			printf(""); // Print replacement character for errors
+		}
+	}
 
-	replace_g_spaces(buf);
-	printf("%s", buf);
-	fflush(stdout);
+	fflush(stdout); // Flush after each token is processed
 }
 
 // C function that implements our tool
@@ -141,7 +207,7 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 	char prompt_buf[4096];
 	struct timespec start, end;
 	int gen_len;
-	int initial_prompt = 1;
+	int initial_prompt = 0;
 	bool in_tool_call = false;
 	char tool_call_buffer[1024] = {0}; // Buffer to accumulate the tool call string
 	char *tool_result;
@@ -160,17 +226,21 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 			if (strncmp(input_buf, "exit", 4) == 0)
 				break;
 
+			// Strip newline
+			input_buf[strcspn(input_buf, "\n")] = 0;
+
 			if (initial_prompt == 1) {
 				initial_prompt = 0;
 
 				// Build Qwen3-style chat input
 				snprintf(prompt_buf, sizeof(prompt_buf),
-					 "%s<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", system_prompt_with_tools, input_buf);
+					 "%s<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n",
+					 system_prompt_with_tools, input_buf);
 			} else {
 
 				// Build Qwen3-style chat input
 				snprintf(prompt_buf, sizeof(prompt_buf),
-				         "<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", input_buf);
+					 "<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", input_buf);
 			}
 		} else {
 			snprintf(
@@ -194,10 +264,20 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 		size_t prompt_len = 0;
 		int *prompt_tokens = tokenize_bpe(ctx, prompt_buf, &prompt_len);
 
-		memset((void *)&prompt_buf, 0, sizeof(prompt_buf));
+#ifdef DEBUG_TOKENS
+		for (int i = 0; i < prompt_len; i++) {
+			int len = get_token_string_length(ctx, prompt_tokens[i]);
+			const char *p = get_token_string(ctx, prompt_tokens[i]);
 
+			printf("\n[DEBUG] token_str: %s, token_id=%d: ", p, prompt_tokens[i]);
+			for (int j = 0; j < len; j++) {
+				printf("%02X ", (unsigned char)p[j]);
+			}
+			printf("\n");
+		}
+#endif
 		/* --- Prompt Processing --- */
-		printf("--- Prompt Processing at pos: %u (Matrix Mode) ---\n", ctx->kv_pos);
+		printf("--- Prompt Processing at pos: %u (Matrix Mode) %zu tokens---\n", ctx->kv_pos, prompt_len);
 		clock_gettime(CLOCK_REALTIME, &start);
 
 		// 1. Unified Embedding Lookup for the prompt
@@ -243,9 +323,15 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 			rms_norm(ctx->mem.normed_ffn_input, ctx->mem.hidden_state, ctx->model->output_norm.data,
 				 ctx->model->embed_dim, ctx->model->norm_eps);
 
-			parallel_mat_vec_unified(ctx->mem.normed_ffn_input, &ctx->model->token_embd, ctx->mem.logits,
-						 ctx->model->embed_dim, ctx->model->vocab_size, use_threads);
-
+			if (ctx->model->output.data != NULL) {
+				parallel_mat_vec_unified(ctx->mem.normed_ffn_input, &ctx->model->output,
+							 ctx->mem.logits, ctx->model->embed_dim, ctx->model->vocab_size,
+							 use_threads);
+			} else {
+				parallel_mat_vec_unified(ctx->mem.normed_ffn_input, &ctx->model->token_embd,
+							 ctx->mem.logits, ctx->model->embed_dim, ctx->model->vocab_size,
+							 use_threads);
+			}
 			// 2. Sample the next token
 			int next_token = predict_next_token(ctx->mem.logits, ctx->model->vocab_size, "temperature",
 							    0.7f, 20, 0.95f, prompt_tokens, prompt_len,
@@ -253,8 +339,8 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 
 			if (in_tool_call) {
 				// If we are inside a tool call, append the token's string to our buffer
-				const char *token_str = get_token_string(ctx->pool, next_token);
-				int token_len = strlen(token_str);
+				const char *token_str = get_token_string(ctx, next_token);
+				int token_len = get_token_string_length(ctx, next_token);
 				if (tool_call_len + token_len < sizeof(tool_call_buffer)) {
 					strcat(tool_call_buffer, token_str);
 					tool_call_len += token_len;
@@ -322,6 +408,7 @@ int main(int argc, char *argv[])
 	int use_mmap = 0;
 
 	printf("Toy Inference Engine\n");
+
 	if (argc < 3) {
 		print_usage();
 		exit(EXIT_SUCCESS);
@@ -367,6 +454,8 @@ int main(int argc, char *argv[])
 
 	ctx->root = create_node();
 	ctx->pool = create_string_pool(1024 * 1024 * 2);
+	ctx->utf8_state = 0;
+	ctx->utf8_codepoint = 0;
 
 	if (gguf_read(ctx, model_path) != 0) {
 		free(ctx);

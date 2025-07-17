@@ -16,10 +16,8 @@ int load_tensor(struct ctx_t *ctx, char *name, Tensor *tensor, int use_mmap)
 {
 	gguf_tensor *ggtensor;
 
-	if ((ggtensor = get_tensor(ctx, name)) == NULL) {
-		fprintf(stderr, "Failed to load %s\n", name);
+	if ((ggtensor = get_tensor(ctx, name)) == NULL)
 		return -1;
-	}
 
 	// Populate the Tensor struct
 	tensor->type = ggtensor->type; // e.g., GGUF_TYPE_Q6_K
@@ -66,6 +64,7 @@ int model_create(struct ctx_t *ctx, int use_mmap)
 	gguf_get_metadata_value(ctx, "qwen3.attention.layer_norm_rms_epsilon", (float *)&ctx->model->norm_eps);
 	gguf_get_metadata_value(ctx, "tokenizer.ggml.eos_token_id", &ctx->model->eos_token);
 
+
 	if (gguf_metadata_read_tokens_embed(ctx, "tokenizer.ggml.tokens") != 0) {
 		free(ctx->model);
 		perror("Failed to read tokens_embed array");
@@ -81,7 +80,6 @@ int model_create(struct ctx_t *ctx, int use_mmap)
 
 	ctx->tensor_loaded = 0;
 
-	// TODO free!
 	if (load_tensor(ctx, "token_embd.weight", &ctx->model->token_embd, use_mmap) != 0) {
 		fprintf(stderr, "Failed to load token_embd.weight\n");
 		return -1;
@@ -90,6 +88,10 @@ int model_create(struct ctx_t *ctx, int use_mmap)
 	if (load_tensor(ctx, "output_norm.weight", &ctx->model->output_norm, use_mmap) != 0) {
 		fprintf(stderr, "Failed to load token_embd.weight\n");
 		return -1;
+	}
+
+	if (load_tensor(ctx, "output.weight", &ctx->model->output, use_mmap) != 0) {
+		printf("Model using tied embedding, no output weight\n");
 	}
 
 	if ((ctx->model->layers = calloc(ctx->model->num_layers, sizeof(layer_weights))) == NULL) {
@@ -217,8 +219,12 @@ void model_cleanup(struct ctx_t *ctx, int use_mmap)
 	free(ctx->kv_cache);
 
 	if (use_mmap == 1) {
+
 		free(ctx->model->token_embd.data);
 		free(ctx->model->output_norm.data);
+
+		if (ctx->model->output.data)
+			free(ctx->model->output.data);
 
 		for (uint32_t block_idx = 0; block_idx < ctx->model->num_layers; block_idx++) {
 			free(ctx->model->layers[block_idx].attn_q.data);
@@ -238,6 +244,9 @@ void model_cleanup(struct ctx_t *ctx, int use_mmap)
 	free(ctx->model->layers);
 	free(ctx->model);
 	free(ctx->rope_cache);
+
+	free(ctx->token_table);
+	free(ctx->token_lens);
 
 	free_trie(ctx->root);
 	free_string_pool(ctx->pool);
