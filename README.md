@@ -1,7 +1,7 @@
-# Tiny Inference Engine (TIE)
+# Toy Inference Engine (TIE)
 
 A **minimal CPU-only** transformer inference engine designed to run Qwen3 models (currently supports Qwen3 0.6B / 1.7B / 4B).  
-It includes an interactive mode, tokenizer, rope, KV cache, attention, and tool-call support. No MOE currently.
+It includes an interactive mode, tokenizer, rope, KV cache, attention, and tool-call support.
 
 Not a speed daemon (about 2.4 TPS for 4B model) — but designed for simplicity, portability, and experimentation.
 
@@ -78,7 +78,7 @@ Special tokens: 26
 
 - Clang or GCC (x86_64 with AVX2 + FMA)
 - 16GB RAM for 4B model
-- Linux/macOS (tested on both)
+- macOS
 
 ---
 

@@ -321,7 +321,7 @@ int main(int argc, char *argv[])
 	char *model_path;
 	int use_mmap = 0;
 
-	printf("Tiny Inference Engine\n");
+	printf("Toy Inference Engine\n");
 	if (argc < 3) {
 		print_usage();
 		exit(EXIT_SUCCESS);
