@@ -5,8 +5,6 @@ It includes an interactive mode, tokenizer, rope, KV cache, attention, and tool-
 
 Not breaking any speed records (~3.5 TPS for 4B model (Q6_K), ~9.5 for 1.7B) — but designed for simplicity and experimentation.
 
----
-
 ## Features
 
 -  Runs Qwen3 GGUF models (0.6B, 1.7B, 4B, 8B tested)
@@ -18,6 +16,24 @@ Not breaking any speed records (~3.5 TPS for 4B model (Q6_K), ~9.5 for 1.7B) —
 -  Multi-threaded via custom thread pool
 -  Loads GGUF metadata and tensor layout
 -  No external library dependency
+
+---
+
+## Example: 0.6B processing
+
+Welcome to Qwen3 interactive chat. Type 'exit' to quit.
+
+You: Hi! Please tell me something about you! /no_think
+--- Prompt Processing at pos: 0 (Matrix Mode) 21 tokens---
+--- Prompt Processing Complete 21 tokens, time: 408 msec ---
+
+--- Generation Start at pos: 21 (Max 8192 new tokens) ---
+Qwen3: <think>
+
+</think>
+
+Hello! I'm an AI assistant that helps with various tasks and questions. I don't have personal experiences or feelings, but I can assist you with any questions you have. Let me know how I can help!<|im_end|>
+--- Generation End --- 48 tokens, 2055 msec, tps: 23.4
 
 ---
 
