@@ -37,9 +37,9 @@ void reset_kv_cache(struct ctx_t *ctx)
 {
 	for (int i = 0; i < ctx->model->num_layers; i++) {
 		memset(ctx->kv_cache[i].k, 0,
-		       ctx->model->seq_length * ctx->model->num_kv_heads * ctx->model->head_dim * sizeof(float));
+		       ctx->model->seq_length * ctx->model->num_kv_heads * ctx->model->head_dim * sizeof(uint16_t));
 		memset(ctx->kv_cache[i].v, 0,
-		       ctx->model->seq_length * ctx->model->num_kv_heads * ctx->model->head_dim * sizeof(float));
+		       ctx->model->seq_length * ctx->model->num_kv_heads * ctx->model->head_dim * sizeof(uint16_t));
 	}
 }
 
@@ -135,14 +135,7 @@ static void apply_rope_cache(struct ctx_t *ctx, float *x, int pos, int head_dim)
 	}
 }
 
-/*
- *    pointer to cache->k or cache->v
- *    time step (token position)
- *    kv head index
- *    dimension per head
- *    number of KV heads (usually 8 for GQA)
- */
-static inline float *get_kv_head(float *cache_base, int t, int kv_head_idx, int head_dim, int num_kv_heads)
+static inline uint16_t *get_kv_head(uint16_t *cache_base, int t, int kv_head_idx, int head_dim, int num_kv_heads)
 {
 	// Total vector size for each timestep = num_kv_heads * head_dim
 	int kv_dim = num_kv_heads * head_dim;
@@ -173,13 +166,13 @@ static void attention_task(void *arg)
 
 		// --- 1. Calculate Raw Attention Scores ---
 		// Calculate the dot product of the current FP32 Q-head with all previous
-		// FP32 K-heads in the cache
+		// BF16 K-heads in the cache
 		for (int t = 0; t <= current_pos; t++) {
-			// Read from K cache, which stores FP32
-			float *k_head =
+			// Read from K cache, which stores BF16
+			uint16_t *k_head =
 				get_kv_head(cache->k, t, kv_head_idx, ctx->model->head_dim, ctx->model->num_kv_heads);
-			// Use the new dot product for two FP32 vectors
-			float score = dot_product_f32(q_head, k_head, ctx->model->head_dim);
+			// Use the new dot product for FP32 and BF16 vectors
+			float score = dot_product_f32_bf16(q_head, k_head, ctx->model->head_dim);
 			attn_scores_buffer[t] = score * ctx->model->attn_scale;
 		}
 
@@ -204,16 +197,17 @@ static void attention_task(void *arg)
 
 		// --- 3. Calculate Weighted Sum of V-vectors ---
 		for (int t = 0; t <= current_pos; t++) {
-			// Read from V cache, which stores FP32
-			float *v_head =
+			// Read from V cache, which stores BF16
+			uint16_t *v_head =
 				get_kv_head(cache->v, t, kv_head_idx, ctx->model->head_dim, ctx->model->num_kv_heads);
 			// Normalize the score to get the final attention weight
 			float attention_weight = attn_scores_buffer[t] * inv_sum_exp;
 
-			// Accumulate weighted FP32 V-vector values into the output head buffer
-			for (int i = 0; i < ctx->model->head_dim; i++) {
-				out_head[i] = fmaf(attention_weight, v_head[i], out_head[i]);
-			}
+			// Accumulate weighted V-vector values into the output head buffer
+//			for (int i = 0; i < ctx->model->head_dim; i++) {
+//				out_head[i] = fmaf(attention_weight, bf16_to_fp32(v_head[i]), out_head[i]);
+//			}
+			accumulate_weighted_fp32_bf16(out_head, attention_weight, v_head, ctx->model->head_dim);
 		}
 	}
 
@@ -263,9 +257,9 @@ void attention_batch_sequential(struct ctx_t *ctx, int batch_len, int layer_idx,
 			// The current Q-head dots with all *previous* K-heads in the cache.
 			for (int t = 0; t <= absolute_pos; t++) {
 				// This is the "key" token (the one being looked at).
-				float *k_head =
+				uint16_t *k_head =
 					ctx->kv_cache[layer_idx].k + (long long)t * kv_dim + kv_head_idx * head_dim;
-				float score = dot_product_f32(q_head, k_head, head_dim);
+				float score = dot_product_f32_bf16(q_head, k_head, head_dim);
 				attn_scores_buffer[t] = score * ctx->model->attn_scale;
 			}
 
@@ -292,14 +286,15 @@ void attention_batch_sequential(struct ctx_t *ctx, int batch_len, int layer_idx,
 			// Zero out the output head before accumulating
 			memset(out_head, 0, head_dim * sizeof(float));
 			for (int t = 0; t <= absolute_pos; t++) {
-				float *v_head =
+				uint16_t *v_head =
 					ctx->kv_cache[layer_idx].v + (long long)t * kv_dim + kv_head_idx * head_dim;
 				float attention_weight = attn_scores_buffer[t];
 
 				// Accumulate weighted V-vectors
-				for (int i = 0; i < head_dim; i++) {
-					out_head[i] += attention_weight * v_head[i];
-				}
+//				for (int i = 0; i < head_dim; i++) {
+//					out_head[i] += attention_weight * bf16_to_fp32(v_head[i]);
+//				}
+				accumulate_weighted_fp32_bf16(out_head, attention_weight, v_head, head_dim);
 			}
 		}
 	}
@@ -341,9 +336,9 @@ static void process_attention_batch_task(void *arg)
 			// 1. --- Calculate Raw Attention Scores ---
 			// The Q-head dots with ALL previous K-heads, up to its absolute_pos
 			for (int t = 0; t <= absolute_pos; t++) {
-				float *k_head =
+				uint16_t *k_head =
 					ctx->kv_cache[layer_idx].k + (long long)t * kv_dim + kv_head_idx * head_dim;
-				float score = dot_product_f32(q_head, k_head, head_dim);
+				float score = dot_product_f32_bf16(q_head, k_head, head_dim);
 				attn_scores_buffer[t] = score * ctx->model->attn_scale;
 			}
 
@@ -368,12 +363,14 @@ static void process_attention_batch_task(void *arg)
 			// 3. --- Calculate Weighted Sum of V-vectors ---
 			memset(out_head, 0, head_dim * sizeof(float));
 			for (int t = 0; t <= absolute_pos; t++) {
-				float *v_head =
+				uint16_t *v_head =
 					ctx->kv_cache[layer_idx].v + (long long)t * kv_dim + kv_head_idx * head_dim;
 				float attention_weight = attn_scores_buffer[t];
-				for (int j = 0; j < head_dim; j++) {
-					out_head[j] += attention_weight * v_head[j];
-				}
+
+//				for (int j = 0; j < head_dim; j++) {
+//					out_head[j] += attention_weight * bf16_to_fp32(v_head[j]);
+//				}
+				accumulate_weighted_fp32_bf16(out_head, attention_weight, v_head, head_dim);
 			}
 		}
 	}
@@ -397,9 +394,9 @@ void attention_parallel(struct ctx_t *ctx, int layer_idx, int current_pos, bool 
 
 			// --- 1. Calculate Raw Attention Scores ---
 			for (int t = 0; t <= current_pos; t++) {
-				float *k_head = get_kv_head(cache->k, t, kv_head_idx, ctx->model->head_dim,
+				uint16_t *k_head = get_kv_head(cache->k, t, kv_head_idx, ctx->model->head_dim,
 							    ctx->model->num_kv_heads);
-				float score = dot_product_f32(q_head, k_head, ctx->model->head_dim);
+				float score = dot_product_f32_bf16(q_head, k_head, ctx->model->head_dim);
 				ctx->mem.attn_scores_buffer[0][t] =
 					score * ctx->model->attn_scale; // Use first buffer for sequential mode
 			}
@@ -424,12 +421,14 @@ void attention_parallel(struct ctx_t *ctx, int layer_idx, int current_pos, bool 
 			// --- 3. Calculate Weighted Sum of V-vectors ---
 			memset(out_head, 0, ctx->model->head_dim * sizeof(float));
 			for (int t = 0; t <= current_pos; t++) {
-				float *v_head = get_kv_head(cache->v, t, kv_head_idx, ctx->model->head_dim,
+				uint16_t *v_head = get_kv_head(cache->v, t, kv_head_idx, ctx->model->head_dim,
 							    ctx->model->num_kv_heads);
 				float attention_weight = ctx->mem.attn_scores_buffer[0][t] * inv_sum_exp;
-				for (int i = 0; i < ctx->model->head_dim; i++) {
-					out_head[i] = fmaf(attention_weight, v_head[i], out_head[i]);
-				}
+
+//				for (int i = 0; i < ctx->model->head_dim; i++) {
+//					out_head[i] = fmaf(attention_weight, bf16_to_fp32(v_head[i]), out_head[i]);
+//				}
+				accumulate_weighted_fp32_bf16(out_head, attention_weight, v_head, ctx->model->head_dim);
 			}
 		}
 
@@ -564,8 +563,10 @@ int transformer_layer_unified(struct ctx_t *ctx, int layer_idx, int batch_len, b
 	}
 
 	// Step 4: Store K/V to cache
-	memcpy(cache->k + (long long)start_pos * kv_dim, ctx->mem.K, (long long)batch_len * kv_dim * sizeof(float));
-	memcpy(cache->v + (long long)start_pos * kv_dim, ctx->mem.V, (long long)batch_len * kv_dim * sizeof(float));
+	for (int i = 0; i < batch_len * kv_dim; i++) {
+		cache->k[start_pos * kv_dim + i] = fp32_to_bf16(ctx->mem.K[i]);
+		cache->v[start_pos * kv_dim + i] = fp32_to_bf16(ctx->mem.V[i]);
+	}
 
 	// Step 5: Multi-Head Attention Calculation
 	attention_unified(ctx, batch_len, layer_idx, start_pos, use_threads);

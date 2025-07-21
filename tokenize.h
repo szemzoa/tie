@@ -71,9 +71,7 @@ extern void free_string_pool(StringPool *pool);
 
 extern void bpe_map_insert(bpe_merge_map_t *map, uint64_t key, uint32_t rank);
 extern void replace_g_spaces(char *s);
-//extern const char *get_token_string(const StringPool *pool, int token_id);
-//extern int get_token_string_length(StringPool *pool, int token_id);
-extern const char *get_token_string(const struct ctx_t *ctx, int token_id);
+extern const unsigned char *get_token_string(const struct ctx_t *ctx, int token_id);
 extern int get_token_string_length(const struct ctx_t *ctx, int token_id);
 
 extern int vocab_lookup_token_id(TrieNode *root, const char *token, size_t len);

@@ -6,6 +6,22 @@
 #include "gguf.h"
 #include "model.h"
 
+enum {
+	TOOL_CALL_STATE_UNINITIALIZED = 0,
+	TOOL_CALL_STATE_IDLE,
+	TOOL_CALL_STATE_PROCESSING,
+	TOOL_CALL_STATE_END,
+};
+
+struct tool_call_t {
+	int state;
+	int token_start;
+	int token_end;
+	char buffer[TOOL_CALL_BUFFER_SIZE];
+	int len;
+	char *result;
+};
+
 typedef char *(*tool_func_t)(const char *);
 
 struct tool_entry_t {
@@ -30,8 +46,8 @@ struct tfmem_t {
 };
 
 typedef struct {
-	float *k;
-	float *v;
+	uint16_t *k;
+	uint16_t *v;
 	int size;
 } LayerKVCache;
 
@@ -67,9 +83,9 @@ struct ctx_t {
 	TrieNode *root;
 	StringPool *pool;
 
-	char **token_table; // Points to each token string in pool->data
-	int *token_lens;    // Length of each token
-	int token_count;    // Total number of tokens
+	unsigned char **token_table; 	// Points to each token string in pool->data
+	int *token_lens;    		// Length of each token
+	int token_count;    		// Total number of tokens
 
 	unsigned int utf8_state;
 	unsigned int utf8_codepoint;

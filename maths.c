@@ -12,7 +12,6 @@
 
 void dequantize_row_q6_k_avx2(const void *__restrict__ q_void, float *__restrict__ y, int k);
 
-
 inline float bf16_to_fp32(uint16_t bf16)
 {
 	union {
@@ -21,6 +20,15 @@ inline float bf16_to_fp32(uint16_t bf16)
 	} converter;
 	converter.u = ((uint32_t)bf16) << 16;
 	return converter.f;
+}
+
+uint16_t fp32_to_bf16(float f)
+{
+    union {
+        float f;
+        uint32_t u;
+    } u = { .f = f };
+    return (uint16_t)(u.u >> 16);
 }
 
 float *convert_bf16_to_f32(void *bf16_ptr, size_t count)
@@ -225,6 +233,48 @@ float dot_product_f32_avx2(const float *__restrict a, const float *__restrict b,
 }
 
 __attribute__((target("avx2")))
+float dot_product_f32_bf16_avx2(const float *__restrict a, const uint16_t *__restrict b, int size)
+{
+    __m256 acc = _mm256_setzero_ps();
+
+    int i = 0;
+    for (; i + 8 <= size; i += 8) {
+        // Load 8 BF16 values (16-bit integers)
+        __m128i b_half = _mm_loadu_si128((const __m128i *)(b + i)); // 8 * uint16_t
+
+        // Zero-extend to 32-bit integers
+        __m256i b_i32 = _mm256_cvtepu16_epi32(b_half); // 8 * uint32_t
+
+        // Shift left by 16 bits → BF16 to FP32 bits
+        __m256i b_fp32_bits = _mm256_slli_epi32(b_i32, 16);
+
+        // Reinterpret as float
+        __m256 b_fp32 = _mm256_castsi256_ps(b_fp32_bits);
+
+        // Load 8 floats from a
+        __m256 a_fp32 = _mm256_loadu_ps(a + i);
+
+        // Multiply-accumulate
+        acc = _mm256_fmadd_ps(a_fp32, b_fp32, acc);
+    }
+
+    // Horizontal add
+    float sum[8];
+    _mm256_storeu_ps(sum, acc);
+
+    float result = sum[0] + sum[1] + sum[2] + sum[3] +
+                   sum[4] + sum[5] + sum[6] + sum[7];
+
+    // Tail loop
+    for (; i < size; i++) {
+        float b_val = bf16_to_fp32(b[i]);
+        result = fmaf(a[i], b_val, result);
+    }
+
+    return result;
+}
+
+__attribute__((target("avx2")))
 void mat_vec_avx2_row(const float *x, const float *w, float *o, int in_dim, int start_row, int end_row)
 {
 	for (int i = start_row; i < end_row; i++) {
@@ -344,6 +394,7 @@ void dequantize_row_q6_k_avx2(const void *__restrict__ q_void, float *__restrict
 		}
 	}
 }
+
 __attribute__((target("avx2")))
 float dot_product_q6_k_avx2(const float *x, const block_q6_k *block)
 {
@@ -430,6 +481,42 @@ float dot_product_q6_k_avx2(const float *x, const block_q6_k *block)
 
     return sum;
 }
+
+__attribute__((target("avx2")))
+void accumulate_weighted_fp32_bf16_avx2(float *__restrict out, float weight, const uint16_t *__restrict v_bf16, int size)
+{
+    __m256 weight_ps = _mm256_set1_ps(weight);
+
+    int i = 0;
+    for (; i + 8 <= size; i += 8) {
+        // Load 8 uint16_t BF16 values
+        __m128i v_half = _mm_loadu_si128((const __m128i *)(v_bf16 + i));
+
+        // Convert to 8 * uint32_t
+        __m256i v_i32 = _mm256_cvtepu16_epi32(v_half);
+
+        // Shift left 16 bits → convert to FP32 bit pattern
+        __m256i v_bits = _mm256_slli_epi32(v_i32, 16);
+
+        // Cast to float
+        __m256 v_ps = _mm256_castsi256_ps(v_bits);
+
+        // Load output
+        __m256 out_ps = _mm256_loadu_ps(out + i);
+
+        // Fused multiply-add
+        __m256 result = _mm256_fmadd_ps(weight_ps, v_ps, out_ps);
+
+        // Store result
+        _mm256_storeu_ps(out + i, result);
+    }
+
+    // Handle remaining tail
+    for (; i < size; i++) {
+        out[i] = fmaf(weight, bf16_to_fp32(v_bf16[i]), out[i]);
+    }
+}
+
 #endif
 
 
@@ -544,6 +631,34 @@ float dot_product_f32(const float *__restrict a, const float *__restrict b, int 
 		sum = fmaf(a[j], b[j], sum);
 
 	return sum;
+}
+
+float dot_product_f32_bf16(const float *__restrict a, const uint16_t *__restrict b, int size)
+{
+#ifdef CONFIG_ENABLE_AVX2
+	if (__builtin_cpu_supports("avx2")) {
+		return dot_product_f32_bf16_avx2(a, b, size);
+	}
+#endif
+
+	float sum = 0.0f;
+	for (int j = 0; j < size; j++)
+		sum = fmaf(a[j], bf16_to_fp32(b[j]), sum);
+
+	return sum;
+}
+
+void accumulate_weighted_fp32_bf16(float *out, float weight, const uint16_t *v, int size)
+{
+#ifdef CONFIG_ENABLE_AVX2
+	if (__builtin_cpu_supports("avx2")) {
+		return accumulate_weighted_fp32_bf16_avx2(out, weight, v, size);
+	}
+#endif
+
+	for (int i = 0; i < size; i++) {
+    	    out[i] = fmaf(weight, bf16_to_fp32(v[i]), out[i]);
+	}
 }
 
 static void process_mat_vec_task_fp32(void *arg)

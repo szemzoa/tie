@@ -10,4 +10,6 @@
 #define MAX_THREADS 16
 #define MAX_TASKS 256
 
+#define TOOL_CALL_BUFFER_SIZE 1024
+
 #endif

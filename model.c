@@ -258,7 +258,7 @@ int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penal
 	ctx->model->repetition_penalty = repetiton_penality;
 	ctx->model->attn_scale = 1.0f / sqrtf(ctx->model->head_dim);
 
-	printf("Initializing Qwen3 model with the following configuration:\n");
+	printf("Initializing %s model with the following configuration:\n", gguf_get_metadata_string(ctx, "general.architecture"));
 	printf("Embed Dim: %d, Layers: %d, Heads: %d, KV Heads: %d, Head Dim: %d\n", ctx->model->embed_dim,
 	       ctx->model->num_layers, ctx->model->num_heads, ctx->model->num_kv_heads, ctx->model->head_dim);
 	printf("FFN Dim: %d, Rope Base: %.1f, Seq Len: %d, Vocab: %llu, Yarn Scale: "
@@ -266,31 +266,6 @@ int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penal
 	       ctx->model->ffn_dim, ctx->model->rope_freq_base, ctx->model->seq_length, ctx->model->vocab_size,
 	       ctx->model->yarn_scale_factor, ctx->model->norm_eps);
 
-	printf("Initializing Qwen3 model KV cache\n");
-	ctx->kv_cache = calloc(ctx->model->num_layers, sizeof(LayerKVCache));
-	if (!ctx->kv_cache) {
-		perror("Failed to allocate LayerKVCache array");
-		return -1;
-	}
-
-	long long k_elements_per_layer =
-		(long long)ctx->model->seq_length * ctx->model->num_kv_heads * ctx->model->head_dim;
-
-	printf("KV cache elements per layer: %lld\n", k_elements_per_layer);
-	for (int i = 0; i < ctx->model->num_layers; i++) {
-		ctx->kv_cache[i].k = calloc(k_elements_per_layer, sizeof(float));
-		ctx->kv_cache[i].v = calloc(k_elements_per_layer, sizeof(float));
-
-		if (!ctx->kv_cache[i].k || !ctx->kv_cache[i].v) {
-			perror("Failed to allocate K or V cache for a layer");
-			for (int j = 0; j < i; ++j) {
-				free(ctx->kv_cache[j].k);
-				free(ctx->kv_cache[j].v);
-			}
-			free(ctx->kv_cache);
-			return -1;
-		}
-	}
 
 	// Initialize SiLU lookup table
 	silu_table_init();
@@ -299,11 +274,40 @@ int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penal
 	ctx->rope_cache = malloc(sizeof(rope_cache_t));
 	if (!ctx->rope_cache) {
 		perror("Failed to allocate rope_cache");
-		goto _init_error_free_kv_cache;
+		return -1;
+	}
+	rope_cache_init(ctx, ctx->model->seq_length, ctx->model->head_dim, ctx->model->rope_freq_base);
+
+
+	printf("Initializing KV cache\n");
+	ctx->kv_cache = calloc(ctx->model->num_layers, sizeof(LayerKVCache));
+	if (!ctx->kv_cache) {
+		perror("Failed to allocate LayerKVCache array");
+		free(ctx->rope_cache);
 		return -1;
 	}
 
-	rope_cache_init(ctx, ctx->model->seq_length, ctx->model->head_dim, ctx->model->rope_freq_base);
+	long long k_elements_per_layer =
+		(long long)ctx->model->seq_length * ctx->model->num_kv_heads * ctx->model->head_dim;
+
+	printf("KV cache elements per layer: %lld\n", k_elements_per_layer);
+	for (int i = 0; i < ctx->model->num_layers; i++) {
+		ctx->kv_cache[i].k = calloc(k_elements_per_layer, sizeof(uint16_t));
+		ctx->kv_cache[i].v = calloc(k_elements_per_layer, sizeof(uint16_t));
+
+		if (!ctx->kv_cache[i].k || !ctx->kv_cache[i].v) {
+			perror("Failed to allocate K or V cache for a layer");
+			for (int j = 0; j < i; ++j) {
+				free(ctx->kv_cache[j].k);
+				free(ctx->kv_cache[j].v);
+			}
+			free(ctx->kv_cache);
+			free(ctx->rope_cache);
+			return -1;
+		}
+	}
+	printf("KV cache uses: %lld MB\n", (k_elements_per_layer * sizeof(uint16_t)) * 2 * ctx->model->num_layers / 1024 / 1024);
+
 
 	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
 	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
@@ -343,6 +347,7 @@ _init_error_free_kv_cache:
 	}
 
 	free(ctx->kv_cache);
+	free(ctx->rope_cache);
 
 	return -1;
 }

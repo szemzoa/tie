@@ -21,7 +21,6 @@ Not breaking any speed records (~3.5 TPS for 4B model (Q6_K), ~9.5 for 1.7B) —
 
 ## Example: 0.6B processing
 
-```
 Welcome to Qwen3 interactive chat. Type 'exit' to quit.
 
 You: Hi! Please tell me something about you! /no_think
@@ -35,7 +34,6 @@ Qwen3: <think>
 
 Hello! I'm an AI assistant that helps with various tasks and questions. I don't have personal experiences or feelings, but I can assist you with any questions you have. Let me know how I can help!<|im_end|>
 --- Generation End --- 48 tokens, 2055 msec, tps: 23.4
-```
 
 ---
 

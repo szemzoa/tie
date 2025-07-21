@@ -48,12 +48,12 @@ int append_to_pool(StringPool *pool, const char *str, size_t len)
 	}
 	memcpy(pool->data + pool->size, str, len);
 	pool->size += len;
-	pool->data[pool->size] = '\0';
-	pool->size++;
+//	pool->data[pool->size] = '\0';
+//	pool->size++;
 	return 1;
 }
 
-const char *get_token_string(const struct ctx_t *ctx, int token_id)
+const unsigned char *get_token_string(const struct ctx_t *ctx, int token_id)
 {
 	if (token_id < 0 || token_id >= ctx->token_count)
 		return NULL;

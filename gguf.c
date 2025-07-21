@@ -21,7 +21,8 @@ int gguf_read_metadata_type_uint8(struct ctx_t *ctx, struct gguf_metadata_kv_t *
 		return -1;
 	}
 
-	*(uint8_t *)metadata->data = *(uint8_t *)ctx->fptr;
+	memcpy(metadata->data, ctx->fptr, sizeof(uint8_t));
+
 	ctx->fptr += sizeof(uint8_t);
 	metadata->size = sizeof(uint8_t);
 
@@ -34,7 +35,8 @@ int gguf_read_metadata_type_int8(struct ctx_t *ctx, struct gguf_metadata_kv_t *m
 		return -1;
 	}
 
-	*(int8_t *)metadata->data = *(int8_t *)ctx->fptr;
+	memcpy(metadata->data, ctx->fptr, sizeof(int8_t));
+
 	ctx->fptr += sizeof(int8_t);
 	metadata->size = sizeof(int8_t);
 
@@ -47,7 +49,8 @@ int gguf_read_metadata_type_uint16(struct ctx_t *ctx, struct gguf_metadata_kv_t 
 		return -1;
 	}
 
-	*(uint16_t *)metadata->data = *(uint16_t *)ctx->fptr;
+	memcpy(metadata->data, ctx->fptr, sizeof(uint16_t));
+
 	ctx->fptr += sizeof(uint16_t);
 	metadata->size = sizeof(uint16_t);
 
@@ -60,7 +63,7 @@ int gguf_read_metadata_type_int16(struct ctx_t *ctx, struct gguf_metadata_kv_t *
 		return -1;
 	}
 
-	*(int16_t *)metadata->data = *(int16_t *)ctx->fptr;
+	memcpy(metadata->data, ctx->fptr, sizeof(int16_t));
 	ctx->fptr += sizeof(int16_t);
 	metadata->size = sizeof(int16_t);
 
@@ -73,7 +76,7 @@ int gguf_read_metadata_type_uint32(struct ctx_t *ctx, struct gguf_metadata_kv_t 
 		return -1;
 	}
 
-	*(uint32_t *)metadata->data = *(uint32_t *)ctx->fptr;
+	memcpy(metadata->data, ctx->fptr, sizeof(uint32_t));
 	ctx->fptr += sizeof(uint32_t);
 	metadata->size = sizeof(uint32_t);
 
@@ -86,7 +89,7 @@ int gguf_read_metadata_type_int32(struct ctx_t *ctx, struct gguf_metadata_kv_t *
 		return -1;
 	}
 
-	*(int32_t *)metadata->data = *(int32_t *)ctx->fptr;
+	memcpy(metadata->data, ctx->fptr, sizeof(int32_t));
 	ctx->fptr += sizeof(int32_t);
 	metadata->size = sizeof(int32_t);
 
@@ -99,7 +102,7 @@ int gguf_read_metadata_type_uint64(struct ctx_t *ctx, struct gguf_metadata_kv_t 
 		return -1;
 	}
 
-	*(uint64_t *)metadata->data = *(uint64_t *)ctx->fptr;
+	memcpy(metadata->data, ctx->fptr, sizeof(uint64_t));
 	ctx->fptr += sizeof(uint64_t);
 	metadata->size = sizeof(uint64_t);
 
@@ -112,7 +115,7 @@ int gguf_read_metadata_type_int64(struct ctx_t *ctx, struct gguf_metadata_kv_t *
 		return -1;
 	}
 
-	*(int64_t *)metadata->data = *(int64_t *)ctx->fptr;
+	memcpy(metadata->data, ctx->fptr, sizeof(int64_t));
 	ctx->fptr += sizeof(int64_t);
 	metadata->size = sizeof(int64_t);
 
@@ -125,7 +128,7 @@ int gguf_read_metadata_type_fp32(struct ctx_t *ctx, struct gguf_metadata_kv_t *m
 		return -1;
 	}
 
-	*(float *)metadata->data = *(float *)ctx->fptr;
+	memcpy(metadata->data, ctx->fptr, sizeof(float));
 	ctx->fptr += sizeof(float);
 	metadata->size = sizeof(float);
 
@@ -138,7 +141,7 @@ int gguf_read_metadata_type_fp64(struct ctx_t *ctx, struct gguf_metadata_kv_t *m
 		return -1;
 	}
 
-	*(double *)metadata->data = *(double *)ctx->fptr;
+	memcpy(metadata->data, ctx->fptr, sizeof(double));
 	ctx->fptr += sizeof(double);
 	metadata->size = sizeof(double);
 
@@ -215,6 +218,21 @@ int gguf_get_metadata_value(struct ctx_t *ctx, char *key, void *value)
 	}
 
 	return -1;
+}
+
+char *gguf_get_metadata_string(struct ctx_t *ctx, char *key)
+{
+	struct gguf_metadata_kv_t *metadata;
+	uint64_t i = 0;
+
+	for (i = 0; i < ctx->metadata_kv_count; i++) {
+		metadata = &ctx->metadata[i];
+
+		if (!strcmp(ctx->metadata[i].name, key))
+			return metadata->data;
+	}
+
+	return NULL;
 }
 
 int gguf_get_metadata_size(struct ctx_t *ctx, char *key, uint64_t *size)
@@ -822,7 +840,7 @@ void gguf_close(struct ctx_t *ctx)
 
 int init_token_table(struct ctx_t *ctx, int num_tokens)
 {
-	ctx->token_table = calloc(num_tokens, sizeof(char *));
+	ctx->token_table = calloc(num_tokens, sizeof(unsigned char *));
 	ctx->token_lens = calloc(num_tokens, sizeof(int));
 	ctx->token_count = num_tokens;
 
@@ -842,7 +860,7 @@ static inline bool is_special_token_fast(const char *s, size_t len)
 int gguf_metadata_read_tokens_embed(struct ctx_t *ctx, char *key)
 {
 	struct gguf_metadata_kv_t *metadata = NULL;
-	uint64_t i;
+	uint64_t i, str_len;
 
 	for (i = 0; i < ctx->metadata_kv_count; i++) {
 		if (!strcmp(ctx->metadata[i].name, key)) {
@@ -870,12 +888,13 @@ int gguf_metadata_read_tokens_embed(struct ctx_t *ctx, char *key)
 	}
 
 	for (i = 0; i < metadata->size; i++) {
-		uint64_t str_len = *(uint64_t *)ctx->fptr;
+		memcpy(&str_len, ctx->fptr, sizeof(uint64_t));
+
 		ctx->fptr += sizeof(uint64_t);
 
-		const char *raw_token = (const char *)ctx->fptr;
+		const unsigned char *raw_token = (const unsigned char *)ctx->fptr;
 
-		char *token_ptr = ctx->pool->data + ctx->pool->size;
+		unsigned char *token_ptr = ctx->pool->data + ctx->pool->size;
 		if (!append_to_pool(ctx->pool, raw_token, str_len)) {
 			printf("Failed to append token %llu to pool\n", i);
 			return -1;

@@ -46,7 +46,6 @@ typedef struct {
 	Tensor output_norm;
 	Tensor output;
 	layer_weights *layers;
-
 } Qwen3Model;
 
 extern int model_create(struct ctx_t *ctx, int use_mmap);

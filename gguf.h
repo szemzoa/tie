@@ -106,6 +106,7 @@ extern void gguf_close(struct ctx_t *ctx);
 
 extern int gguf_read_metadata_type_string(struct ctx_t *ctx, struct gguf_metadata_kv_t *metadata);
 extern int gguf_get_metadata_value(struct ctx_t *ctx, char *key, void *value);
+extern char *gguf_get_metadata_string(struct ctx_t *ctx, char *key);
 extern int gguf_get_metadata_size(struct ctx_t *ctx, char *key, uint64_t *size);
 extern int gguf_metadata_read_tokens_embed(struct ctx_t *ctx, char *key);
 extern int gguf_metadata_read_merges(struct ctx_t *ctx, char *key);
