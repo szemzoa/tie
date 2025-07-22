@@ -96,7 +96,7 @@ char *execute_tool_from_buffer(char *tool_call_buffer)
 	const char *args_field = "\"state\": \"";
 
 	char function_name[64] = {0};
-	char location[128] = {0};
+	char state[128] = {0};
 
 	const char *name_start = strstr(tool_call_buffer, name_field);
 	if (name_start) {
@@ -105,15 +105,15 @@ char *execute_tool_from_buffer(char *tool_call_buffer)
 
 	const char *args_start = strstr(tool_call_buffer, args_field);
 	if (args_start) {
-		sscanf(args_start + strlen(args_field), "%[^\"]", location);
+		sscanf(args_start + strlen(args_field), "%[^\"]", state);
 	}
 
-	printf("Function: '%s', Location: '%s'\n", function_name, location);
+	printf("Function: '%s', State: '%s'\n", function_name, state);
 
 	char *tool_result = NULL;
 	for (int i = 0; tool_calls[i].name != NULL; i++) {
 		if (strcmp(tool_calls[i].name, function_name) == 0) {
-			tool_result = tool_calls[i].func(location);
+			tool_result = tool_calls[i].func(state);
 			goto _tool_call_found;
 		}
 	}
@@ -312,6 +312,7 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 
 		printf("--- Prompt Processing at pos: %u (Matrix Mode) %zu tokens ---\n", ctx->kv_pos, prompt_len);
 		clock_gettime(CLOCK_REALTIME, &start);
+
 		/* prompt processing */
 		process_prompt(ctx, prompt_tokens, prompt_len, use_threads);
 

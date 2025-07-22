@@ -547,8 +547,9 @@ void dump_tensors(struct ctx_t *ctx)
 		printf("type: %6s, ", tensor_get_type_name(tensor->type));
 		printf("shape: [ %llu,\t%llu,\t%llu,\t%llu ],", tensor->dimensions[0], tensor->dimensions[1],
 		       tensor->dimensions[2], tensor->dimensions[3]);
-		printf("\tsize: %.02f MB, offset: %llu\n", (float)tensor->size / 1024 / 1024, tensor->offset);
-		//		printf("\tsize: %llu, offset: %llu\n", tensor->size, tensor->offset);
+		//		printf("\tsize: %.02f MB, offset: %llu\n", (float)tensor->size / 1024 / 1024,
+		//tensor->offset);
+		printf("\tsize: %llu, offset: %llu\n", tensor->size, tensor->offset);
 	}
 }
 #endif
@@ -643,37 +644,31 @@ uint64_t calculate_tensor_size(uint32_t type, uint64_t *dims, uint32_t n_dims)
 		return blocks * block_size;
 	}
 	case GGML_TYPE_Q2_K: {
-		const int QK_K = 256;
 		const int block_size = 84; // 16 (scales) + 64 (quants) + 4 (d, dmin)
 		uint64_t blocks = (n_elements + QK_K - 1) / QK_K;
 		return blocks * block_size;
 	}
 	case GGML_TYPE_Q3_K: {
-		const int QK_K = 256;
 		const int block_size = 100; // 32 (hmask) + 64 (qs) + 2 (scales) + 2 (d)
 		uint64_t blocks = (n_elements + QK_K - 1) / QK_K;
 		return blocks * block_size;
 	}
 	case GGML_TYPE_Q4_K: {
-		const int QK_K = 256;
-		const int block_size = 148; // 2 (d) + 2 (m) + 128 (qs) + 16 (scales)
+		const int block_size = sizeof(block_q4_k);
 		uint64_t blocks = (n_elements + QK_K - 1) / QK_K;
 		return blocks * block_size;
 	}
 	case GGML_TYPE_Q5_K: {
-		const int QK_K = 256;
 		const int block_size = 176; // validated from offsets
 		uint64_t blocks = (n_elements + QK_K - 1) / QK_K;
 		return blocks * block_size;
 	}
 	case GGML_TYPE_Q6_K: {
-		const int QK_K = 256;
 		const int block_size = sizeof(block_q6_k);
 		uint64_t blocks = (n_elements + QK_K - 1) / QK_K;
 		return blocks * block_size;
 	}
 	case GGML_TYPE_Q8_K: {
-		const int QK_K = 256;
 		const int block_size = 280; // 256 (qs) + 16 (scales) + 8 (d)
 		uint64_t blocks = (n_elements + QK_K - 1) / QK_K;
 		return blocks * block_size;
@@ -836,7 +831,6 @@ void gguf_close(struct ctx_t *ctx)
 	munmap(ctx->mapped_data, ctx->file_size);
 	close(ctx->fd);
 }
-
 
 int init_token_table(struct ctx_t *ctx, int num_tokens)
 {

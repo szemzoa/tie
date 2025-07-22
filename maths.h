@@ -40,9 +40,13 @@ extern uint16_t fp32_to_bf16(const float src);
 
 extern float *convert_bf16_to_f32(void *bf16_ptr, size_t count);
 extern void dequantize_row_q6_k(const void *__restrict__ q_void, float *__restrict__ y, int k);
+extern void dequantize_row_q4_k(const void *__restrict__ q_void, float *__restrict__ y, int k);
 
 extern void rms_norm(float *__restrict o, const float *__restrict x, const float *__restrict weight, int size,
-					 float eps);
+		     float eps);
+
+extern void apply_rope_cache_avx2(struct ctx_t *ctx, float *x, int pos, int head_dim);
+
 extern float dot_product_f32(const float *__restrict a, const float *__restrict b, int size);
 extern float dot_product_f32_bf16(const float *__restrict a, const uint16_t *__restrict b, int size);
 extern void accumulate_weighted_fp32_bf16(float *out, float weight, const uint16_t *v, int size);

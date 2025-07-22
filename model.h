@@ -4,7 +4,7 @@
 #include "gguf.h"
 
 typedef struct {
-	enum ggml_type type; // The data type (Q6_K, BF16, etc.)
+	enum ggml_type type;  // The data type (Q6_K, BF16, etc.)
 	void *data;	      // Can point to mmap'd region or malloc'd buffer
 	bool is_mmaped;	      // Flag to know if we need to free() it
 	size_t size_in_bytes; // Total size of the tensor data

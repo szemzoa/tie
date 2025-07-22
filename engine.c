@@ -57,8 +57,8 @@ void rope_cache_init(struct ctx_t *ctx, int max_pos, int head_dim, float base)
 	rope_cache->max_pos = max_pos;
 	rope_cache->head_dim = head_dim;
 
-	rope_cache->sin = malloc(sizeof(float) * max_pos * (head_dim / 2));
-	rope_cache->cos = malloc(sizeof(float) * max_pos * (head_dim / 2));
+	rope_cache->sin = aligned_alloc(32, sizeof(float) * max_pos * (head_dim / 2));
+	rope_cache->cos = aligned_alloc(32, sizeof(float) * max_pos * (head_dim / 2));
 
 	for (int pos = 0; pos < max_pos; ++pos) {
 		float scaled_pos = (float)pos * ctx->model->yarn_scale_factor;
@@ -98,6 +98,11 @@ inline float silu_lookup(float x)
 
 static void apply_rope_cache(struct ctx_t *ctx, float *x, int pos, int head_dim)
 {
+#ifdef CONFIG_ENABLE_AVX2
+	if (__builtin_cpu_supports("avx2")) {
+		return apply_rope_cache_avx2(ctx, x, pos, head_dim);
+	}
+#endif
 	rope_cache_t *rope_cache = ctx->rope_cache;
 	int h_dim_half = head_dim / 2;
 
@@ -204,9 +209,10 @@ static void attention_task(void *arg)
 			float attention_weight = attn_scores_buffer[t] * inv_sum_exp;
 
 			// Accumulate weighted V-vector values into the output head buffer
-//			for (int i = 0; i < ctx->model->head_dim; i++) {
-//				out_head[i] = fmaf(attention_weight, bf16_to_fp32(v_head[i]), out_head[i]);
-//			}
+			//			for (int i = 0; i < ctx->model->head_dim; i++) {
+			//				out_head[i] = fmaf(attention_weight, bf16_to_fp32(v_head[i]),
+			// out_head[i]);
+			//			}
 			accumulate_weighted_fp32_bf16(out_head, attention_weight, v_head, ctx->model->head_dim);
 		}
 	}
@@ -215,98 +221,12 @@ static void attention_task(void *arg)
 }
 
 /**
- * @brief Performs batched, causal self-attention for prompt processing.
- *
- * This function calculates attention for an entire sequence (batch) of tokens at once.
- * It correctly handles the causal nature of the attention mechanism, where each token
- * can only attend to itself and the tokens that came before it.
- *
- * @param ctx The main context struct.
- * @param mem The batched memory workspace.
- * @param batch_len The number of tokens in the prompt.
- * @param layer_idx The current transformer layer index.
- */
-void attention_batch_sequential(struct ctx_t *ctx, int batch_len, int layer_idx, int start_pos)
-{
-	// Get model dimensions
-	int num_heads = ctx->model->num_heads;
-	int head_dim = ctx->model->head_dim;
-	int num_kv_heads = ctx->model->num_kv_heads;
-	int q_dim = num_heads * head_dim;
-	int kv_dim = num_kv_heads * head_dim;
-
-	// The temporary buffer for one token's attention scores.
-	// We reuse this buffer for each token in the batch.
-	float *attn_scores_buffer = ctx->mem.attn_scores_buffer[0];
-
-	// --- Main loop: Iterate over each token in the prompt ---
-	// This is the "query" token (the one that is "looking").
-	for (int i = 0; i < batch_len; i++) {
-		// The absolute position of the current query token
-		int absolute_pos = start_pos + i;
-
-		// --- Loop over each query head for the current token ---
-		for (int h = 0; h < num_heads; h++) {
-			// Get pointers to the current token's Q head and its corresponding output
-			float *q_head = ctx->mem.Q + (long long)i * q_dim + h * head_dim;
-			float *out_head = ctx->mem.attn_output + (long long)i * q_dim + h * head_dim;
-
-			int kv_head_idx = h / (num_heads / num_kv_heads);
-
-			// 1. --- Calculate Raw Attention Scores ---
-			// The current Q-head dots with all *previous* K-heads in the cache.
-			for (int t = 0; t <= absolute_pos; t++) {
-				// This is the "key" token (the one being looked at).
-				uint16_t *k_head =
-					ctx->kv_cache[layer_idx].k + (long long)t * kv_dim + kv_head_idx * head_dim;
-				float score = dot_product_f32_bf16(q_head, k_head, head_dim);
-				attn_scores_buffer[t] = score * ctx->model->attn_scale;
-			}
-
-			// 2. --- Calculate Softmax (for scores 0 to current_pos) ---
-			float max_score = -INFINITY;
-			for (int t = 0; t <= absolute_pos; t++) {
-				if (attn_scores_buffer[t] > max_score) {
-					max_score = attn_scores_buffer[t];
-				}
-			}
-			float sum_exp = 0.0f;
-			for (int t = 0; t <= absolute_pos; t++) {
-				float val = expf(attn_scores_buffer[t] - max_score);
-				attn_scores_buffer[t] = val;
-				sum_exp += val;
-			}
-			float inv_sum_exp = 1.0f / sum_exp;
-			// Normalize scores to get final attention weights
-			for (int t = 0; t <= absolute_pos; t++) {
-				attn_scores_buffer[t] *= inv_sum_exp;
-			}
-
-			// 3. --- Calculate Weighted Sum of V-vectors ---
-			// Zero out the output head before accumulating
-			memset(out_head, 0, head_dim * sizeof(float));
-			for (int t = 0; t <= absolute_pos; t++) {
-				uint16_t *v_head =
-					ctx->kv_cache[layer_idx].v + (long long)t * kv_dim + kv_head_idx * head_dim;
-				float attention_weight = attn_scores_buffer[t];
-
-				// Accumulate weighted V-vectors
-//				for (int i = 0; i < head_dim; i++) {
-//					out_head[i] += attention_weight * bf16_to_fp32(v_head[i]);
-//				}
-				accumulate_weighted_fp32_bf16(out_head, attention_weight, v_head, head_dim);
-			}
-		}
-	}
-}
-
-/**
  * @brief The function executed by each thread for batched attention.
  *
  * This version correctly calculates the absolute position of each token to handle
  * multi-turn conversation context.
  */
-static void process_attention_batch_task(void *arg)
+static void attention_batch_task(void *arg)
 {
 	attention_batch_task_t *task = (attention_batch_task_t *)arg;
 	struct ctx_t *ctx = task->ctx;
@@ -367,9 +287,10 @@ static void process_attention_batch_task(void *arg)
 					ctx->kv_cache[layer_idx].v + (long long)t * kv_dim + kv_head_idx * head_dim;
 				float attention_weight = attn_scores_buffer[t];
 
-//				for (int j = 0; j < head_dim; j++) {
-//					out_head[j] += attention_weight * bf16_to_fp32(v_head[j]);
-//				}
+				//				for (int j = 0; j < head_dim; j++) {
+				//					out_head[j] += attention_weight *
+				// bf16_to_fp32(v_head[j]);
+				//				}
 				accumulate_weighted_fp32_bf16(out_head, attention_weight, v_head, head_dim);
 			}
 		}
@@ -395,7 +316,7 @@ void attention_parallel(struct ctx_t *ctx, int layer_idx, int current_pos, bool 
 			// --- 1. Calculate Raw Attention Scores ---
 			for (int t = 0; t <= current_pos; t++) {
 				uint16_t *k_head = get_kv_head(cache->k, t, kv_head_idx, ctx->model->head_dim,
-							    ctx->model->num_kv_heads);
+							       ctx->model->num_kv_heads);
 				float score = dot_product_f32_bf16(q_head, k_head, ctx->model->head_dim);
 				ctx->mem.attn_scores_buffer[0][t] =
 					score * ctx->model->attn_scale; // Use first buffer for sequential mode
@@ -422,12 +343,13 @@ void attention_parallel(struct ctx_t *ctx, int layer_idx, int current_pos, bool 
 			memset(out_head, 0, ctx->model->head_dim * sizeof(float));
 			for (int t = 0; t <= current_pos; t++) {
 				uint16_t *v_head = get_kv_head(cache->v, t, kv_head_idx, ctx->model->head_dim,
-							    ctx->model->num_kv_heads);
+							       ctx->model->num_kv_heads);
 				float attention_weight = ctx->mem.attn_scores_buffer[0][t] * inv_sum_exp;
 
-//				for (int i = 0; i < ctx->model->head_dim; i++) {
-//					out_head[i] = fmaf(attention_weight, bf16_to_fp32(v_head[i]), out_head[i]);
-//				}
+				//				for (int i = 0; i < ctx->model->head_dim; i++) {
+				//					out_head[i] = fmaf(attention_weight,
+				// bf16_to_fp32(v_head[i]), out_head[i]);
+				//				}
 				accumulate_weighted_fp32_bf16(out_head, attention_weight, v_head, ctx->model->head_dim);
 			}
 		}
@@ -470,7 +392,78 @@ void attention_parallel(struct ctx_t *ctx, int layer_idx, int current_pos, bool 
 void attention_batch(struct ctx_t *ctx, int batch_len, int layer_idx, int start_pos, bool use_threads)
 {
 	if (use_threads == 0) {
-		attention_batch_sequential(ctx, batch_len, layer_idx, start_pos);
+		// Get model dimensions
+		int num_heads = ctx->model->num_heads;
+		int head_dim = ctx->model->head_dim;
+		int num_kv_heads = ctx->model->num_kv_heads;
+		int q_dim = num_heads * head_dim;
+		int kv_dim = num_kv_heads * head_dim;
+
+		// The temporary buffer for one token's attention scores.
+		// We reuse this buffer for each token in the batch.
+		float *attn_scores_buffer = ctx->mem.attn_scores_buffer[0];
+
+		// --- Main loop: Iterate over each token in the prompt ---
+		// This is the "query" token (the one that is "looking").
+		for (int i = 0; i < batch_len; i++) {
+			// The absolute position of the current query token
+			int absolute_pos = start_pos + i;
+
+			// --- Loop over each query head for the current token ---
+			for (int h = 0; h < num_heads; h++) {
+				// Get pointers to the current token's Q head and its corresponding output
+				float *q_head = ctx->mem.Q + (long long)i * q_dim + h * head_dim;
+				float *out_head = ctx->mem.attn_output + (long long)i * q_dim + h * head_dim;
+
+				int kv_head_idx = h / (num_heads / num_kv_heads);
+
+				// 1. --- Calculate Raw Attention Scores ---
+				// The current Q-head dots with all *previous* K-heads in the cache.
+				for (int t = 0; t <= absolute_pos; t++) {
+					// This is the "key" token (the one being looked at).
+					uint16_t *k_head = ctx->kv_cache[layer_idx].k + (long long)t * kv_dim
+							   + kv_head_idx * head_dim;
+					float score = dot_product_f32_bf16(q_head, k_head, head_dim);
+					attn_scores_buffer[t] = score * ctx->model->attn_scale;
+				}
+
+				// 2. --- Calculate Softmax (for scores 0 to current_pos) ---
+				float max_score = -INFINITY;
+				for (int t = 0; t <= absolute_pos; t++) {
+					if (attn_scores_buffer[t] > max_score) {
+						max_score = attn_scores_buffer[t];
+					}
+				}
+				float sum_exp = 0.0f;
+				for (int t = 0; t <= absolute_pos; t++) {
+					float val = expf(attn_scores_buffer[t] - max_score);
+					attn_scores_buffer[t] = val;
+					sum_exp += val;
+				}
+				float inv_sum_exp = 1.0f / sum_exp;
+				// Normalize scores to get final attention weights
+				for (int t = 0; t <= absolute_pos; t++) {
+					attn_scores_buffer[t] *= inv_sum_exp;
+				}
+
+				// 3. --- Calculate Weighted Sum of V-vectors ---
+				// Zero out the output head before accumulating
+				memset(out_head, 0, head_dim * sizeof(float));
+				for (int t = 0; t <= absolute_pos; t++) {
+					uint16_t *v_head = ctx->kv_cache[layer_idx].v + (long long)t * kv_dim
+							   + kv_head_idx * head_dim;
+					float attention_weight = attn_scores_buffer[t];
+
+					// Accumulate weighted V-vectors
+					//				for (int i = 0; i < head_dim; i++) {
+					//					out_head[i] += attention_weight *
+					// bf16_to_fp32(v_head[i]);
+					//				}
+					accumulate_weighted_fp32_bf16(out_head, attention_weight, v_head, head_dim);
+				}
+			}
+		}
+
 		return;
 	}
 
@@ -493,7 +486,7 @@ void attention_batch(struct ctx_t *ctx, int batch_len, int layer_idx, int start_
 						 .end_token_idx = end_token,
 						 .batch_start_pos = start_pos, // Pass the absolute starting position
 						 .thread_id = t};
-		thread_pool_submit(thread_pool, process_attention_batch_task, task);
+		thread_pool_submit(thread_pool, attention_batch_task, task);
 	}
 	thread_pool_wait(thread_pool);
 }
@@ -627,6 +620,32 @@ void get_embedding_row(const Tensor *tensor, int row_index, float *dest, int emb
 {
 	switch (tensor->type) {
 
+	case GGML_TYPE_Q4_K: {
+		int blocks_per_row = embed_dim / QK_K;
+		block_q4_k *src = (block_q4_k *)tensor->data;
+		long long row_block_offset = (long long)row_index * blocks_per_row;
+
+		for (int block_idx = 0; block_idx < blocks_per_row; block_idx++) {
+			dequantize_row_q4_k(&src[row_block_offset + block_idx], dest + block_idx * QK_K, QK_K);
+		}
+		break;
+	}
+
+	case GGML_TYPE_Q6_K: {
+		// The tensor is Q6_K, so we must dequantize the blocks for this row.
+		int blocks_per_row = embed_dim / QK_K;
+
+		block_q6_k *src = (block_q6_k *)tensor->data;
+		long long row_block_offset = (long long)row_index * blocks_per_row;
+
+		for (int block_idx = 0; block_idx < blocks_per_row; block_idx++) {
+			// Dequantize one block from the source and place it in the correct
+			// location in the destination buffer.
+			dequantize_row_q6_k(&src[row_block_offset + block_idx], dest + block_idx * QK_K, QK_K);
+		}
+		break;
+	}
+
 	case GGML_TYPE_BF16: {
 		// The tensor data is BF16, so we dequantize it.
 		uint16_t *src = (uint16_t *)tensor->data;
@@ -644,22 +663,6 @@ void get_embedding_row(const Tensor *tensor, int row_index, float *dest, int emb
 		long long row_offset = (long long)row_index * embed_dim;
 
 		memcpy(dest, src + row_offset, embed_dim * sizeof(float));
-		break;
-	}
-
-	case GGML_TYPE_Q6_K: {
-		// The tensor is Q6_K, so we must dequantize the blocks for this row.
-		const int K = 256; // Q6_K block size
-		int blocks_per_row = embed_dim / K;
-
-		block_q6_k *src = (block_q6_k *)tensor->data;
-		long long row_block_offset = (long long)row_index * blocks_per_row;
-
-		for (int block_idx = 0; block_idx < blocks_per_row; block_idx++) {
-			// Dequantize one block from the source and place it in the correct
-			// location in the destination buffer.
-			dequantize_row_q6_k(&src[row_block_offset + block_idx], dest + block_idx * K, K);
-		}
 		break;
 	}
 

@@ -90,14 +90,22 @@ struct gguf_metadata_kv_t {
 	void *data;
 };
 
+#define QK_K 256
+
 // A block of Q6_K quantized weights.
 typedef struct {
-    uint8_t ql[128];      // quants, lower 4 bits
-    uint8_t qh[64];       // quants, upper 2 bits
-    int8_t  scales[16];   // scales, 4-bit+4-bit, signed
-    uint16_t d;           // super-block scale (fp16)
+	uint8_t ql[128];   // quants, lower 4 bits
+	uint8_t qh[64];	   // quants, upper 2 bits
+	int8_t scales[16]; // scales, 4-bit+4-bit, signed
+	uint16_t d;	   // super-block scale (fp16)
 } block_q6_k;
 
+typedef struct {
+	uint16_t d;	    // ggml_half (IEEE 754 half-precision)
+	uint16_t dmin;	    // ggml_half
+	uint8_t scales[12]; // Packed 6-bit scale/min pairs
+	uint8_t qs[128];    // Packed 4-bit quantized weights
+} block_q4_k;
 
 struct ctx_t;
 

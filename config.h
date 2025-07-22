@@ -1,8 +1,8 @@
 #ifndef __CONFIG_H__
 #define __CONFIG_H__
 
-//#define DEBUG_TENSORS
-//#define DEBUG_TOKENS
+// #define DEBUG_TENSORS
+// #define DEBUG_TOKENS
 
 #define CONFIG_ENABLE_AVX2
 

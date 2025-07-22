@@ -3,7 +3,7 @@
 A **minimal CPU-only** transformer inference engine designed to run Qwen3 models (currently supports Qwen3 0.6B / 1.7B / 4B / 8B).  
 It includes an interactive mode, tokenizer, rope, KV cache, attention, and tool-call support.
 
-Not breaking any speed records (~3.5 TPS for 4B model (Q6_K), ~9.5 for 1.7B) — but designed for simplicity and experimentation.
+Not breaking any speed records (~4.5 TPS for 4B model (Q4_K_M), ~10 for 1.7B) — but designed for simplicity and experimentation.
 
 ## Features
 
@@ -107,7 +107,7 @@ MIT — use it for research, experimentation, or as a foundation for your own CP
 
 ## Notes
 
-- Currently supports BF16 and Q6_K models only
+- Currently supports BF16, Q6_K and Q4_K_M models only
 - Hackable
 
 ---

@@ -64,7 +64,6 @@ struct ctx_t {
 	void *mapped_data;
 	uint8_t *fptr;
 
-	uint64_t tensor_loaded;
 	uint64_t tensor_count;
 	uint64_t tensor_data_offset;
 	uint64_t metadata_kv_count;
@@ -83,9 +82,9 @@ struct ctx_t {
 	TrieNode *root;
 	StringPool *pool;
 
-	unsigned char **token_table; 	// Points to each token string in pool->data
-	int *token_lens;    		// Length of each token
-	int token_count;    		// Total number of tokens
+	unsigned char **token_table; // Points to each token string in pool->data
+	int *token_lens;	     // Length of each token
+	int token_count;	     // Total number of tokens
 
 	unsigned int utf8_state;
 	unsigned int utf8_codepoint;

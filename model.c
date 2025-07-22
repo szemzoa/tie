@@ -11,7 +11,6 @@
 #include "maths.h"
 #include "engine.h"
 
-
 int load_tensor(struct ctx_t *ctx, char *name, Tensor *tensor, int use_mmap)
 {
 	gguf_tensor *ggtensor;
@@ -39,7 +38,6 @@ int load_tensor(struct ctx_t *ctx, char *name, Tensor *tensor, int use_mmap)
 		tensor->is_mmaped = false;
 	}
 
-	ctx->tensor_loaded++;
 	return 0;
 }
 
@@ -77,8 +75,6 @@ int model_create(struct ctx_t *ctx, int use_mmap)
 		perror("Failed to read ggml.merges array");
 		return -1;
 	}
-
-	ctx->tensor_loaded = 0;
 
 	if (load_tensor(ctx, "token_embd.weight", &ctx->model->token_embd, use_mmap) != 0) {
 		fprintf(stderr, "Failed to load token_embd.weight\n");
@@ -123,15 +119,9 @@ int model_create(struct ctx_t *ctx, int use_mmap)
 
 #undef LOAD_LAYER_WEIGHT
 
-	if (ctx->tensor_count != ctx->tensor_loaded) {
-		printf("Tensor load failed!!!! load: %llu, all: %llu", ctx->tensor_loaded, ctx->tensor_count);
-		goto _tensor_load_error;
-	}
-
 #ifdef DEBUG_TENSORS
 	dump_tensors(ctx);
 #endif
-
 	return 0;
 
 _tensor_load_error:
@@ -258,7 +248,8 @@ int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penal
 	ctx->model->repetition_penalty = repetiton_penality;
 	ctx->model->attn_scale = 1.0f / sqrtf(ctx->model->head_dim);
 
-	printf("Initializing %s model with the following configuration:\n", gguf_get_metadata_string(ctx, "general.architecture"));
+	printf("Initializing %s model with the following configuration:\n",
+	       gguf_get_metadata_string(ctx, "general.architecture"));
 	printf("Embed Dim: %d, Layers: %d, Heads: %d, KV Heads: %d, Head Dim: %d\n", ctx->model->embed_dim,
 	       ctx->model->num_layers, ctx->model->num_heads, ctx->model->num_kv_heads, ctx->model->head_dim);
 	printf("FFN Dim: %d, Rope Base: %.1f, Seq Len: %d, Vocab: %llu, Yarn Scale: "
@@ -306,7 +297,8 @@ int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penal
 			return -1;
 		}
 	}
-	printf("KV cache uses: %lld MB\n", (k_elements_per_layer * sizeof(uint16_t)) * 2 * ctx->model->num_layers / 1024 / 1024);
+	printf("KV cache uses: %lld MB\n",
+	       (k_elements_per_layer * sizeof(uint16_t)) * 2 * ctx->model->num_layers / 1024 / 1024);
 
 
 	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
