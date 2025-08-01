@@ -31,7 +31,13 @@ typedef struct {
 	int thread_id;	     // The ID used to get a unique scratch buffer
 } attention_batch_task_t;
 
+typedef struct {
+	int index;
+	float score;
+} ExpertChoice;
+
 float silu_table[SILU_TABLE_SIZE];
+
 
 void reset_kv_cache(struct ctx_t *ctx)
 {
@@ -77,6 +83,13 @@ void rope_cache_init(struct ctx_t *ctx, int max_pos, int head_dim, float base)
 
 inline float silu_lookup(float x)
 {
+	if (!isfinite(x)) {
+		// If x is not a valid number, we can't use the lookup table.
+		// Fallback to a direct, safe calculation or return 0.
+		// A direct calculation is safer if the result is needed.
+		return x / (1.0f + expf(-x));
+	}
+
 	if (x <= SILU_X_MIN)
 		return x / (1.0f + expf(-x));
 	if (x >= SILU_X_MAX)
@@ -169,20 +182,19 @@ static void attention_task(void *arg)
 		// Determine the KV head index for this Q head (for GQA)
 		int kv_head_idx = h / (ctx->model->num_heads / ctx->model->num_kv_heads);
 
-		// --- 1. Calculate Raw Attention Scores ---
+		// 1. Calculate Raw Attention Scores
 		// Calculate the dot product of the current FP32 Q-head with all previous
 		// BF16 K-heads in the cache
 		for (int t = 0; t <= current_pos; t++) {
 			// Read from K cache, which stores BF16
 			uint16_t *k_head =
 				get_kv_head(cache->k, t, kv_head_idx, ctx->model->head_dim, ctx->model->num_kv_heads);
-			// Use the new dot product for FP32 and BF16 vectors
+			// Use the dot product for FP32 and BF16 vectors
 			float score = dot_product_f32_bf16(q_head, k_head, ctx->model->head_dim);
 			attn_scores_buffer[t] = score * ctx->model->attn_scale;
 		}
 
-		// --- 2. Calculate Softmax ---
-		// This block numerically stabilizes softmax by subtracting the max score
+		// 2. Calculate Softmax
 		float max_score = -INFINITY;
 		for (int t = 0; t <= current_pos; t++) {
 			if (attn_scores_buffer[t] > max_score) {
@@ -200,7 +212,7 @@ static void attention_task(void *arg)
 
 		float inv_sum_exp = 1.0f / sum_exp;
 
-		// --- 3. Calculate Weighted Sum of V-vectors ---
+		// 3. Calculate Weighted Sum of V-vectors
 		for (int t = 0; t <= current_pos; t++) {
 			// Read from V cache, which stores BF16
 			uint16_t *v_head =
@@ -253,7 +265,7 @@ static void attention_batch_task(void *arg)
 			float *out_head = ctx->mem.attn_output + (long long)i * q_dim + h * head_dim;
 			int kv_head_idx = h / (num_heads / num_kv_heads);
 
-			// 1. --- Calculate Raw Attention Scores ---
+			// 1. Calculate Raw Attention Scores
 			// The Q-head dots with ALL previous K-heads, up to its absolute_pos
 			for (int t = 0; t <= absolute_pos; t++) {
 				uint16_t *k_head =
@@ -262,7 +274,7 @@ static void attention_batch_task(void *arg)
 				attn_scores_buffer[t] = score * ctx->model->attn_scale;
 			}
 
-			// 2. --- Calculate Softmax ---
+			// 2. Calculate Softmax
 			// Softmax is also over the full history up to the absolute_pos
 			float max_score = -INFINITY;
 			for (int t = 0; t <= absolute_pos; t++) {
@@ -280,7 +292,7 @@ static void attention_batch_task(void *arg)
 				attn_scores_buffer[t] *= inv_sum_exp;
 			}
 
-			// 3. --- Calculate Weighted Sum of V-vectors ---
+			// 3. Calculate Weighted Sum of V-vectors
 			memset(out_head, 0, head_dim * sizeof(float));
 			for (int t = 0; t <= absolute_pos; t++) {
 				uint16_t *v_head =
@@ -313,7 +325,7 @@ void attention_parallel(struct ctx_t *ctx, int layer_idx, int current_pos, bool 
 			float *out_head = ctx->mem.attn_output + h * ctx->model->head_dim;
 			int kv_head_idx = h / (ctx->model->num_heads / ctx->model->num_kv_heads);
 
-			// --- 1. Calculate Raw Attention Scores ---
+			// 1. Calculate Raw Attention Scores
 			for (int t = 0; t <= current_pos; t++) {
 				uint16_t *k_head = get_kv_head(cache->k, t, kv_head_idx, ctx->model->head_dim,
 							       ctx->model->num_kv_heads);
@@ -322,7 +334,7 @@ void attention_parallel(struct ctx_t *ctx, int layer_idx, int current_pos, bool 
 					score * ctx->model->attn_scale; // Use first buffer for sequential mode
 			}
 
-			// --- 2. Calculate Softmax ---
+			// 2. Calculate Softmax
 			float max_score = -INFINITY;
 			for (int t = 0; t <= current_pos; t++) {
 				if (ctx->mem.attn_scores_buffer[0][t] > max_score) {
@@ -339,7 +351,7 @@ void attention_parallel(struct ctx_t *ctx, int layer_idx, int current_pos, bool 
 
 			float inv_sum_exp = 1.0f / sum_exp;
 
-			// --- 3. Calculate Weighted Sum of V-vectors ---
+			// 3. Calculate Weighted Sum of V-vectors
 			memset(out_head, 0, ctx->model->head_dim * sizeof(float));
 			for (int t = 0; t <= current_pos; t++) {
 				uint16_t *v_head = get_kv_head(cache->v, t, kv_head_idx, ctx->model->head_dim,
@@ -400,16 +412,16 @@ void attention_batch(struct ctx_t *ctx, int batch_len, int layer_idx, int start_
 		int kv_dim = num_kv_heads * head_dim;
 
 		// The temporary buffer for one token's attention scores.
-		// We reuse this buffer for each token in the batch.
+		// Reuse this buffer for each token in the batch.
 		float *attn_scores_buffer = ctx->mem.attn_scores_buffer[0];
 
-		// --- Main loop: Iterate over each token in the prompt ---
+		// Iterate over each token in the prompt
 		// This is the "query" token (the one that is "looking").
 		for (int i = 0; i < batch_len; i++) {
 			// The absolute position of the current query token
 			int absolute_pos = start_pos + i;
 
-			// --- Loop over each query head for the current token ---
+			// Loop over each query head for the current token
 			for (int h = 0; h < num_heads; h++) {
 				// Get pointers to the current token's Q head and its corresponding output
 				float *q_head = ctx->mem.Q + (long long)i * q_dim + h * head_dim;
@@ -417,7 +429,7 @@ void attention_batch(struct ctx_t *ctx, int batch_len, int layer_idx, int start_
 
 				int kv_head_idx = h / (num_heads / num_kv_heads);
 
-				// 1. --- Calculate Raw Attention Scores ---
+				// 1. Calculate Raw Attention Scores
 				// The current Q-head dots with all *previous* K-heads in the cache.
 				for (int t = 0; t <= absolute_pos; t++) {
 					// This is the "key" token (the one being looked at).
@@ -427,7 +439,7 @@ void attention_batch(struct ctx_t *ctx, int batch_len, int layer_idx, int start_
 					attn_scores_buffer[t] = score * ctx->model->attn_scale;
 				}
 
-				// 2. --- Calculate Softmax (for scores 0 to current_pos) ---
+				// 2. Calculate Softmax (for scores 0 to current_pos)
 				float max_score = -INFINITY;
 				for (int t = 0; t <= absolute_pos; t++) {
 					if (attn_scores_buffer[t] > max_score) {
@@ -446,7 +458,7 @@ void attention_batch(struct ctx_t *ctx, int batch_len, int layer_idx, int start_
 					attn_scores_buffer[t] *= inv_sum_exp;
 				}
 
-				// 3. --- Calculate Weighted Sum of V-vectors ---
+				// 3. Calculate Weighted Sum of V-vectors
 				// Zero out the output head before accumulating
 				memset(out_head, 0, head_dim * sizeof(float));
 				for (int t = 0; t <= absolute_pos; t++) {
@@ -500,7 +512,137 @@ void attention_unified(struct ctx_t *ctx, int batch_len, int layer_idx, int star
 	}
 }
 
-int transformer_layer_unified(struct ctx_t *ctx, int layer_idx, int batch_len, bool use_threads)
+
+void softmax(float *x, int size)
+{
+	if (size == 0)
+		return;
+	// Find max value for numerical stability
+	float max_val = x[0];
+	for (int i = 1; i < size; i++) {
+		if (x[i] > max_val) {
+			max_val = x[i];
+		}
+	}
+	// Calculate exponentials and sum
+	float sum = 0.0f;
+	for (int i = 0; i < size; i++) {
+		x[i] = expf(x[i] - max_val);
+		sum += x[i];
+	}
+	// Normalize
+	for (int i = 0; i < size; i++) {
+		x[i] /= sum;
+	}
+}
+
+// Comparison function for qsort
+int compare_experts(const void *a, const void *b)
+{
+	float score_a = ((ExpertChoice *)a)->score;
+	float score_b = ((ExpertChoice *)b)->score;
+	if (score_a < score_b)
+		return 1;
+	if (score_a > score_b)
+		return -1;
+	return 0;
+}
+
+// Finds the top-k experts from the router logits
+void find_top_k(const float *router_logits, int expert_count, int k, ExpertChoice *top_k)
+{
+	for (int i = 0; i < k; ++i) {
+		top_k[i] = (ExpertChoice){.index = -1, .score = -INFINITY};
+	}
+
+	for (int i = 0; i < expert_count; ++i) {
+		float score = router_logits[i];
+		if (score > top_k[k - 1].score) {
+			// This expert is better than the worst of our current top-k
+			top_k[k - 1] = (ExpertChoice){.index = i, .score = score};
+			// Simple insertion sort to maintain the small top_k array
+			for (int j = k - 2; j >= 0; --j) {
+				if (top_k[j + 1].score > top_k[j].score) {
+					ExpertChoice temp = top_k[j];
+					top_k[j] = top_k[j + 1];
+					top_k[j + 1] = temp;
+				} else {
+					break;
+				}
+			}
+		}
+	}
+}
+
+size_t get_ggml_block_size(int type)
+{
+	switch (type) {
+	case GGML_TYPE_Q4_K:
+		return sizeof(block_q4_k);
+	case GGML_TYPE_Q6_K:
+		return sizeof(block_q6_k);
+	default:
+		printf("FATAL: MoE operates on unsupported tensor type %d\n", type);
+		return 0;
+	}
+}
+
+void process_expert_task(void *arg)
+{
+	expert_task_t *task = (expert_task_t *)arg;
+	struct ctx_t *ctx = task->ctx;
+	int expert_idx = task->expert_idx;
+	layer_weights *l = &ctx->model->layers[task->layer_idx];
+
+	// Use thread-specific scratch buffers
+	float *ffn_hidden1 = ctx->mem.ffn_hidden1_scratch[task->thread_id];
+	float *ffn_hidden2 = ctx->mem.ffn_hidden2_scratch[task->thread_id];
+	float *expert_out = ctx->mem.expert_out_scratch[task->thread_id];
+
+	size_t up_gate_block_size_bytes = get_ggml_block_size(l->ffn_up_exps.type);
+	size_t up_gate_blocks_per_row = ctx->model->embed_dim / QK_K;
+	size_t up_gate_blocks_per_matrix = ctx->model->expert_ffn_dim * up_gate_blocks_per_row;
+	size_t up_gate_matrix_size_bytes = up_gate_blocks_per_matrix * up_gate_block_size_bytes;
+
+	// Pre-calculate sizes for the DOWN expert matrices
+	size_t down_block_size_bytes = get_ggml_block_size(l->ffn_down_exps.type);
+	size_t down_blocks_per_row = ctx->model->expert_ffn_dim / QK_K;
+	size_t down_blocks_per_matrix = ctx->model->embed_dim * down_blocks_per_row;
+	size_t down_matrix_size_bytes = down_blocks_per_matrix * down_block_size_bytes;
+
+	// Calculate separate byte offsets for the selected expert
+	size_t up_gate_offset_bytes = (size_t)expert_idx * up_gate_matrix_size_bytes;
+	size_t down_offset_bytes = (size_t)expert_idx * down_matrix_size_bytes;
+
+	// Create temporary Tensor structs pointing to the correct data slices
+	Tensor expert_gate = {.type = l->ffn_gate_exps.type,
+			      .data = (uint8_t *)l->ffn_gate_exps.data + up_gate_offset_bytes};
+	Tensor expert_up = {.type = l->ffn_up_exps.type, .data = (uint8_t *)l->ffn_up_exps.data + up_gate_offset_bytes};
+	Tensor expert_down = {.type = l->ffn_down_exps.type,
+			      .data = (uint8_t *)l->ffn_down_exps.data + down_offset_bytes};
+
+	// FFN forward pass
+	parallel_mat_vec_unified(task->normed_input, &expert_gate, ffn_hidden1, ctx->model->embed_dim,
+				 ctx->model->expert_ffn_dim, false);
+	parallel_mat_vec_unified(task->normed_input, &expert_up, ffn_hidden2, ctx->model->embed_dim,
+				 ctx->model->expert_ffn_dim, false);
+
+	// SiLU
+	for (int k = 0; k < ctx->model->expert_ffn_dim; k++) {
+		ffn_hidden1[k] = silu_lookup(ffn_hidden1[k]) * ffn_hidden2[k];
+	}
+
+	// Down-projection
+	parallel_mat_vec_unified(ffn_hidden1, &expert_down, expert_out, ctx->model->expert_ffn_dim,
+				 ctx->model->embed_dim, false);
+
+	// The final result is copied to the shared output buffer passed in the task
+	memcpy(task->output_buffer, expert_out, ctx->model->embed_dim * sizeof(float));
+
+	free(task);
+}
+
+int transformer_layer(struct ctx_t *ctx, int layer_idx, int batch_len, bool use_threads)
 {
 	float *x = ctx->mem.hidden_state;
 	layer_weights *l = &ctx->model->layers[layer_idx];
@@ -580,25 +722,94 @@ int transformer_layer_unified(struct ctx_t *ctx, int layer_idx, int batch_len, b
 			 ctx->model->norm_eps);
 	}
 
-	// Step 2: Gate + Up projections
-	parallel_mat_mat_unified(ctx->mem.normed_ffn_input, &l->ffn_gate, ctx->mem.gate_proj_output, batch_len,
-				 ctx->model->embed_dim, ctx->model->ffn_dim, use_threads);
-	parallel_mat_mat_unified(ctx->mem.normed_ffn_input, &l->ffn_up, ctx->mem.up_proj_output, batch_len,
-				 ctx->model->embed_dim, ctx->model->ffn_dim, use_threads);
+	// A buffer to hold the final output of the FFN block for the entire batch
+	float *ffn_batch_output = ctx->mem.ffn_down_output; // Reuse existing buffer
 
+	// MoE
+	if (ctx->model->is_moe) {
+		// Get the size of a single quantization block for the expert tensors
+		size_t block_size_bytes = get_ggml_block_size(l->ffn_up_exps.type);
+		if (block_size_bytes == 0) {
+			return -1;
+		}
 
-	// Step 3: SwiGLU activation
-	for (long long i = 0; i < (long long)batch_len * ctx->model->ffn_dim; i++) {
-		ctx->mem.gate_proj_output[i] = silu_lookup(ctx->mem.gate_proj_output[i]) * ctx->mem.up_proj_output[i];
+		// A temporary buffer to hold the outputs of all experts before accumulation
+		float (*expert_outputs)[ctx->model->embed_dim] =
+			malloc(ctx->model->expert_used_count * sizeof(*expert_outputs));
+
+		if (expert_outputs == NULL) {
+			printf("FATAL: MoE expert_outputs OOM\n");
+			return -1;
+		}
+
+		for (int i = 0; i < batch_len; i++) {
+			float *normed_input_for_token_i =
+				ctx->mem.normed_ffn_input + (long long)i * ctx->model->embed_dim;
+			float *ffn_out_for_token_i = ffn_batch_output + (long long)i * ctx->model->embed_dim;
+
+			// 1. Route
+			parallel_mat_vec_unified(normed_input_for_token_i, &l->ffn_gate_inp, ctx->mem.expert_scores,
+						 ctx->model->embed_dim, ctx->model->expert_count, false);
+
+			// 2. Select: Find the top experts for this token
+			ExpertChoice top_experts[ctx->model->expert_used_count];
+			find_top_k(ctx->mem.expert_scores, ctx->model->expert_count, ctx->model->expert_used_count,
+				   top_experts);
+
+			// 3. Gate: Apply softmax to the top scores to get the final weights
+			float gate_values[ctx->model->expert_used_count];
+			for (int j = 0; j < ctx->model->expert_used_count; j++) {
+				gate_values[j] = top_experts[j].score;
+			}
+			softmax(gate_values, ctx->model->expert_used_count);
+
+			for (int j = 0; j < ctx->model->expert_used_count; j++) {
+				expert_task_t *task = malloc(sizeof(expert_task_t));
+				*task = (expert_task_t){.ctx = ctx,
+							.thread_id = j,
+							.layer_idx = layer_idx,
+							.expert_idx = top_experts[j].index,
+							.normed_input = normed_input_for_token_i,
+							.output_buffer = expert_outputs[j]};
+				thread_pool_submit(thread_pool, process_expert_task, task);
+			}
+			thread_pool_wait(thread_pool);
+
+			// Accumulation
+			memset(ffn_out_for_token_i, 0, ctx->model->embed_dim * sizeof(float));
+
+			for (int j = 0; j < ctx->model->expert_used_count; j++) {
+				float gate_val = gate_values[j];
+				for (int k = 0; k < ctx->model->embed_dim; k++) {
+					ffn_out_for_token_i[k] += gate_val * expert_outputs[j][k];
+				}
+			}
+		}
+
+		free(expert_outputs);
+
+	} else { // DENSE FFN
+
+		// Step 2: Gate + Up projections
+		parallel_mat_mat_unified(ctx->mem.normed_ffn_input, &l->ffn_gate, ctx->mem.gate_proj_output, batch_len,
+					 ctx->model->embed_dim, ctx->model->ffn_dim, use_threads);
+		parallel_mat_mat_unified(ctx->mem.normed_ffn_input, &l->ffn_up, ctx->mem.up_proj_output, batch_len,
+					 ctx->model->embed_dim, ctx->model->ffn_dim, use_threads);
+
+		// Step 3: SwiGLU activation
+		for (long long i = 0; i < (long long)batch_len * ctx->model->ffn_dim; i++) {
+			ctx->mem.gate_proj_output[i] =
+				silu_lookup(ctx->mem.gate_proj_output[i]) * ctx->mem.up_proj_output[i];
+		}
+
+		// Step 4: Down projection
+		parallel_mat_mat_unified(ctx->mem.gate_proj_output, &l->ffn_down, ffn_batch_output, batch_len,
+					 ctx->model->ffn_dim, ctx->model->embed_dim, use_threads);
 	}
 
-	// Step 4: Down projection
-	parallel_mat_mat_unified(ctx->mem.gate_proj_output, &l->ffn_down, ctx->mem.ffn_down_output, batch_len,
-				 ctx->model->ffn_dim, ctx->model->embed_dim, use_threads);
-
-	// Step 5: Residual add
+	// Step 5: Final residual connection
 	for (long long i = 0; i < (long long)batch_len * ctx->model->embed_dim; i++) {
-		x[i] = add_residual(x[i], ctx->mem.ffn_down_output[i]);
+		x[i] = add_residual(x[i], ffn_batch_output[i]);
 	}
 
 	return 0;
@@ -632,37 +843,32 @@ void get_embedding_row(const Tensor *tensor, int row_index, float *dest, int emb
 	}
 
 	case GGML_TYPE_Q6_K: {
-		// The tensor is Q6_K, so we must dequantize the blocks for this row.
 		int blocks_per_row = embed_dim / QK_K;
 
 		block_q6_k *src = (block_q6_k *)tensor->data;
 		long long row_block_offset = (long long)row_index * blocks_per_row;
 
 		for (int block_idx = 0; block_idx < blocks_per_row; block_idx++) {
-			// Dequantize one block from the source and place it in the correct
-			// location in the destination buffer.
 			dequantize_row_q6_k(&src[row_block_offset + block_idx], dest + block_idx * QK_K, QK_K);
 		}
 		break;
 	}
 
+	case GGML_TYPE_F32: {
+		float *src = (float *)tensor->data;
+		long long row_offset = (long long)row_index * embed_dim;
+
+		memcpy(dest, src + row_offset, embed_dim * sizeof(float));
+		break;
+	}
+
 	case GGML_TYPE_BF16: {
-		// The tensor data is BF16, so we dequantize it.
 		uint16_t *src = (uint16_t *)tensor->data;
 		long long row_offset = (long long)row_index * embed_dim;
 
 		for (int i = 0; i < embed_dim; i++) {
 			dest[i] = bf16_to_fp32(src[row_offset + i]);
 		}
-		break;
-	}
-
-	case GGML_TYPE_F32: {
-		// The tensor is already F32, so we can just copy it.
-		float *src = (float *)tensor->data;
-		long long row_offset = (long long)row_index * embed_dim;
-
-		memcpy(dest, src + row_offset, embed_dim * sizeof(float));
 		break;
 	}
 

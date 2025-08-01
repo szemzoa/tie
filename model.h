@@ -19,12 +19,22 @@ typedef struct {
 	Tensor attn_k_norm;
 	Tensor attn_out;
 	Tensor ffn_norm;
+
+	/* dense */
 	Tensor ffn_gate;
 	Tensor ffn_up;
 	Tensor ffn_down;
+
+	/* MoE */
+	Tensor ffn_gate_inp;
+	Tensor ffn_gate_exps;
+	Tensor ffn_up_exps;
+	Tensor ffn_down_exps;
 } layer_weights;
 
 typedef struct {
+	char *arch_name;
+	int is_moe;
 	int embed_dim;
 	int num_layers;
 	int num_heads;
@@ -41,6 +51,10 @@ typedef struct {
 	float yarn_scale_factor;
 	float repetition_penalty;
 	float attn_scale;
+
+	int expert_count;
+	int expert_used_count;
+	int expert_ffn_dim;
 
 	Tensor token_embd;
 	Tensor output_norm;

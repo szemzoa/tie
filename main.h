@@ -43,6 +43,13 @@ struct tfmem_t {
 	float *up_proj_output;
 	float *ffn_down_output;
 	float *logits;
+
+	// MoE
+	float *expert_scores;	// buffer to hold the output of the router.
+	// arrays of buffers (one per thread)
+	float** ffn_hidden1_scratch;
+	float** ffn_hidden2_scratch;
+	float** expert_out_scratch;
 };
 
 typedef struct {
@@ -65,6 +72,7 @@ struct ctx_t {
 	uint8_t *fptr;
 
 	uint64_t tensor_count;
+	uint64_t tensor_loaded;
 	uint64_t tensor_data_offset;
 	uint64_t metadata_kv_count;
 

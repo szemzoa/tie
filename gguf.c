@@ -819,8 +819,6 @@ int gguf_read(struct ctx_t *ctx, char *path)
 		return -1;
 	}
 
-	printf("gguf: Loaded %llu tensors (after map_weights).\n", ctx->tensor_count);
-
 	return 0;
 }
 

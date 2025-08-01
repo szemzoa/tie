@@ -3,12 +3,10 @@
 #include <string.h>
 #include <math.h>
 #include <immintrin.h>
-
 #include "config.h"
 #include "maths.h"
 #include "threadpool.h"
 #include "main.h"
-
 
 void dequantize_row_q6_k_avx2(const void *__restrict__ q_void, float *__restrict__ y, int k);
 void dequantize_row_q4_k_avx2(const void *__restrict__ q_void, float *__restrict__ y, int k);
@@ -32,25 +30,9 @@ uint16_t fp32_to_bf16(float f)
 	return (uint16_t)(u.u >> 16);
 }
 
-float *convert_bf16_to_f32(void *bf16_ptr, size_t count)
-{
-	if (!bf16_ptr)
-		return NULL;
-	uint16_t *bf16 = (uint16_t *)bf16_ptr;
-	float *f32 = malloc(count * sizeof(float));
-	if (!f32) {
-		fprintf(stderr, "Failed to allocate memory for FP32 conversion.\n");
-		return NULL;
-	}
-	for (size_t i = 0; i < count; i++) {
-		f32[i] = bf16_to_fp32(bf16[i]);
-	}
-	return f32;
-}
-
+// Simple FP16 to FP32 conversion (handles normalized numbers)
 static inline float fp16_to_fp32(uint16_t h)
 {
-	// Simple FP16 to FP32 conversion (handles normalized numbers)
 	uint32_t sign = ((uint32_t)(h >> 15) & 1) << 31;
 	int exponent = (h >> 10) & 0x1F;
 	uint32_t mantissa = (h & 0x3FF) << 13;
@@ -706,55 +688,55 @@ __attribute__((target("avx2"))) float dot_product_q4_k_avx2(const float *x, cons
 
 __attribute__((target("avx2"))) void apply_rope_cache_avx2(struct ctx_t *ctx, float *x, int pos, int head_dim)
 {
-    rope_cache_t *rope_cache = ctx->rope_cache;
-    int h_dim_half = head_dim / 2;
+	rope_cache_t *rope_cache = ctx->rope_cache;
+	int h_dim_half = head_dim / 2;
 
-    if (pos >= rope_cache->max_pos) {
-        fprintf(stderr, "Position %d exceeds rope cache max_pos %d\n", pos, rope_cache->max_pos);
-        return;
-    }
+	if (pos >= rope_cache->max_pos) {
+		fprintf(stderr, "Position %d exceeds rope cache max_pos %d\n", pos, rope_cache->max_pos);
+		return;
+	}
 
-    const float *sin_vals = rope_cache->sin + pos * h_dim_half;
-    const float *cos_vals = rope_cache->cos + pos * h_dim_half;
+	const float *sin_vals = rope_cache->sin + pos * h_dim_half;
+	const float *cos_vals = rope_cache->cos + pos * h_dim_half;
 
-    int i = 0;
-    // Process 8 floats (16 total elements: 8 real, 8 imaginary) at a time
-    for (; i <= h_dim_half - 8; i += 8) {
-        // Load 8 "real" and 8 "imaginary" parts from the input vector x
-        __m256 x_r = _mm256_loadu_ps(&x[i]);
-        __m256 x_i = _mm256_loadu_ps(&x[i + h_dim_half]);
+	int i = 0;
+	// Process 8 floats (16 total elements: 8 real, 8 imaginary) at a time
+	for (; i <= h_dim_half - 8; i += 8) {
+		// Load 8 "real" and 8 "imaginary" parts from the input vector x
+		__m256 x_r = _mm256_loadu_ps(&x[i]);
+		__m256 x_i = _mm256_loadu_ps(&x[i + h_dim_half]);
 
-        // Load 8 sin and cos values from the cache
-        __m256 sin_v = _mm256_loadu_ps(&sin_vals[i]);
-        __m256 cos_v = _mm256_loadu_ps(&cos_vals[i]);
+		// Load 8 sin and cos values from the cache
+		__m256 sin_v = _mm256_loadu_ps(&sin_vals[i]);
+		__m256 cos_v = _mm256_loadu_ps(&cos_vals[i]);
 
-        // Calculate the two main components of the rotation
-        __m256 x_r_cos = _mm256_mul_ps(x_r, cos_v);
-        __m256 x_r_sin = _mm256_mul_ps(x_r, sin_v);
-        __m256 x_i_cos = _mm256_mul_ps(x_i, cos_v);
-        __m256 x_i_sin = _mm256_mul_ps(x_i, sin_v);
+		// Calculate the two main components of the rotation
+		__m256 x_r_cos = _mm256_mul_ps(x_r, cos_v);
+		__m256 x_r_sin = _mm256_mul_ps(x_r, sin_v);
+		__m256 x_i_cos = _mm256_mul_ps(x_i, cos_v);
+		__m256 x_i_sin = _mm256_mul_ps(x_i, sin_v);
 
-        // Perform the rotation for all 8 elements in parallel
-        // new_x_real = x_real * cos - x_imag * sin
-        __m256 new_x_r = _mm256_sub_ps(x_r_cos, x_i_sin);
-        // new_x_imag = x_real * sin + x_imag * cos
-        __m256 new_x_i = _mm256_add_ps(x_r_sin, x_i_cos);
+		// Perform the rotation for all 8 elements in parallel
+		// new_x_real = x_real * cos - x_imag * sin
+		__m256 new_x_r = _mm256_sub_ps(x_r_cos, x_i_sin);
+		// new_x_imag = x_real * sin + x_imag * cos
+		__m256 new_x_i = _mm256_add_ps(x_r_sin, x_i_cos);
 
-        // Store the results back into the x vector
-        _mm256_storeu_ps(&x[i], new_x_r);
-        _mm256_storeu_ps(&x[i + h_dim_half], new_x_i);
-    }
+		// Store the results back into the x vector
+		_mm256_storeu_ps(&x[i], new_x_r);
+		_mm256_storeu_ps(&x[i + h_dim_half], new_x_i);
+	}
 
-    // Scalar tail loop for remaining elements
-    for (; i < h_dim_half; ++i) {
-        float x_real = x[i];
-        float x_imag = x[i + h_dim_half];
-        float sin = sin_vals[i];
-        float cos = cos_vals[i];
+	// Scalar tail loop for remaining elements
+	for (; i < h_dim_half; ++i) {
+		float x_real = x[i];
+		float x_imag = x[i + h_dim_half];
+		float sin = sin_vals[i];
+		float cos = cos_vals[i];
 
-        x[i] = fmaf(x_real, cos, -x_imag * sin);
-        x[i + h_dim_half] = fmaf(x_real, sin, x_imag * cos);
-    }
+		x[i] = fmaf(x_real, cos, -x_imag * sin);
+		x[i + h_dim_half] = fmaf(x_real, sin, x_imag * cos);
+	}
 }
 #endif
 
@@ -898,52 +880,6 @@ void accumulate_weighted_fp32_bf16(float *out, float weight, const uint16_t *v, 
 	}
 }
 
-static void mat_vec_task_fp32(void *arg)
-{
-	mat_vec_task_fp32_t *task = (mat_vec_task_fp32_t *)arg;
-	mat_vec_fp32_row(task->x, task->w, task->o, task->in_dim, task->start_row, task->end_row);
-	free(task); // The worker is responsible for freeing its arguments.
-}
-
-void parallel_mat_vec_fp32(const float *x, const float *w, float *o, int in_dim, int out_dim, bool use_threads)
-{
-	if (use_threads == 0) {
-		// Fallback to the sequential version if the threadpool is disabled.
-		mat_vec_fp32_row(x, w, o, in_dim, 0, out_dim);
-		return;
-	}
-
-	int num_threads = thread_pool->num_threads;
-	// Calculate rows per thread, ensuring the last thread handles any remainder.
-	int rows_per_thread = (out_dim + num_threads - 1) / num_threads;
-
-	for (int t = 0; t < num_threads; t++) {
-		int start_row = t * rows_per_thread;
-		int end_row = start_row + rows_per_thread;
-
-		if (start_row >= out_dim) {
-			break; // No more rows to process.
-		}
-		if (end_row > out_dim) {
-			end_row = out_dim; // Clamp to the actual output dimension.
-		}
-
-		// Use heap allocation for task arguments to ensure thread safety.
-		mat_vec_task_fp32_t *task = malloc(sizeof(mat_vec_task_fp32_t));
-		if (!task) {
-			fprintf(stderr, "ERROR: Failed to allocate memory for mat_vec_task_fp32\n");
-			continue;
-		}
-
-		*task = (mat_vec_task_fp32_t){
-			.x = x, .w = w, .o = o, .in_dim = in_dim, .start_row = start_row, .end_row = end_row};
-
-		thread_pool_submit(thread_pool, mat_vec_task_fp32, task);
-	}
-	// Wait for this specific batch of matrix-vector tasks to complete.
-	thread_pool_wait(thread_pool);
-}
-
 float dot_product_q6_k(const float *x, const block_q6_k *block)
 {
 #ifdef CONFIG_ENABLE_AVX2
@@ -1080,6 +1016,10 @@ static void mat_vec_task(void *arg)
 				 task->end_row);
 		break;
 
+	case GGML_TYPE_F32:
+		mat_vec_fp32_row(task->x, (float *)tensor->data, task->o, task->in_dim, task->start_row, task->end_row);
+		break;
+
 	default:
 		fprintf(stderr, "Error: Unsupported tensor type %d in parallel_mat_vec_unified\n", tensor->type);
 		break;
@@ -1100,6 +1040,10 @@ void parallel_mat_vec_unified(const float *x, const Tensor *w_tensor, float *o, 
 
 		case GGML_TYPE_Q6_K:
 			mat_vec_q6_k_row(x, w_tensor->data, o, in_dim, 0, out_dim);
+			break;
+
+		case GGML_TYPE_F32:
+			mat_vec_fp32_row(x, (float *)w_tensor->data, o, in_dim, 0, out_dim);
 			break;
 
 		case GGML_TYPE_BF16:
@@ -1172,6 +1116,15 @@ static void mat_mat_task(void *arg)
 		}
 		break;
 
+	case GGML_TYPE_F32:
+		for (int i = task->start_row; i < task->end_row; ++i) {
+			const float *x_row = task->X + (long long)i * task->in_dim;
+			float *o_row = task->O + (long long)i * task->out_dim;
+
+			mat_vec_fp32_row(x_row, (float *)tensor->data, o_row, task->in_dim, 0, task->out_dim);
+		}
+		break;
+
 	case GGML_TYPE_BF16:
 		for (int i = task->start_row; i < task->end_row; ++i) {
 			const float *x_row = task->X + (long long)i * task->in_dim;
@@ -1182,6 +1135,7 @@ static void mat_mat_task(void *arg)
 		break;
 
 	default:
+		fprintf(stderr, "Error: Unsupported tensor type %d in mat_mat task\n", tensor->type);
 		break;
 	}
 	free(task);
@@ -1196,7 +1150,7 @@ void parallel_mat_mat_unified(const float *X, const Tensor *W_tensor, float *O, 
 		return;
 	}
 
-	// --- Batched Prompt Processing (prompt_len > 1) ---
+	// Batched Prompt Processing (prompt_len > 1)
 	int num_threads = thread_pool->num_threads;
 	int rows_per_thread = (prompt_len + num_threads - 1) / num_threads;
 

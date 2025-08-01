@@ -15,10 +15,6 @@
 #include <unistd.h>
 #include <locale.h>
 
-#include <poll.h>
-#include <termios.h>
-
-#define DEBOUNCE_MS 200
 
 #include "main.h"
 #include "threadpool.h"
@@ -28,7 +24,14 @@
 #include "predict.h"
 #include "tokenize.h"
 
+#if 0
+#include <poll.h>
+#include <termios.h>
+
 static struct termios orig_termios;
+
+#define DEBOUNCE_MS 200
+#endif
 
 const char *system_prompt_with_tools =
 	"<|im_start|>system\n"
@@ -237,15 +240,17 @@ void process_prompt(struct ctx_t *ctx, int *prompt_tokens, size_t prompt_len, in
 		float *dest = ctx->mem.hidden_state + (long long)i * ctx->model->embed_dim;
 		get_embedding_row(&ctx->model->token_embd, prompt_tokens[i], dest, ctx->model->embed_dim);
 	}
+
 	for (int l = 0; l < ctx->model->num_layers; l++) {
-		transformer_layer_unified(ctx, l, prompt_len, use_threads);
+		transformer_layer(ctx, l, prompt_len, use_threads);
 	}
+
 	memcpy(ctx->mem.hidden_state, ctx->mem.hidden_state + (long long)(prompt_len - 1) * ctx->model->embed_dim,
 	       ctx->model->embed_dim * sizeof(float));
 	ctx->kv_pos += prompt_len;
 }
 
-
+#if 0
 static void disable_raw_mode(void)
 {
 	tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
@@ -259,6 +264,7 @@ static void enable_raw_mode(void)
 	raw.c_lflag &= ~(ECHO | ICANON);
 	tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }
+#endif
 
 void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads)
 {
@@ -271,6 +277,7 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 	// Initialize tool call handling
 	tool_call_init(ctx, &tool_call);
 
+#if 1
 	// Process system prompt immediately at start
 	size_t system_prompt_len = 0;
 	int *system_prompt_tokens = tokenize_bpe(ctx, system_prompt_with_tools, &system_prompt_len);
@@ -281,6 +288,7 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 	clock_gettime(CLOCK_REALTIME, &end);
 	printf("--- System Prompt Processed, time: %llu msec ---\n", elapsed_time_us(end, start) / 1000);
 	free(system_prompt_tokens);
+#endif
 
 	while (1) {
 		if (!tool_call.result) {
@@ -366,7 +374,7 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 			get_embedding_row(&ctx->model->token_embd, next_token, ctx->mem.hidden_state,
 					  ctx->model->embed_dim);
 			for (int l = 0; l < ctx->model->num_layers; l++) {
-				transformer_layer_unified(ctx, l, 1, use_threads);
+				transformer_layer(ctx, l, 1, use_threads);
 			}
 			ctx->kv_pos++;
 		}
@@ -465,7 +473,7 @@ int main(int argc, char *argv[])
 	ctx->kv_pos = 0;
 	printf("Welcome to interactive chat. Type 'exit' to quit.\n");
 
-	generate_interactive(ctx, 8192, 1);
+	generate_interactive(ctx, 8192, CONFIG_USE_THREADS);
 
 _cleanup:
 	model_cleanup(ctx, use_mmap);
