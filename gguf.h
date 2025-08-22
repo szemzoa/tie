@@ -2,6 +2,42 @@
 #define __GGUF_H__
 
 #include <inttypes.h>
+#include <unistd.h>
+
+typedef enum  {
+	GGML_TYPE_F32 = 0,
+	GGML_TYPE_F16 = 1,
+	GGML_TYPE_Q4_0 = 2,
+	GGML_TYPE_Q4_1 = 3,
+	GGML_TYPE_Q5_0 = 6,
+	GGML_TYPE_Q5_1 = 7,
+	GGML_TYPE_Q8_0 = 8,
+	GGML_TYPE_Q8_1 = 9,
+	GGML_TYPE_Q2_K = 10,
+	GGML_TYPE_Q3_K = 11,
+	GGML_TYPE_Q4_K = 12,
+	GGML_TYPE_Q5_K = 13,
+	GGML_TYPE_Q6_K = 14,
+	GGML_TYPE_Q8_K = 15,
+	GGML_TYPE_IQ2_XXS = 16,
+	GGML_TYPE_IQ2_XS = 17,
+	GGML_TYPE_IQ3_XXS = 18,
+	GGML_TYPE_IQ1_S = 19,
+	GGML_TYPE_IQ4_NL = 20,
+	GGML_TYPE_IQ3_S = 21,
+	GGML_TYPE_IQ2_S = 22,
+	GGML_TYPE_IQ4_XS = 23,
+	GGML_TYPE_I8 = 24,
+	GGML_TYPE_I16 = 25,
+	GGML_TYPE_I32 = 26,
+	GGML_TYPE_I64 = 27,
+	GGML_TYPE_F64 = 28,
+	GGML_TYPE_IQ1_M = 29,
+	GGML_TYPE_BF16 = 30,
+	GGML_TYPE_TQ1_0 = 34,
+	GGML_TYPE_TQ2_0 = 35,
+	GGML_TYPE_COUNT = 39,
+} ggml_type;
 
 enum gguf_metadata_value_type {
 	// The value is a 8-bit unsigned integer.
@@ -37,41 +73,6 @@ enum gguf_metadata_value_type {
 	GGUF_METADATA_VALUE_TYPE_FLOAT64 = 12,
 };
 
-enum ggml_type {
-	GGML_TYPE_F32 = 0,
-	GGML_TYPE_F16 = 1,
-	GGML_TYPE_Q4_0 = 2,
-	GGML_TYPE_Q4_1 = 3,
-	GGML_TYPE_Q5_0 = 6,
-	GGML_TYPE_Q5_1 = 7,
-	GGML_TYPE_Q8_0 = 8,
-	GGML_TYPE_Q8_1 = 9,
-	GGML_TYPE_Q2_K = 10,
-	GGML_TYPE_Q3_K = 11,
-	GGML_TYPE_Q4_K = 12,
-	GGML_TYPE_Q5_K = 13,
-	GGML_TYPE_Q6_K = 14,
-	GGML_TYPE_Q8_K = 15,
-	GGML_TYPE_IQ2_XXS = 16,
-	GGML_TYPE_IQ2_XS = 17,
-	GGML_TYPE_IQ3_XXS = 18,
-	GGML_TYPE_IQ1_S = 19,
-	GGML_TYPE_IQ4_NL = 20,
-	GGML_TYPE_IQ3_S = 21,
-	GGML_TYPE_IQ2_S = 22,
-	GGML_TYPE_IQ4_XS = 23,
-	GGML_TYPE_I8 = 24,
-	GGML_TYPE_I16 = 25,
-	GGML_TYPE_I32 = 26,
-	GGML_TYPE_I64 = 27,
-	GGML_TYPE_F64 = 28,
-	GGML_TYPE_IQ1_M = 29,
-	GGML_TYPE_BF16 = 30,
-	GGML_TYPE_TQ1_0 = 34,
-	GGML_TYPE_TQ2_0 = 35,
-	GGML_TYPE_COUNT = 39,
-};
-
 typedef struct gguf_tensor_t {
 	char *name;
 	uint64_t dimensions[4];
@@ -92,7 +93,6 @@ struct gguf_metadata_kv_t {
 
 #define QK_K 256
 
-// A block of Q6_K quantized weights.
 typedef struct {
 	uint8_t ql[128];   // quants, lower 4 bits
 	uint8_t qh[64];	   // quants, upper 2 bits
@@ -109,7 +109,7 @@ typedef struct {
 
 struct ctx_t;
 
-extern int gguf_read(struct ctx_t *ctx, char *path);
+extern int gguf_parse(struct ctx_t *ctx, char *path);
 extern void gguf_close(struct ctx_t *ctx);
 
 extern int gguf_read_metadata_type_string(struct ctx_t *ctx, struct gguf_metadata_kv_t *metadata);
@@ -124,5 +124,7 @@ extern void *get_tensor_data_ptr(struct ctx_t *ctx_ptr, const char *name, uint64
 extern gguf_tensor *get_tensor(struct ctx_t *ctx_ptr, const char *name);
 
 extern void dump_tensors(struct ctx_t *ctx);
+extern size_t get_ggml_block_size(int type);
+extern size_t ggml_type_size(ggml_type type);
 
 #endif

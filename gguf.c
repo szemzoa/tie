@@ -10,8 +10,8 @@
 #include <math.h>
 #include <unistd.h>
 
-#include "gguf.h"
 #include "main.h"
+#include "gguf.h"
 #include "threadpool.h"
 #include "tokenize.h"
 
@@ -548,7 +548,7 @@ void dump_tensors(struct ctx_t *ctx)
 		printf("shape: [ %llu,\t%llu,\t%llu,\t%llu ],", tensor->dimensions[0], tensor->dimensions[1],
 		       tensor->dimensions[2], tensor->dimensions[3]);
 		//		printf("\tsize: %.02f MB, offset: %llu\n", (float)tensor->size / 1024 / 1024,
-		//tensor->offset);
+		// tensor->offset);
 		printf("\tsize: %llu, offset: %llu\n", tensor->size, tensor->offset);
 	}
 }
@@ -768,7 +768,7 @@ int gguf_map_weights(struct ctx_t *ctx)
 	return 0;
 }
 
-int gguf_read(struct ctx_t *ctx, char *path)
+int gguf_parse(struct ctx_t *ctx, char *path)
 {
 	struct stat st;
 	uint32_t magic;
@@ -975,4 +975,30 @@ int gguf_metadata_read_merges(struct ctx_t *ctx, char *key)
 	}
 
 	return 0;
+}
+
+size_t get_ggml_block_size(int type)
+{
+        switch (type) {
+        case GGML_TYPE_Q4_K:
+                return sizeof(block_q4_k);
+        case GGML_TYPE_Q6_K:
+                return sizeof(block_q6_k);
+        default:
+                printf("FATAL: MoE operates on unsupported tensor type %d\n", type);
+                return 0;
+        }
+}
+
+size_t ggml_type_size(ggml_type type)
+{
+	switch (type) {
+	case GGML_TYPE_F32:
+		return sizeof(float);
+	case GGML_TYPE_BF16:
+		return sizeof(uint16_t);
+	default:
+                printf("FATAL: Unknown size for type %d\n", type);
+                return 0;
+	}
 }

@@ -15,14 +15,14 @@
 #include <unistd.h>
 #include <locale.h>
 
-
 #include "main.h"
 #include "threadpool.h"
-#include "maths.h"
+#include "math_dispatch.h"
 #include "model.h"
 #include "engine.h"
 #include "predict.h"
 #include "tokenize.h"
+#include "version.h"
 
 #if 0
 #include <poll.h>
@@ -234,19 +234,23 @@ void read_user_input(char *input_buf, size_t buf_size)
 }
 
 // Process prompt tokens
-void process_prompt(struct ctx_t *ctx, int *prompt_tokens, size_t prompt_len, int use_threads)
+void process_prompt(struct ctx_t *ctx, int *prompt_tokens, size_t prompt_len)
 {
+        MemType hidden_state_slice;
+
 	for (int i = 0; i < prompt_len; i++) {
-		float *dest = ctx->mem.hidden_state + (long long)i * ctx->model->embed_dim;
-		get_embedding_row(&ctx->model->token_embd, prompt_tokens[i], dest, ctx->model->embed_dim);
+                // Create a slice for this token's position in the hidden_state buffer
+                hidden_state_slice = mem_slice(&ctx->mem.hidden_state, i * ctx->model->embed_dim);
+		dispatch_embedding_row(&ctx->model->token_embd, prompt_tokens[i], &hidden_state_slice, ctx->model->embed_dim);
 	}
 
 	for (int l = 0; l < ctx->model->num_layers; l++) {
-		transformer_layer(ctx, l, prompt_len, use_threads);
+		transformer_layer(ctx, l, prompt_len);
 	}
 
-	memcpy(ctx->mem.hidden_state, ctx->mem.hidden_state + (long long)(prompt_len - 1) * ctx->model->embed_dim,
-	       ctx->model->embed_dim * sizeof(float));
+	MemType hidden_state_first_slice = mem_slice(&ctx->mem.hidden_state, 0);
+	memcpy(hidden_state_first_slice.data, hidden_state_slice.data, ctx->model->embed_dim * ggml_type_size(ctx->mem.hidden_state.type));
+
 	ctx->kv_pos += prompt_len;
 }
 
@@ -266,25 +270,26 @@ static void enable_raw_mode(void)
 }
 #endif
 
-void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads)
+void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 {
 	char input_buf[2048];
 	char prompt_buf[4096];
 	struct timespec start, end;
 	int gen_len;
 	struct tool_call_t tool_call;
+	Tensor *output_tensor = ctx->model->output.mem.data == NULL ? &ctx->model->token_embd : &ctx->model->output;
 
 	// Initialize tool call handling
 	tool_call_init(ctx, &tool_call);
 
-#if 1
+#if 0
 	// Process system prompt immediately at start
 	size_t system_prompt_len = 0;
 	int *system_prompt_tokens = tokenize_bpe(ctx, system_prompt_with_tools, &system_prompt_len);
 
 	printf("--- Processing System Prompt: %zu tokens ---\n", system_prompt_len);
 	clock_gettime(CLOCK_REALTIME, &start);
-	process_prompt(ctx, system_prompt_tokens, system_prompt_len, use_threads);
+	process_prompt(ctx, system_prompt_tokens, system_prompt_len);
 	clock_gettime(CLOCK_REALTIME, &end);
 	printf("--- System Prompt Processed, time: %llu msec ---\n", elapsed_time_us(end, start) / 1000);
 	free(system_prompt_tokens);
@@ -322,7 +327,7 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 		clock_gettime(CLOCK_REALTIME, &start);
 
 		/* prompt processing */
-		process_prompt(ctx, prompt_tokens, prompt_len, use_threads);
+		process_prompt(ctx, prompt_tokens, prompt_len);
 
 		clock_gettime(CLOCK_REALTIME, &end);
 		printf("--- Prompt Processing Complete %zu tokens, time: %llu msec ---\n", prompt_len,
@@ -333,30 +338,21 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 		clock_gettime(CLOCK_REALTIME, &start);
 		gen_len = 0;
 
-
 		for (int step = 0; step < max_new_tokens; step++) {
 			if (ctx->kv_pos >= ctx->model->seq_length) {
 				printf("\nReached max sequence length.\n");
 				break;
 			}
 
-			rms_norm(ctx->mem.normed_ffn_input, ctx->mem.hidden_state, ctx->model->output_norm.data,
-				 ctx->model->embed_dim, ctx->model->norm_eps);
+			dispatch_rms_norm(&ctx->mem.hidden_state, &ctx->model->output_norm,
+					  &ctx->mem.normed_ffn_input, ctx->model->embed_dim, ctx->model->norm_eps);
 
-			if (ctx->model->output.data != NULL) {
-				parallel_mat_vec_unified(ctx->mem.normed_ffn_input, &ctx->model->output,
-							 ctx->mem.logits, ctx->model->embed_dim, ctx->model->vocab_size,
-							 use_threads);
-			} else {
-				parallel_mat_vec_unified(ctx->mem.normed_ffn_input, &ctx->model->token_embd,
-							 ctx->mem.logits, ctx->model->embed_dim, ctx->model->vocab_size,
-							 use_threads);
-			}
+			dispatch_mat_vec(&ctx->mem.normed_ffn_input, output_tensor, &ctx->mem.logits, ctx->model->embed_dim,
+						 ctx->model->vocab_size, true);
 
-			int next_token = predict_next_token(ctx->mem.logits, ctx->model->vocab_size, "temperature",
+			int next_token = predict_next_token((float*)ctx->mem.logits.data, ctx->model->vocab_size, "temperature",
 							    0.7f, 20, 0.95f, prompt_tokens, prompt_len,
 							    generated_tokens, gen_len, ctx->model->repetition_penalty);
-
 
 			generate_output(ctx, next_token);
 
@@ -371,11 +367,14 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens, int use_threads
 				break;
 			}
 
-			get_embedding_row(&ctx->model->token_embd, next_token, ctx->mem.hidden_state,
-					  ctx->model->embed_dim);
+			// Create a slice for this token's position in the hidden_state buffer
+			MemType hidden_state_slice = mem_slice(&ctx->mem.hidden_state, 0);
+			dispatch_embedding_row(&ctx->model->token_embd, next_token, &hidden_state_slice, ctx->model->embed_dim);
+
 			for (int l = 0; l < ctx->model->num_layers; l++) {
-				transformer_layer(ctx, l, 1, use_threads);
+				transformer_layer(ctx, l, 1);
 			}
+
 			ctx->kv_pos++;
 		}
 
@@ -396,6 +395,7 @@ static void print_usage(void)
 	printf("parameters:\r\n");
 	printf("\t -h (help)\r\n");
 	printf("\t -m [model file]\r\n");
+	printf("\t -c [context length]\r\n");
 	printf("\t -t [thread num]\r\n");
 }
 
@@ -405,15 +405,16 @@ int main(int argc, char *argv[])
 	int opt;
 	int num_threads = 1;
 	char *model_path;
+	int context_length = 0;
 	int use_mmap = 0;
 
-	printf("Toy Inference Engine\n");
-	if (argc < 3) {
+	printf("Toy Inference Engine v%u.%u\n", VERSION_MAJOR, VERSION_MINOR);
+	if (argc < 4) {
 		print_usage();
 		exit(EXIT_SUCCESS);
 	}
 
-	while ((opt = getopt(argc, argv, "t:m:h")) != -1) {
+	while ((opt = getopt(argc, argv, "t:m:h:c:")) != -1) {
 		switch (opt) {
 		case 't':
 			num_threads = atoi(optarg);
@@ -424,6 +425,9 @@ int main(int argc, char *argv[])
 			break;
 		case 'm':
 			model_path = optarg;
+			break;
+		case 'c':
+			context_length = atoi(optarg);
 			break;
 		case '?':
 			print_usage();
@@ -438,9 +442,9 @@ int main(int argc, char *argv[])
 #ifdef CONFIG_ENABLE_AVX2
 	__builtin_cpu_init();
 	if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma")) {
-		printf("init: AVX2 and FMA supported\n");
+		printf("AVX2 and FMA supported\n");
 	} else {
-		printf("init: AVX2 and FMA not supported\n");
+		printf("Error: AVX2 and FMA not supported, but enabled\n");
 		exit(EXIT_FAILURE);
 	}
 #endif
@@ -453,27 +457,26 @@ int main(int argc, char *argv[])
 	ctx->utf8_state = 0;
 	ctx->utf8_codepoint = 0;
 
-	if (gguf_read(ctx, model_path) != 0) {
+	if (gguf_parse(ctx, model_path) != 0) {
 		free(ctx);
 		return -1;
 	}
 
-	if (model_create(ctx, use_mmap) != 0) {
+	if (model_load(ctx, use_mmap, context_length) != 0) {
 		gguf_close(ctx);
 		free(ctx);
 		return -1;
 	}
 
+	printf("Create thread_pool: %u threads\n", num_threads);
 	thread_pool = thread_pool_create(num_threads);
-	printf("init: thread_pool enabled, %u threads\n", num_threads);
 
 	if (model_init(ctx, 1.0f, 1.0f) != 0)
 		goto _cleanup;
 
-	ctx->kv_pos = 0;
 	printf("Welcome to interactive chat. Type 'exit' to quit.\n");
 
-	generate_interactive(ctx, 8192, CONFIG_USE_THREADS);
+	generate_interactive(ctx, 8192);
 
 _cleanup:
 	model_cleanup(ctx, use_mmap);

@@ -4,11 +4,10 @@
 #include <unistd.h>
 #include <string.h>
 #include <math.h>
-
+#include "model.h"
 #include "gguf.h"
-#include "threadpool.h"
 #include "main.h"
-#include "maths.h"
+#include "threadpool.h"
 #include "engine.h"
 
 int load_tensor(struct ctx_t *ctx, char *name, Tensor *tensor, int use_mmap)
@@ -18,22 +17,22 @@ int load_tensor(struct ctx_t *ctx, char *name, Tensor *tensor, int use_mmap)
 	if ((ggtensor = get_tensor(ctx, name)) == NULL)
 		return -1;
 
-	tensor->type = ggtensor->type;
+	tensor->mem.type = ggtensor->type;
 	tensor->size_in_bytes = ggtensor->size;
 
 	if (use_mmap) {
 		// Point directly into the mapped file data
-		tensor->data = ggtensor->data;
+		tensor->mem.data = ggtensor->data;
 		tensor->is_mmaped = true;
 	} else {
 		// Allocate new memory and read the tensor data from the file
-		tensor->data = aligned_alloc(128, ggtensor->size);
-		if (!tensor->data) {
+		tensor->mem.data = aligned_alloc(128, ggtensor->size);
+		if (!tensor->mem.data) {
 			printf("%s OOM\n", __FUNCTION__);
 			return -1;
 		}
 
-		pread(ctx->fd, tensor->data, ggtensor->size, ggtensor->offset + ctx->tensor_data_offset);
+		pread(ctx->fd, tensor->mem.data, ggtensor->size, ggtensor->offset + ctx->tensor_data_offset);
 		tensor->is_mmaped = false;
 	}
 
@@ -42,7 +41,7 @@ int load_tensor(struct ctx_t *ctx, char *name, Tensor *tensor, int use_mmap)
 	return 0;
 }
 
-int model_create(struct ctx_t *ctx, int use_mmap)
+int model_load(struct ctx_t *ctx, int use_mmap, int context_length)
 {
 	char name_buffer[256];
 
@@ -68,7 +67,12 @@ int model_create(struct ctx_t *ctx, int use_mmap)
 	LOAD_MODEL_PARAM(head_dim, "attention.key_length");
 	LOAD_MODEL_PARAM(ffn_dim, "feed_forward_length");
 	LOAD_MODEL_PARAM(rope_freq_base, "rope.freq_base");
-	LOAD_MODEL_PARAM(seq_length, "context_length");
+	if (context_length == 0) {
+		LOAD_MODEL_PARAM(seq_length, "context_length");
+	} else {
+		ctx->model->seq_length = context_length;
+	}
+	printf("set context_length: %u\n", ctx->model->seq_length);
 	LOAD_MODEL_PARAM(norm_eps, "attention.layer_norm_rms_epsilon");
 	LOAD_MODEL_PARAM(eos_token, "embedding_length");
 
@@ -83,7 +87,6 @@ int model_create(struct ctx_t *ctx, int use_mmap)
 	}
 
 #undef LOAD_MODEL_PARAM
-
 
 	gguf_get_metadata_value(ctx, "tokenizer.ggml.eos_token_id", &ctx->model->eos_token);
 
@@ -152,11 +155,9 @@ int model_create(struct ctx_t *ctx, int use_mmap)
 	}
 #undef LOAD_LAYER_WEIGHT
 
-
 #ifdef DEBUG_TENSORS
 	dump_tensors(ctx);
 #endif
-
 	printf("Loaded %llu/%llu tensors\n", ctx->tensor_loaded, ctx->tensor_count);
 	return 0;
 
@@ -169,137 +170,43 @@ _metadata_load_error:
 	return -1;
 }
 
-#if 0
-int compare_weights(char *filename, int file_size, int py_offset, int size, float *c_weights)
+static inline void *xaligned_alloc(size_t alignment, size_t size_bytes)
 {
-	int	  rc = 0;
-	FILE *f	 = fopen(filename, "rb");
-	if (!f) {
-		printf("can't open python file: %s\n", filename);
-		return -1;
-	}
+    // aligned_alloc requires size % alignment == 0
+    size_t padded = (size_bytes + (alignment - 1)) & ~(alignment - 1);
 
-	// Assuming you know the size of the vocab from your model config
-	float *python_weights = malloc(file_size * sizeof(float));
-	fread(python_weights, sizeof(float), file_size, f);
-	fclose(f);
+    void *p = NULL;
+    if (posix_memalign(&p, alignment, padded) != 0) return NULL;
 
-	// Now, compare python_logits with your C-generated logits element by element
-	for (int i = 0; i < size; i++) {
-		float diff = fabsf(python_weights[py_offset + i] - c_weights[i]);
-		if (diff > 1e-4) { // Use a small tolerance for floating point math
-			printf("Mismatch at index %d! Python: %f, C: %f\n", i, python_weights[py_offset + i], c_weights[i]);
-			rc = -1;
-			break;
-		}
-	}
-
-#if 1
-	printf("validate %s python weights: \t", filename);
-	for (int i = 0; i < 5 && i < size; i++)
-		printf("%.10f ", python_weights[py_offset + i]);
-
-	printf("\n");
-
-	printf("validate %s c-code weights: \t", filename);
-	for (int i = 0; i < 5 && i < size; i++)
-		printf("%.10f ", c_weights[i]);
-
-	printf("\n");
-#endif
-
-	if (rc == 0) {
-		printf("%s match\n", filename);
-	} else {
-		printf("%s differ\n", filename);
-	}
-
-	free(python_weights);
-	return rc;
+    return p;
 }
-#endif
 
-void model_cleanup(struct ctx_t *ctx, int use_mmap)
+static inline void create_internal_memory(MemType *m, ggml_type t, size_t nelems)
 {
-	free(ctx->mem.hidden_state);
-	free(ctx->mem.normed_qkv_input);
-	free(ctx->mem.Q);
-	free(ctx->mem.K);
-	free(ctx->mem.V);
+    m->type = t;
+    size_t total = nelems * ggml_type_size(t);
+    void *ptr = xaligned_alloc(32, total);
+    if (!ptr) {
+        fprintf(stderr, "ERROR: alloc %zu bytes for MemType failed\n", total);
+        exit(1);
+    }
+    m->data = ptr;
+}
 
-	for (int t = 0; t < thread_pool->num_threads; t++)
-		free(ctx->mem.attn_scores_buffer[t]);
-
-	free(ctx->mem.attn_output);
-	free(ctx->mem.attn_proj_output);
-	free(ctx->mem.normed_ffn_input);
-	free(ctx->mem.gate_proj_output);
-	free(ctx->mem.up_proj_output);
-	free(ctx->mem.ffn_down_output);
-	free(ctx->mem.logits);
-
-	if (ctx->model->is_moe == 1) {
-
-		for (int i = 0; i < thread_pool->num_threads; i++) {
-			free(ctx->mem.ffn_hidden1_scratch[i]);
-			free(ctx->mem.ffn_hidden2_scratch[i]);
-			free(ctx->mem.expert_out_scratch[i]);
-		}
-
-		free(ctx->mem.ffn_hidden1_scratch);
-		free(ctx->mem.ffn_hidden2_scratch);
-		free(ctx->mem.expert_out_scratch);
-
-		free(ctx->mem.expert_scores);
-	}
-
-	thread_pool_destroy(thread_pool);
-
-	for (uint32_t i = 0; i < ctx->model->num_layers; i++) {
-		free(ctx->kv_cache[i].k);
-		free(ctx->kv_cache[i].v);
-	}
-	free(ctx->kv_cache);
-
-	if (use_mmap == 1) {
-
-		free(ctx->model->token_embd.data);
-		free(ctx->model->output_norm.data);
-
-		if (ctx->model->output.data)
-			free(ctx->model->output.data);
-
-		for (uint32_t block_idx = 0; block_idx < ctx->model->num_layers; block_idx++) {
-			free(ctx->model->layers[block_idx].attn_q.data);
-			free(ctx->model->layers[block_idx].attn_k.data);
-			free(ctx->model->layers[block_idx].attn_v.data);
-			free(ctx->model->layers[block_idx].attn_norm.data);
-			free(ctx->model->layers[block_idx].attn_q_norm.data);
-			free(ctx->model->layers[block_idx].attn_k_norm.data);
-			free(ctx->model->layers[block_idx].attn_out.data);
-			free(ctx->model->layers[block_idx].ffn_gate.data);
-			free(ctx->model->layers[block_idx].ffn_up.data);
-			free(ctx->model->layers[block_idx].ffn_down.data);
-			free(ctx->model->layers[block_idx].ffn_norm.data);
-		}
-	}
-
-	free(ctx->model->layers);
-	free(ctx->model);
-	free(ctx->rope_cache);
-
-	free(ctx->token_table);
-	free(ctx->token_lens);
-
-	free_trie(ctx->root);
-	free_string_pool(ctx->pool);
+static inline void release_internal_memory(MemType *m)
+{
+	free(m->data);
 }
 
 int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penality)
 {
+	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
+	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
+
 	ctx->model->yarn_scale_factor = yarn_scale_factor;
 	ctx->model->repetition_penalty = repetiton_penality;
 	ctx->model->attn_scale = 1.0f / sqrtf(ctx->model->head_dim);
+
 
 	printf("Initializing %s %s model with the following configuration:\n", ctx->model->arch_name,
 	       ctx->model->is_moe == 0 ? "dense" : "MoE");
@@ -318,6 +225,7 @@ int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penal
 	// Initialize SiLU lookup table
 	silu_table_init();
 
+
 	// Initialize RoPE cache
 	ctx->rope_cache = malloc(sizeof(rope_cache_t));
 	if (!ctx->rope_cache) {
@@ -325,7 +233,6 @@ int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penal
 		return -1;
 	}
 	rope_cache_init(ctx, ctx->model->seq_length, ctx->model->head_dim, ctx->model->rope_freq_base);
-
 
 	printf("Initializing KV cache\n");
 	ctx->kv_cache = calloc(ctx->model->num_layers, sizeof(LayerKVCache));
@@ -340,14 +247,14 @@ int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penal
 
 	printf("KV cache elements per layer: %lld\n", k_elements_per_layer);
 	for (int i = 0; i < ctx->model->num_layers; i++) {
-		ctx->kv_cache[i].k = calloc(k_elements_per_layer, sizeof(uint16_t));
-		ctx->kv_cache[i].v = calloc(k_elements_per_layer, sizeof(uint16_t));
+		create_internal_memory(&ctx->kv_cache[i].k, GGML_TYPE_BF16, k_elements_per_layer);
+		create_internal_memory(&ctx->kv_cache[i].v, GGML_TYPE_BF16, k_elements_per_layer);
 
-		if (!ctx->kv_cache[i].k || !ctx->kv_cache[i].v) {
+		if (!ctx->kv_cache[i].k.data || !ctx->kv_cache[i].v.data) {
 			perror("Failed to allocate K or V cache for a layer");
 			for (int j = 0; j < i; ++j) {
-				free(ctx->kv_cache[j].k);
-				free(ctx->kv_cache[j].v);
+				free(ctx->kv_cache[j].k.data);
+				free(ctx->kv_cache[j].v.data);
 			}
 			free(ctx->kv_cache);
 			free(ctx->rope_cache);
@@ -357,57 +264,54 @@ int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penal
 	printf("KV cache uses: %lld MB\n",
 	       (k_elements_per_layer * sizeof(uint16_t)) * 2 * ctx->model->num_layers / 1024 / 1024);
 
-	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
-	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
-
-	ctx->mem.hidden_state = aligned_alloc(32, ctx->model->embed_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
-	ctx->mem.normed_qkv_input = aligned_alloc(32, ctx->model->embed_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
-	ctx->mem.Q = aligned_alloc(32, q_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
-	ctx->mem.K = aligned_alloc(32, kv_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
-	ctx->mem.V = aligned_alloc(32, kv_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
-	ctx->mem.attn_output = aligned_alloc(32, q_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
-	ctx->mem.attn_proj_output = aligned_alloc(32, ctx->model->embed_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
-	ctx->mem.normed_ffn_input = aligned_alloc(32, ctx->model->embed_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
-	ctx->mem.gate_proj_output = aligned_alloc(32, ctx->model->ffn_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
-	ctx->mem.up_proj_output = aligned_alloc(32, ctx->model->ffn_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
-	ctx->mem.ffn_down_output = aligned_alloc(32, ctx->model->embed_dim * sizeof(float) * MAX_PROMPT_BATCH_SIZE);
-	ctx->mem.logits = aligned_alloc(32, ctx->model->vocab_size * sizeof(float));
+	/* create internal memories */
+	create_internal_memory(&ctx->mem.hidden_state, GGML_TYPE_F32, ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
+	create_internal_memory(&ctx->mem.normed_qkv_input, GGML_TYPE_F32, ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
+	create_internal_memory(&ctx->mem.Q, GGML_TYPE_F32, q_dim * MAX_PROMPT_BATCH_SIZE);
+	create_internal_memory(&ctx->mem.K, GGML_TYPE_F32, kv_dim * MAX_PROMPT_BATCH_SIZE);
+	create_internal_memory(&ctx->mem.V, GGML_TYPE_F32, kv_dim * MAX_PROMPT_BATCH_SIZE);
+	create_internal_memory(&ctx->mem.attn_output, GGML_TYPE_F32, q_dim * MAX_PROMPT_BATCH_SIZE);
+	create_internal_memory(&ctx->mem.attn_proj_output, GGML_TYPE_F32, ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
+	create_internal_memory(&ctx->mem.normed_ffn_input, GGML_TYPE_F32, ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
+	create_internal_memory(&ctx->mem.gate_proj_output, GGML_TYPE_F32, ctx->model->ffn_dim * MAX_PROMPT_BATCH_SIZE);
+	create_internal_memory(&ctx->mem.up_proj_output, GGML_TYPE_F32, ctx->model->ffn_dim * MAX_PROMPT_BATCH_SIZE);
+	create_internal_memory(&ctx->mem.ffn_down_output, GGML_TYPE_F32, ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
+	create_internal_memory(&ctx->mem.logits, GGML_TYPE_F32, ctx->model->vocab_size);
 
 	if (ctx->model->is_moe == 1) {
-		printf("--- Allocating MoE FFN memory ---\n");
-		ctx->mem.expert_scores = aligned_alloc(32, ctx->model->expert_count * sizeof(float));
+		create_internal_memory(&ctx->mem.expert_scores, GGML_TYPE_F32, ctx->model->expert_count);
+		create_internal_memory(&ctx->mem.expert_out_fp32, GGML_TYPE_F32, ctx->model->embed_dim);
 
-		// Allocate the scratch buffer arrays
-		ctx->mem.ffn_hidden1_scratch = malloc(thread_pool->num_threads * sizeof(float *));
-		ctx->mem.ffn_hidden2_scratch = malloc(thread_pool->num_threads * sizeof(float *));
-		ctx->mem.expert_out_scratch = malloc(thread_pool->num_threads * sizeof(float *));
+		ctx->mem.ffn_hidden1_scratch = aligned_alloc(32, ctx->model->expert_count * sizeof(MemType));
+		ctx->mem.ffn_hidden2_scratch = aligned_alloc(32, ctx->model->expert_count * sizeof(MemType));
+		ctx->mem.expert_outputs = aligned_alloc(32, ctx->model->expert_count * sizeof(MemType));
 
-		for (int i = 0; i < thread_pool->num_threads; i++) {
-			ctx->mem.ffn_hidden1_scratch[i] = aligned_alloc(32, ctx->model->expert_ffn_dim * sizeof(float));
-			ctx->mem.ffn_hidden2_scratch[i] = aligned_alloc(32, ctx->model->expert_ffn_dim * sizeof(float));
-			ctx->mem.expert_out_scratch[i] = aligned_alloc(32, ctx->model->embed_dim * sizeof(float));
+		for (int i = 0; i < ctx->model->expert_count; i++) {
+			create_internal_memory(&ctx->mem.ffn_hidden1_scratch[i], GGML_TYPE_F32, ctx->model->expert_ffn_dim);
+			create_internal_memory(&ctx->mem.ffn_hidden2_scratch[i], GGML_TYPE_F32, ctx->model->expert_ffn_dim);
+			create_internal_memory(&ctx->mem.expert_outputs[i], GGML_TYPE_F32, ctx->model->embed_dim);
 		}
 	}
 
+	ctx->mem.q_head_fp32_scratch = aligned_alloc(32, thread_pool->num_threads * sizeof(MemType));
+
 	for (int t = 0; t < thread_pool->num_threads; t++) {
+
+		create_internal_memory(&ctx->mem.q_head_fp32_scratch[t], GGML_TYPE_F32, ctx->model->head_dim);
+
 		if ((ctx->mem.attn_scores_buffer[t] =
-			     aligned_alloc(32, (long long)ctx->model->seq_length * sizeof(float)))
-		    == NULL)
+			     aligned_alloc(32, (long long)ctx->model->seq_length * sizeof(float))) == NULL)
+
 			goto _init_error_free_kv_cache;
 	}
 
-	if (!ctx->mem.attn_output || !ctx->mem.attn_proj_output || !ctx->mem.normed_ffn_input
-	    || !ctx->mem.gate_proj_output || !ctx->mem.up_proj_output || !ctx->mem.ffn_down_output || !ctx->mem.Q
-	    || !ctx->mem.K || !ctx->mem.V || !ctx->mem.normed_qkv_input || !ctx->mem.hidden_state || !ctx->mem.logits) {
-		goto _init_error_free_kv_cache;
-	}
-
+	ctx->kv_pos = 0;
 	return 0;
 
 _init_error_free_kv_cache:
 	for (int i = 0; i < ctx->model->num_layers; i++) {
-		free(ctx->kv_cache[i].k);
-		free(ctx->kv_cache[i].v);
+		release_internal_memory(&ctx->kv_cache[i].k);
+		release_internal_memory(&ctx->kv_cache[i].v);
 	}
 
 	free(ctx->kv_cache);
@@ -415,3 +319,129 @@ _init_error_free_kv_cache:
 
 	return -1;
 }
+
+void model_cleanup(struct ctx_t *ctx, int use_mmap)
+{
+	release_internal_memory(&ctx->mem.hidden_state);
+	release_internal_memory(&ctx->mem.normed_qkv_input);
+	release_internal_memory(&ctx->mem.Q);
+	release_internal_memory(&ctx->mem.K);
+	release_internal_memory(&ctx->mem.V);
+	release_internal_memory(&ctx->mem.attn_output);
+	release_internal_memory(&ctx->mem.attn_proj_output);
+	release_internal_memory(&ctx->mem.normed_ffn_input);
+	release_internal_memory(&ctx->mem.gate_proj_output);
+	release_internal_memory(&ctx->mem.up_proj_output);
+	release_internal_memory(&ctx->mem.ffn_down_output);
+	release_internal_memory(&ctx->mem.logits);
+
+	for (int t = 0; t < thread_pool->num_threads; t++) {
+		release_internal_memory(&ctx->mem.q_head_fp32_scratch[t]);
+		free(ctx->mem.attn_scores_buffer[t]);
+	}
+
+	free(ctx->mem.q_head_fp32_scratch);
+
+	if (ctx->model->is_moe == 1) {
+
+		for (int i = 0; i < thread_pool->num_threads; i++) {
+			release_internal_memory(&ctx->mem.ffn_hidden1_scratch[i]);
+			release_internal_memory(&ctx->mem.ffn_hidden2_scratch[i]);
+			release_internal_memory(&ctx->mem.expert_outputs[i]);
+		}
+
+		free(ctx->mem.ffn_hidden1_scratch);
+		free(ctx->mem.ffn_hidden2_scratch);
+		free(ctx->mem.expert_outputs);
+
+		release_internal_memory(&ctx->mem.expert_out_fp32);
+		release_internal_memory(&ctx->mem.expert_scores);
+	}
+
+	thread_pool_destroy(thread_pool);
+
+	for (uint32_t i = 0; i < ctx->model->num_layers; i++) {
+		release_internal_memory(&ctx->kv_cache[i].k);
+		release_internal_memory(&ctx->kv_cache[i].v);
+	}
+	free(ctx->kv_cache);
+
+	if (use_mmap == 1) {
+
+		free(ctx->model->token_embd.mem.data);
+		free(ctx->model->output_norm.mem.data);
+
+		if (ctx->model->output.mem.data)
+			free(ctx->model->output.mem.data);
+
+		for (uint32_t block_idx = 0; block_idx < ctx->model->num_layers; block_idx++) {
+			free(ctx->model->layers[block_idx].attn_q.mem.data);
+			free(ctx->model->layers[block_idx].attn_k.mem.data);
+			free(ctx->model->layers[block_idx].attn_v.mem.data);
+			free(ctx->model->layers[block_idx].attn_norm.mem.data);
+			free(ctx->model->layers[block_idx].attn_q_norm.mem.data);
+			free(ctx->model->layers[block_idx].attn_k_norm.mem.data);
+			free(ctx->model->layers[block_idx].attn_out.mem.data);
+			free(ctx->model->layers[block_idx].ffn_gate.mem.data);
+			free(ctx->model->layers[block_idx].ffn_up.mem.data);
+			free(ctx->model->layers[block_idx].ffn_down.mem.data);
+			free(ctx->model->layers[block_idx].ffn_norm.mem.data);
+		}
+	}
+
+	free(ctx->model->layers);
+	free(ctx->model);
+	free(ctx->rope_cache);
+
+	free(ctx->token_table);
+	free(ctx->token_lens);
+
+	free_trie(ctx->root);
+	free_string_pool(ctx->pool);
+}
+
+#if 0
+int compare_weights(char *filename, int file_size, int py_offset, int size, float *c_weights)
+{
+	int	  rc = 0;
+	FILE *f	 = fopen(filename, "rb");
+	if (!f) {
+		printf("can't open python file: %s\n", filename);
+		return -1;
+	}
+
+	float *python_weights = malloc(file_size * sizeof(float));
+	fread(python_weights, sizeof(float), file_size, f);
+	fclose(f);
+
+	for (int i = 0; i < size; i++) {
+		float diff = fabsf(python_weights[py_offset + i] - c_weights[i]);
+		if (diff > 1e-4) { // Use a small tolerance for floating point math
+			printf("Mismatch at index %d! Python: %f, C: %f\n", i, python_weights[py_offset + i], c_weights[i]);
+			rc = -1;
+			break;
+		}
+	}
+
+	printf("validate %s python weights: \t", filename);
+	for (int i = 0; i < 5 && i < size; i++)
+		printf("%.10f ", python_weights[py_offset + i]);
+
+	printf("\n");
+
+	printf("validate %s c-code weights: \t", filename);
+	for (int i = 0; i < 5 && i < size; i++)
+		printf("%.10f ", c_weights[i]);
+
+	printf("\n");
+
+	if (rc == 0) {
+		printf("%s match\n", filename);
+	} else {
+		printf("%s differ\n", filename);
+	}
+
+	free(python_weights);
+	return rc;
+}
+#endif

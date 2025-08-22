@@ -4,7 +4,7 @@
 #include <inttypes.h>
 #include <stdbool.h>
 
-#define BPE_MAP_CAPACITY (256 * 1024) // Must be power-of-two
+#define BPE_MAP_CAPACITY (256 * 1024)
 #define MAX_SPECIAL_TOKENS 128
 #define MAX_TOKEN_IDS 8192
 #define MAX_CHUNKS 512
