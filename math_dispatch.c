@@ -7,102 +7,167 @@
 #include "math_avx2.h"
 #endif
 
+//#define DEBUG_ACCEL
+
+#ifdef DEBUG_ACCEL
+#define debug_accel(...)                                                                                               \
+	do {                                                                                                           \
+		printf(__VA_ARGS__);                                                                                   \
+	} while (0)
+#else
+#define debug_accel(...)
+#endif
+
 static void mat_vec_task(void *arg);
 static void mat_mat_task(void *arg);
-
 
 /*  The global dispatch tables, listing all available implementations */
 embedding_row_dispatch_t EMBEDDING_ROW_DISPATCH_TABLE[] = {
 #ifdef CONFIG_ENABLE_AVX2
-	{GGML_TYPE_Q4_K, GGML_TYPE_F32, get_embedding_row_q4_k_f32_avx2},
-	{GGML_TYPE_Q6_K, GGML_TYPE_F32, get_embedding_row_q6_k_f32_avx2},
+	{GGML_TYPE_Q6_K, GGML_TYPE_F32, get_embedding_row_q6k_f32_avx2, 1},
+	{GGML_TYPE_Q4_K, GGML_TYPE_F32, get_embedding_row_q4k_f32_avx2, 1},
+	{GGML_TYPE_BF16, GGML_TYPE_BF16, get_embedding_row_bf16_bf16_avx2, 1},
+	{GGML_TYPE_BF16, GGML_TYPE_F32, get_embedding_row_bf16_f32_avx2, 1},
+	{GGML_TYPE_Q6_K, GGML_TYPE_BF16, get_embedding_row_q6k_bf16_avx2, 1},
 #endif
-	{GGML_TYPE_Q4_K, GGML_TYPE_F32, get_embedding_row_q4_k_f32_scalar},
-	{GGML_TYPE_Q6_K, GGML_TYPE_F32, get_embedding_row_q6_k_f32_scalar},
-	{GGML_TYPE_BF16, GGML_TYPE_F32, get_embedding_row_bf16_f32_scalar},
-	{GGML_TYPE_F32, GGML_TYPE_F32, get_embedding_row_f32_f32_scalar},
+	{GGML_TYPE_Q6_K, GGML_TYPE_F32, get_embedding_row_q6k_f32_scalar, 0},
+	{GGML_TYPE_Q4_K, GGML_TYPE_F32, get_embedding_row_q4k_f32_scalar, 0},
+	{GGML_TYPE_BF16, GGML_TYPE_F32, get_embedding_row_bf16_f32_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_F32, get_embedding_row_f32_f32_scalar, 0},
+
+	{GGML_TYPE_Q6_K, GGML_TYPE_BF16, get_embedding_row_q6k_bf16_scalar, 0},
+	{GGML_TYPE_Q4_K, GGML_TYPE_BF16, get_embedding_row_q4k_bf16_scalar, 0},
+	{GGML_TYPE_BF16, GGML_TYPE_BF16, get_embedding_row_bf16_bf16_scalar, 0},
 };
 
 rms_norm_dispatch_t RMS_NORM_DISPATCH_TABLE[] = {
 #ifdef CONFIG_ENABLE_AVX2
-	{GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, rms_norm_f32_f32_avx2},
-	{GGML_TYPE_BF16, GGML_TYPE_F32, GGML_TYPE_F32, rms_norm_bf16_f32_avx2},
+	{GGML_TYPE_BF16, GGML_TYPE_F32, GGML_TYPE_BF16, rms_norm_bf16_f32_bf16_avx2, 1},
+	{GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, rms_norm_f32_f32_f32_avx2, 1},
 #endif
-	{GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, rms_norm_f32_f32_scalar},
+	{GGML_TYPE_BF16, GGML_TYPE_F32, GGML_TYPE_BF16, rms_norm_bf16_f32_bf16_scalar, 0},
+	{GGML_TYPE_BF16, GGML_TYPE_F32, GGML_TYPE_F32, rms_norm_bf16_f32_f32_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, rms_norm_f32_f32_f32_scalar, 0},
 };
 
 apply_rope_cache_dispatch_t APPLY_ROPE_CACHE_DISPATCH_TABLE[] = {
 #ifdef CONFIG_ENABLE_AVX2
-	{GGML_TYPE_F32, apply_rope_cache_f32_avx2},
+	{GGML_TYPE_BF16, apply_rope_cache_bf16_avx2, 1},
+	{GGML_TYPE_F32, apply_rope_cache_f32_avx2, 1},
 #endif
-	{GGML_TYPE_F32, apply_rope_cache_f32_scalar},
+	{GGML_TYPE_BF16, apply_rope_cache_bf16_scalar, 0},
+	{GGML_TYPE_F32, apply_rope_cache_f32_scalar, 0},
 };
 
 accumulate_weighted_V_dispatch_t ACCUMULATE_WEIGHTED_V_DISPATCH_TABLE[] = {
 #ifdef CONFIG_ENABLE_AVX2
-	{GGML_TYPE_F32, GGML_TYPE_BF16, accumulate_weighted_V_f32_bf16_avx2},
+	{GGML_TYPE_F32, GGML_TYPE_BF16, accumulate_weighted_V_f32_bf16_avx2, 1},
+	{GGML_TYPE_BF16, GGML_TYPE_BF16, accumulate_weighted_V_bf16_bf16_avx2, 1},
 #endif
-	{GGML_TYPE_F32, GGML_TYPE_BF16, accumulate_weighted_V_f32_bf16_scalar},
+	{GGML_TYPE_BF16, GGML_TYPE_BF16, accumulate_weighted_V_bf16_bf16_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_BF16, accumulate_weighted_V_f32_bf16_scalar, 0},
 };
 
 store_KV_cache_dispatch_t STORE_KV_CACHE_DISPATCH_TABLE[] = {
-	{GGML_TYPE_F32, GGML_TYPE_BF16, store_KV_cache_f32_bf16_scalar},
+#ifdef CONFIG_ENABLE_AVX2
+	{GGML_TYPE_BF16, GGML_TYPE_BF16, store_KV_cache_bf16_bf16_avx2, 1},
+	{GGML_TYPE_F32, GGML_TYPE_BF16, store_KV_cache_f32_bf16_avx2, 1},
+#endif
+	{GGML_TYPE_BF16, GGML_TYPE_BF16, store_KV_cache_bf16_bf16_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_BF16, store_KV_cache_f32_bf16_scalar, 0},
 };
 
 apply_residual_dispatch_t APPLY_RESIDUAL_DISPATCH_TABLE[] = {
 #ifdef CONFIG_ENABLE_AVX2
-	{GGML_TYPE_F32, GGML_TYPE_F32, apply_residual_f32_avx2},
+	{GGML_TYPE_BF16, GGML_TYPE_BF16, apply_residual_bf16_bf16_avx2, 1},
+	{GGML_TYPE_F32, GGML_TYPE_F32, apply_residual_f32_f32_avx2, 1},
 #endif
-	{GGML_TYPE_F32, GGML_TYPE_F32, apply_residual_f32_scalar},
+	{GGML_TYPE_BF16, GGML_TYPE_BF16, apply_residual_bf16_bf16_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_BF16, apply_residual_f32_bf16_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_F32, apply_residual_f32_f32_scalar, 0},
 };
 
 mat_vec_dispatch_t MAT_VEC_DISPATCH_TABLE[] = {
 #ifdef CONFIG_ENABLE_AVX2
-	{GGML_TYPE_F32, GGML_TYPE_Q4_K, GGML_TYPE_F32, mat_vec_row_q4_k_f32_avx2},
-	{GGML_TYPE_F32, GGML_TYPE_Q6_K, GGML_TYPE_F32, mat_vec_row_q6_k_f32_avx2},
-	{GGML_TYPE_F32, GGML_TYPE_BF16, GGML_TYPE_F32, mat_vec_row_bf16_f32_avx2},
-	{GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, mat_vec_row_f32_f32_avx2},
+	{GGML_TYPE_BF16, GGML_TYPE_Q4_K, GGML_TYPE_BF16, mat_vec_row_bf16_q4k_bf16_avx2, 1},
+	{GGML_TYPE_BF16, GGML_TYPE_Q6_K, GGML_TYPE_BF16, mat_vec_row_bf16_q6k_bf16_avx2, 1},
+	{GGML_TYPE_BF16, GGML_TYPE_Q4_K, GGML_TYPE_F32, mat_vec_row_bf16_q4k_f32_avx2, 1},
+	{GGML_TYPE_BF16, GGML_TYPE_Q6_K, GGML_TYPE_F32, mat_vec_row_bf16_q6k_f32_avx2, 1},
+	{GGML_TYPE_F32, GGML_TYPE_Q4_K, GGML_TYPE_F32, mat_vec_row_f32_q4k_f32_avx2, 1},
+	{GGML_TYPE_F32, GGML_TYPE_Q6_K, GGML_TYPE_F32, mat_vec_row_f32_q6k_f32_avx2, 1},
+	{GGML_TYPE_F32, GGML_TYPE_BF16, GGML_TYPE_F32, mat_vec_row_f32_bf16_f32_avx2, 1},
+	{GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, mat_vec_row_f32_f32_f32_avx2, 1},
 #endif
-	{GGML_TYPE_F32, GGML_TYPE_Q4_K, GGML_TYPE_F32, mat_vec_row_q4_k_f32_scalar},
-	{GGML_TYPE_F32, GGML_TYPE_Q6_K, GGML_TYPE_F32, mat_vec_row_q6_k_f32_scalar},
-	{GGML_TYPE_F32, GGML_TYPE_BF16, GGML_TYPE_F32, mat_vec_row_bf16_f32_scalar},
-	{GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, mat_vec_row_f32_f32_scalar},
+	{GGML_TYPE_BF16, GGML_TYPE_Q4_K, GGML_TYPE_BF16, mat_vec_row_bf16_q4k_bf16_scalar, 0},
+	{GGML_TYPE_BF16, GGML_TYPE_Q6_K, GGML_TYPE_BF16, mat_vec_row_bf16_q6k_bf16_scalar, 0},
+	{GGML_TYPE_BF16, GGML_TYPE_BF16, GGML_TYPE_BF16, mat_vec_row_bf16_bf16_bf16_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_Q4_K, GGML_TYPE_BF16, mat_vec_row_f32_q4k_bf16_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_Q6_K, GGML_TYPE_BF16, mat_vec_row_f32_q6k_bf16_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_Q4_K, GGML_TYPE_F32, mat_vec_row_f32_q4k_f32_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_Q6_K, GGML_TYPE_F32, mat_vec_row_f32_q6k_f32_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_BF16, GGML_TYPE_F32, mat_vec_row_f32_bf16_f32_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, mat_vec_row_f32_f32_f32_scalar, 0},
+	{GGML_TYPE_BF16, GGML_TYPE_Q6_K, GGML_TYPE_F32, mat_vec_row_bf16_q6k_f32_scalar, 0},
+	{GGML_TYPE_BF16, GGML_TYPE_Q4_K, GGML_TYPE_F32, mat_vec_row_bf16_q4k_f32_scalar, 0},
+	{GGML_TYPE_BF16, GGML_TYPE_BF16, GGML_TYPE_F32, mat_vec_row_bf16_bf16_f32_scalar, 0},
+	{GGML_TYPE_BF16, GGML_TYPE_F32, GGML_TYPE_F32, mat_vec_row_bf16_f32_f32_scalar, 0},
 };
 
 mat_mat_dispatch_t MAT_MAT_DISPATCH_TABLE[] = {
 #ifdef CONFIG_ENABLE_AVX2
-	{GGML_TYPE_F32, GGML_TYPE_Q4_K, GGML_TYPE_F32, mat_vec_row_q4_k_f32_avx2, mat_mat_task},
-	{GGML_TYPE_F32, GGML_TYPE_Q6_K, GGML_TYPE_F32, mat_vec_row_q6_k_f32_avx2, mat_mat_task},
-	{GGML_TYPE_F32, GGML_TYPE_BF16, GGML_TYPE_F32, mat_vec_row_bf16_f32_avx2, mat_mat_task},
-	{GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, mat_vec_row_f32_f32_avx2, mat_mat_task},
+	{GGML_TYPE_BF16, GGML_TYPE_Q4_K, GGML_TYPE_BF16, mat_vec_row_bf16_q4k_bf16_avx2, 1},
+	{GGML_TYPE_BF16, GGML_TYPE_Q6_K, GGML_TYPE_BF16, mat_vec_row_bf16_q6k_bf16_avx2, 1},
+	{GGML_TYPE_BF16, GGML_TYPE_Q4_K, GGML_TYPE_F32, mat_vec_row_bf16_q4k_f32_avx2, 1},
+	{GGML_TYPE_BF16, GGML_TYPE_Q6_K, GGML_TYPE_F32, mat_vec_row_bf16_q6k_f32_avx2, 1},
+	{GGML_TYPE_F32, GGML_TYPE_Q4_K, GGML_TYPE_F32, mat_vec_row_f32_q4k_f32_avx2, 1},
+	{GGML_TYPE_F32, GGML_TYPE_Q6_K, GGML_TYPE_F32, mat_vec_row_f32_q6k_f32_avx2, 1},
+	{GGML_TYPE_F32, GGML_TYPE_BF16, GGML_TYPE_F32, mat_vec_row_f32_bf16_f32_avx2, 1},
+	{GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, mat_vec_row_f32_f32_f32_avx2, 1},
 #endif
-	{GGML_TYPE_F32, GGML_TYPE_Q4_K, GGML_TYPE_F32, mat_vec_row_q4_k_f32_scalar, mat_mat_task},
-	{GGML_TYPE_F32, GGML_TYPE_Q6_K, GGML_TYPE_F32, mat_vec_row_q6_k_f32_scalar, mat_mat_task},
-	{GGML_TYPE_F32, GGML_TYPE_BF16, GGML_TYPE_F32, mat_vec_row_bf16_f32_scalar, mat_mat_task},
-	{GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, mat_vec_row_f32_f32_scalar, mat_mat_task},
+	{GGML_TYPE_BF16, GGML_TYPE_Q6_K, GGML_TYPE_BF16, mat_vec_row_bf16_q6k_bf16_scalar, 0},
+	{GGML_TYPE_BF16, GGML_TYPE_Q4_K, GGML_TYPE_BF16, mat_vec_row_bf16_q4k_bf16_scalar, 0},
+	{GGML_TYPE_BF16, GGML_TYPE_BF16, GGML_TYPE_BF16, mat_vec_row_bf16_bf16_bf16_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_Q4_K, GGML_TYPE_BF16, mat_vec_row_f32_q4k_bf16_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_Q6_K, GGML_TYPE_BF16, mat_vec_row_f32_q6k_bf16_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_Q4_K, GGML_TYPE_F32, mat_vec_row_f32_q4k_f32_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_Q6_K, GGML_TYPE_F32, mat_vec_row_f32_q6k_f32_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_BF16, GGML_TYPE_F32, mat_vec_row_f32_bf16_f32_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, mat_vec_row_f32_f32_f32_scalar, 0},
+	{GGML_TYPE_BF16, GGML_TYPE_Q6_K, GGML_TYPE_F32, mat_vec_row_bf16_q6k_f32_scalar, 0},
+	{GGML_TYPE_BF16, GGML_TYPE_Q4_K, GGML_TYPE_F32, mat_vec_row_bf16_q4k_f32_scalar, 0},
+	{GGML_TYPE_BF16, GGML_TYPE_BF16, GGML_TYPE_F32, mat_vec_row_bf16_bf16_f32_scalar, 0},
+	{GGML_TYPE_BF16, GGML_TYPE_F32, GGML_TYPE_F32, mat_vec_row_bf16_f32_f32_scalar, 0},
 };
 
 swiglu_activation_dispatch_t SWIGLU_ACTIVATION_DISPATCH_TABLE[] = {
-	{GGML_TYPE_F32, GGML_TYPE_F32, swiglu_activation_f32_f32_scalar},
+#ifdef CONFIG_ENABLE_AVX2
+	{GGML_TYPE_BF16, GGML_TYPE_BF16, swiglu_activation_bf16_bf16_avx2, 1},
+	{GGML_TYPE_F32, GGML_TYPE_F32, swiglu_activation_f32_f32_avx2, 1},
+#endif
+	{GGML_TYPE_BF16, GGML_TYPE_BF16, swiglu_activation_bf16_bf16_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_F32, swiglu_activation_f32_f32_scalar, 0},
 };
 
 convert_dispatch_t CONVERT_DISPATCH_TABLE[] = {
 #ifdef CONFIG_ENABLE_AVX2
-	{GGML_TYPE_F32, GGML_TYPE_BF16, convert_f32_bf16_avx2},
+	{GGML_TYPE_BF16, GGML_TYPE_BF16, convert_bf16_bf16_avx2, 1},
+	{GGML_TYPE_BF16, GGML_TYPE_F32, convert_bf16_f32_avx2, 1},
+	{GGML_TYPE_F32, GGML_TYPE_BF16, convert_f32_bf16_avx2, 1},
+	{GGML_TYPE_F32, GGML_TYPE_F32, convert_f32_f32_avx2, 1},
 #endif
-	{GGML_TYPE_F32, GGML_TYPE_BF16, convert_f32_bf16_scalar},
-	{GGML_TYPE_BF16, GGML_TYPE_F32, convert_bf16_f32_scalar},
-	{GGML_TYPE_BF16, GGML_TYPE_BF16, convert_bf16_bf16_scalar},
-	{GGML_TYPE_F32, GGML_TYPE_F32, convert_f32_f32_scalar},
+	{GGML_TYPE_F32, GGML_TYPE_BF16, convert_f32_bf16_scalar, 0},
+	{GGML_TYPE_BF16, GGML_TYPE_F32, convert_bf16_f32_scalar, 0},
+	{GGML_TYPE_BF16, GGML_TYPE_BF16, convert_bf16_bf16_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_F32, convert_f32_f32_scalar, 0},
 };
 
 dot_product_dispatch_t DOT_PRODUCT_DISPATCH_TABLE[] = {
 #ifdef CONFIG_ENABLE_AVX2
-	{GGML_TYPE_F32, GGML_TYPE_BF16, dot_product_f32_bf16_avx2},
-	{GGML_TYPE_F32, GGML_TYPE_F32, dot_product_f32_f32_avx2},
+	{GGML_TYPE_F32, GGML_TYPE_BF16, dot_product_f32_bf16_avx2, 1},
+	{GGML_TYPE_F32, GGML_TYPE_F32, dot_product_f32_f32_avx2, 1},
 #endif
-	{GGML_TYPE_F32, GGML_TYPE_BF16, dot_product_f32_bf16_scalar},
-	{GGML_TYPE_F32, GGML_TYPE_F32, dot_product_f32_f32_scalar},
+	{GGML_TYPE_F32, GGML_TYPE_BF16, dot_product_f32_bf16_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_F32, dot_product_f32_f32_scalar, 0},
 };
 
 
@@ -111,14 +176,18 @@ void dispatch_embedding_row(const Tensor *W, int row_index, MemType *O_slice, in
 	for (int i = 0; i < ARRAY_SIZE(EMBEDDING_ROW_DISPATCH_TABLE); ++i) {
 		embedding_row_dispatch_t *entry = &EMBEDDING_ROW_DISPATCH_TABLE[i];
 		if (entry->input_type == W->mem.type && entry->output_type == O_slice->type) {
-			// No more offsets! The kernel gets the exact pointer it needs.
+#ifdef DEBUG_ACCEL
+			if (entry->accel == 0) {
+				debug_accel("-- WARN: %s uses scalar function ---\n", __FUNCTION__);
+			}
+#endif
 			entry->func(W, row_index, O_slice->data, embed_dim);
 			return;
 		}
 	}
 
-	fprintf(stderr, "FATAL: No EmbeddingRow implementation found for Tensor type %d and output type %d\n",
-		W->mem.type, O_slice->type);
+	fprintf(stderr, "FATAL: No EmbeddingRow implementation found for Tensor type %s and output type %s\n",
+		gguf_get_type_name(W->mem.type), gguf_get_type_name(O_slice->type));
 
 	exit(1);
 }
@@ -129,13 +198,18 @@ void dispatch_rms_norm(const MemType *X_slice, const Tensor *W, MemType *O_slice
 		rms_norm_dispatch_t *entry = &RMS_NORM_DISPATCH_TABLE[i];
 		if (entry->input_type == X_slice->type && entry->tensor_type == W->mem.type
 		    && entry->output_type == O_slice->type) {
+#ifdef DEBUG_ACCEL
+			if (entry->accel == 0) {
+				debug_accel("-- WARN: %s uses scalar function ---\n", __FUNCTION__);
+			}
+#endif
 			entry->func(O_slice->data, X_slice->data, W, size, eps);
 			return;
 		}
 	}
 
-	fprintf(stderr, "FATAL: No RMSNorm implementation found for input_type: %d, Tensor type: %d, output_type: %d\n",
-		X_slice->type, W->mem.type, O_slice->type);
+	fprintf(stderr, "FATAL: No RMSNorm implementation found for input_type: %s, Tensor type: %s, output_type: %s\n",
+		gguf_get_type_name(X_slice->type), gguf_get_type_name(W->mem.type), gguf_get_type_name(O_slice->type));
 	exit(1);
 }
 
@@ -161,7 +235,12 @@ void dispatch_mat_vec(const MemType *X, const Tensor *W, MemType *O, int in_dim,
 
 		if (entry->input_type == X->type && entry->output_type == O->type
 		    && entry->tensor_type == W->mem.type) {
-
+#ifdef DEBUG_ACCEL
+			if (entry->accel == 0) {
+				debug_accel("-- WARN: %s uses scalar function in: %s, weight: %s, out: %s ---\n", __FUNCTION__,
+					    gguf_get_type_name(X->type), gguf_get_type_name(W->mem.type), gguf_get_type_name(O->type));
+			}
+#endif
 			if (use_threads == 0) {
 				return entry->mat_vec(X->data, W->mem.data, O->data, in_dim, 0, out_dim);
 			}
@@ -201,8 +280,8 @@ void dispatch_mat_vec(const MemType *X, const Tensor *W, MemType *O, int in_dim,
 	}
 
 	fprintf(stderr,
-		"FATAL: No MatVec implementation found for input type: %d, tensor type: %d and output type %d\n",
-		X->type, W->mem.type, O->type);
+		"FATAL: No MatVec implementation found for input type: %s, tensor type: %s and output type %s\n",
+		gguf_get_type_name(X->type), gguf_get_type_name(W->mem.type), gguf_get_type_name(O->type));
 
 	exit(1);
 }
@@ -224,7 +303,6 @@ static void mat_mat_task(void *arg)
 		const void *x_row = (const uint8_t *)task->X + (size_t)i * x_row_stride_bytes;
 		void *o_row = (uint8_t *)task->O + (size_t)i * o_row_stride_bytes;
 
-		// Call the mat_vec kernel, which already expects void* pointers
 		task->mat_vec(x_row, task->W->mem.data, o_row, task->in_dim, 0, task->out_dim);
 	}
 
@@ -247,7 +325,12 @@ void dispatch_mat_mat(const MemType *X, const Tensor *W, MemType *O, int prompt_
 
 		if (entry->input_type == X->type && entry->output_type == O->type
 		    && entry->tensor_type == W->mem.type) {
-
+#ifdef DEBUG_ACCEL
+			if (entry->accel == 0) {
+				debug_accel("-- WARN: %s uses scalar function in: %s, weight: %s, out: %s ---\n", __FUNCTION__,
+					    gguf_get_type_name(X->type), gguf_get_type_name(W->mem.type), gguf_get_type_name(O->type));
+			}
+#endif
 			for (int t = 0; t < num_threads; t++) {
 				int start_row = t * rows_per_thread;
 				int end_row = start_row + rows_per_thread;
@@ -270,7 +353,7 @@ void dispatch_mat_mat(const MemType *X, const Tensor *W, MemType *O, int prompt_
 					.X_type = X->type, // Pass the input type
 					.O_type = O->type  // Pass the output type
 				};
-				thread_pool_submit(thread_pool, entry->task, task);
+				thread_pool_submit(thread_pool, mat_mat_task, task);
 			}
 
 			thread_pool_wait(thread_pool);
@@ -279,8 +362,8 @@ void dispatch_mat_mat(const MemType *X, const Tensor *W, MemType *O, int prompt_
 	}
 
 	fprintf(stderr,
-		"FATAL: No MatMat implementation found for input type: %d, tensor type: %d and output type %d\n",
-		X->type, W->mem.type, O->type);
+		"FATAL: No MatMat implementation found for input type: %s, tensor type: %s and output type %s\n",
+		gguf_get_type_name(X->type), gguf_get_type_name(W->mem.type), gguf_get_type_name(O->type));
 
 	exit(1);
 }
@@ -290,12 +373,18 @@ void dispatch_apply_rope_cache(struct ctx_t *ctx, MemType *X_slice, int pos, int
 	for (int i = 0; i < ARRAY_SIZE(APPLY_ROPE_CACHE_DISPATCH_TABLE); ++i) {
 		apply_rope_cache_dispatch_t *entry = &APPLY_ROPE_CACHE_DISPATCH_TABLE[i];
 		if (entry->input_type == X_slice->type) {
+#ifdef DEBUG_ACCEL
+			if (entry->accel == 0) {
+				debug_accel("-- WARN: %s uses scalar function ---\n", __FUNCTION__);
+			}
+#endif
 			entry->func(ctx, X_slice->data, pos, head_dim);
 			return;
 		}
 	}
 
-	fprintf(stderr, "FATAL: No ApplyRope implementation found for input type %d\n", X_slice->type);
+	fprintf(stderr, "FATAL: No ApplyRope implementation found for input type %s\n",
+		gguf_get_type_name(X_slice->type));
 	exit(1);
 }
 
@@ -304,13 +393,18 @@ void dispatch_accumulate_weighted_V(const MemType *V_slice, MemType *O_slice, fl
 	for (int i = 0; i < ARRAY_SIZE(ACCUMULATE_WEIGHTED_V_DISPATCH_TABLE); ++i) {
 		accumulate_weighted_V_dispatch_t *entry = &ACCUMULATE_WEIGHTED_V_DISPATCH_TABLE[i];
 		if (entry->value_type == V_slice->type && entry->output_type == O_slice->type) {
+#ifdef DEBUG_ACCEL
+			if (entry->accel == 0) {
+				debug_accel("-- WARN: %s uses scalar function ---\n", __FUNCTION__);
+			}
+#endif
 			entry->func(O_slice->data, weight, V_slice->data, size);
 			return;
 		}
 	}
 
-	fprintf(stderr, "FATAL: No AccumulateWeighted_V implementation found for value type %d and output type %d\n",
-		V_slice->type, O_slice->type);
+	fprintf(stderr, "FATAL: No AccumulateWeighted_V implementation found for value type %s and output type %s\n",
+		gguf_get_type_name(V_slice->type), gguf_get_type_name(O_slice->type));
 	exit(1);
 }
 
@@ -324,13 +418,18 @@ void dispatch_store_KV_cache(struct ctx_t *ctx, int layer_idx, int start_pos, in
 	for (int i = 0; i < ARRAY_SIZE(STORE_KV_CACHE_DISPATCH_TABLE); ++i) {
 		store_KV_cache_dispatch_t *entry = &STORE_KV_CACHE_DISPATCH_TABLE[i];
 		if (entry->input_type == ctx->mem.K.type && entry->output_type == ctx->kv_cache[layer_idx].k.type) {
+#ifdef DEBUG_ACCEL
+			if (entry->accel == 0) {
+				debug_accel("-- WARN: %s uses scalar function ---\n", __FUNCTION__);
+			}
+#endif
 			entry->func(ctx, layer_idx, start_pos, batch_len);
 			return;
 		}
 	}
 
-	fprintf(stderr, "FATAL: No StoreKVCache implementation found for input type %d and output type %d\n",
-		ctx->mem.K.type, ctx->kv_cache[layer_idx].k.type);
+	fprintf(stderr, "FATAL: No StoreKVCache implementation found for input type %s and output type %s\n",
+		gguf_get_type_name(ctx->mem.K.type), gguf_get_type_name(ctx->kv_cache[layer_idx].k.type));
 
 	exit(1);
 }
@@ -340,13 +439,18 @@ void dispatch_apply_residual(MemType *acc, const MemType *residual, int size)
 	for (int i = 0; i < ARRAY_SIZE(APPLY_RESIDUAL_DISPATCH_TABLE); ++i) {
 		apply_residual_dispatch_t *entry = &APPLY_RESIDUAL_DISPATCH_TABLE[i];
 		if (entry->input_type == residual->type && entry->output_type == acc->type) {
+#ifdef DEBUG_ACCEL
+			if (entry->accel == 0) {
+				debug_accel("-- WARN: %s uses scalar function ---\n", __FUNCTION__);
+			}
+#endif
 			entry->func(acc->data, residual->data, size);
 			return;
 		}
 	}
 
-	fprintf(stderr, "FATAL: No ApplyResidual implementation found for input_type: %d and output_type: %d\n",
-		residual->type, acc->type);
+	fprintf(stderr, "FATAL: No ApplyResidual implementation found for input_type: %s and output_type: %s\n",
+		gguf_get_type_name(residual->type), gguf_get_type_name(acc->type));
 
 	exit(1);
 }
@@ -356,13 +460,18 @@ void dispatch_swiglu_activation(MemType *gate, MemType *up, int size)
 	for (int i = 0; i < ARRAY_SIZE(SWIGLU_ACTIVATION_DISPATCH_TABLE); ++i) {
 		swiglu_activation_dispatch_t *entry = &SWIGLU_ACTIVATION_DISPATCH_TABLE[i];
 		if (entry->gate_type == gate->type && entry->up_type == up->type) {
+#ifdef DEBUG_ACCEL
+			if (entry->accel == 0) {
+				debug_accel("-- WARN: %s uses scalar function ---\n", __FUNCTION__);
+			}
+#endif
 			entry->func(gate->data, up->data, size);
 			return;
 		}
 	}
 
-	fprintf(stderr, "FATAL: No SwiGLU implementation found for gate type: %d and up type: %d\n", gate->type,
-		up->type);
+	fprintf(stderr, "FATAL: No SwiGLU implementation found for gate type: %s and up type: %s\n",
+		gguf_get_type_name(gate->type), gguf_get_type_name(up->type));
 	exit(1);
 }
 
@@ -371,13 +480,18 @@ void dispatch_convert(const MemType *src, MemType *dest, int size)
 	for (int i = 0; i < ARRAY_SIZE(CONVERT_DISPATCH_TABLE); ++i) {
 		convert_dispatch_t *entry = &CONVERT_DISPATCH_TABLE[i];
 		if (entry->input_type == src->type && entry->output_type == dest->type) {
+#ifdef DEBUG_ACCEL
+			if (entry->accel == 0) {
+				debug_accel("-- WARN: %s uses scalar function ---\n", __FUNCTION__);
+			}
+#endif
 			entry->func(src->data, dest->data, size);
 			return;
 		}
 	}
 
-	fprintf(stderr, "FATAL: No Convert implementation found for input type %d and output type %d\n", src->type,
-		dest->type);
+	fprintf(stderr, "FATAL: No Convert implementation found for input type %s and output type %s\n",
+		gguf_get_type_name(src->type), gguf_get_type_name(dest->type));
 	exit(1);
 }
 
@@ -386,11 +500,17 @@ float dispatch_dot_product(const MemType *vec_a, const MemType *vec_b, int size)
 	for (int i = 0; i < ARRAY_SIZE(DOT_PRODUCT_DISPATCH_TABLE); ++i) {
 		dot_product_dispatch_t *entry = &DOT_PRODUCT_DISPATCH_TABLE[i];
 		if (entry->type_a == vec_a->type && entry->type_b == vec_b->type) {
+#ifdef DEBUG_ACCEL
+			if (entry->accel == 0) {
+				debug_accel("-- WARN: %s uses scalar function ---\n", __FUNCTION__);
+			}
+#endif
 			return entry->func(vec_a->data, vec_b->data, size);
 		}
 	}
 
 	// Handle error
-	fprintf(stderr, "FATAL: No dot_product implementation found for types %d and %d\n", vec_a->type, vec_b->type);
+	fprintf(stderr, "FATAL: No dot_product implementation found for types %s and %s\n",
+		gguf_get_type_name(vec_a->type), gguf_get_type_name(vec_b->type));
 	exit(1);
 }

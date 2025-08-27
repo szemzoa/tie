@@ -24,6 +24,7 @@ typedef struct {
 	ggml_type input_type;
 	ggml_type output_type;
 	embedding_row_fn func;
+	int accel;
 } embedding_row_dispatch_t;
 
 typedef struct {
@@ -31,6 +32,7 @@ typedef struct {
 	ggml_type tensor_type;
 	ggml_type output_type;
 	rms_norm_fn func;
+	int accel;
 } rms_norm_dispatch_t;
 
 typedef struct {
@@ -41,6 +43,7 @@ typedef struct {
 	int start_row; // The starting output row for this thread
 	int end_row;   // The ending output row for this thread
 	mat_vec_fn mat_vec;
+	int accel;
 } mat_vec_task_t;
 
 typedef struct {
@@ -55,6 +58,7 @@ typedef struct {
 	mat_vec_fn mat_vec;
 	ggml_type X_type; // The data type of the input buffer
 	ggml_type O_type; // The data type of the output buffer
+	int accel;
 } mat_mat_task_t;
 
 typedef struct {
@@ -62,6 +66,7 @@ typedef struct {
 	ggml_type tensor_type;
 	ggml_type output_type;
 	mat_vec_fn mat_vec;
+	int accel;
 } mat_vec_dispatch_t;
 
 typedef struct {
@@ -69,48 +74,55 @@ typedef struct {
 	ggml_type tensor_type;
 	ggml_type output_type;
 	mat_vec_fn mat_vec;
-	task_func_t task;
+	int accel;
 } mat_mat_dispatch_t;
 
 typedef struct {
 	ggml_type input_type;
 	apply_rope_cache_fn func;
+	int accel;
 } apply_rope_cache_dispatch_t;
 
 typedef struct {
 	ggml_type output_type;
 	ggml_type value_type;
 	accumulate_weighted_V_fn func;
+	int accel;
 } accumulate_weighted_V_dispatch_t;
 
 typedef struct {
 	ggml_type input_type;
 	ggml_type output_type;
 	store_KV_cache_fn func;
+	int accel;
 } store_KV_cache_dispatch_t;
 
 typedef struct {
 	ggml_type input_type;
 	ggml_type output_type;
 	apply_residual_fn func;
+	int accel;
 } apply_residual_dispatch_t;
 
 typedef struct {
 	ggml_type gate_type;
 	ggml_type up_type;
 	swiglu_fn func;
+	int accel;
 } swiglu_activation_dispatch_t;
 
 typedef struct {
 	ggml_type input_type;
 	ggml_type output_type;
 	convert_fn func;
+	int accel;
 } convert_dispatch_t;
 
 typedef struct {
 	ggml_type type_a;
 	ggml_type type_b;
 	dot_product_fn func;
+	int accel;
 } dot_product_dispatch_t;
 
 extern void dispatch_embedding_row(const Tensor *W, int row_index, MemType *O_slice, int embed_dim);

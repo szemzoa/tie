@@ -127,4 +127,6 @@ extern void dump_tensors(struct ctx_t *ctx);
 extern size_t get_ggml_block_size(int type);
 extern size_t ggml_type_size(ggml_type type);
 
+extern char *gguf_get_type_name(uint32_t type);
+
 #endif

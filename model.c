@@ -253,8 +253,8 @@ int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penal
 		if (!ctx->kv_cache[i].k.data || !ctx->kv_cache[i].v.data) {
 			perror("Failed to allocate K or V cache for a layer");
 			for (int j = 0; j < i; ++j) {
-				free(ctx->kv_cache[j].k.data);
-				free(ctx->kv_cache[j].v.data);
+				release_internal_memory(&ctx->kv_cache[j].k);
+				release_internal_memory(&ctx->kv_cache[j].v);
 			}
 			free(ctx->kv_cache);
 			free(ctx->rope_cache);
@@ -265,17 +265,21 @@ int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penal
 	       (k_elements_per_layer * sizeof(uint16_t)) * 2 * ctx->model->num_layers / 1024 / 1024);
 
 	/* create internal memories */
-	create_internal_memory(&ctx->mem.hidden_state, GGML_TYPE_F32, ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
-	create_internal_memory(&ctx->mem.normed_qkv_input, GGML_TYPE_F32, ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
-	create_internal_memory(&ctx->mem.Q, GGML_TYPE_F32, q_dim * MAX_PROMPT_BATCH_SIZE);
-	create_internal_memory(&ctx->mem.K, GGML_TYPE_F32, kv_dim * MAX_PROMPT_BATCH_SIZE);
-	create_internal_memory(&ctx->mem.V, GGML_TYPE_F32, kv_dim * MAX_PROMPT_BATCH_SIZE);
-	create_internal_memory(&ctx->mem.attn_output, GGML_TYPE_F32, q_dim * MAX_PROMPT_BATCH_SIZE);
-	create_internal_memory(&ctx->mem.attn_proj_output, GGML_TYPE_F32, ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
-	create_internal_memory(&ctx->mem.normed_ffn_input, GGML_TYPE_F32, ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
-	create_internal_memory(&ctx->mem.gate_proj_output, GGML_TYPE_F32, ctx->model->ffn_dim * MAX_PROMPT_BATCH_SIZE);
-	create_internal_memory(&ctx->mem.up_proj_output, GGML_TYPE_F32, ctx->model->ffn_dim * MAX_PROMPT_BATCH_SIZE);
-	create_internal_memory(&ctx->mem.ffn_down_output, GGML_TYPE_F32, ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
+	create_internal_memory(&ctx->mem.hidden_state, INTERNAL_MEMORY_TYPE, ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
+	create_internal_memory(&ctx->mem.normed_qkv_input, INTERNAL_MEMORY_TYPE, ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
+
+	create_internal_memory(&ctx->mem.Q, INTERNAL_MEMORY_TYPE, q_dim * MAX_PROMPT_BATCH_SIZE);
+	create_internal_memory(&ctx->mem.K, INTERNAL_MEMORY_TYPE, kv_dim * MAX_PROMPT_BATCH_SIZE);
+	create_internal_memory(&ctx->mem.V, INTERNAL_MEMORY_TYPE, kv_dim * MAX_PROMPT_BATCH_SIZE);
+
+	create_internal_memory(&ctx->mem.attn_output, INTERNAL_MEMORY_TYPE, q_dim * MAX_PROMPT_BATCH_SIZE);
+	create_internal_memory(&ctx->mem.attn_proj_output, INTERNAL_MEMORY_TYPE, ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
+	create_internal_memory(&ctx->mem.normed_ffn_input, INTERNAL_MEMORY_TYPE, ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
+
+	create_internal_memory(&ctx->mem.gate_proj_output, INTERNAL_MEMORY_TYPE, ctx->model->ffn_dim * MAX_PROMPT_BATCH_SIZE);
+	create_internal_memory(&ctx->mem.up_proj_output, INTERNAL_MEMORY_TYPE, ctx->model->ffn_dim * MAX_PROMPT_BATCH_SIZE);
+	create_internal_memory(&ctx->mem.ffn_down_output, INTERNAL_MEMORY_TYPE, ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
+
 	create_internal_memory(&ctx->mem.logits, GGML_TYPE_F32, ctx->model->vocab_size);
 
 	if (ctx->model->is_moe == 1) {
@@ -287,8 +291,8 @@ int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penal
 		ctx->mem.expert_outputs = aligned_alloc(32, ctx->model->expert_count * sizeof(MemType));
 
 		for (int i = 0; i < ctx->model->expert_count; i++) {
-			create_internal_memory(&ctx->mem.ffn_hidden1_scratch[i], GGML_TYPE_F32, ctx->model->expert_ffn_dim);
-			create_internal_memory(&ctx->mem.ffn_hidden2_scratch[i], GGML_TYPE_F32, ctx->model->expert_ffn_dim);
+			create_internal_memory(&ctx->mem.ffn_hidden1_scratch[i], GGML_TYPE_BF16, ctx->model->expert_ffn_dim);
+			create_internal_memory(&ctx->mem.ffn_hidden2_scratch[i], GGML_TYPE_BF16, ctx->model->expert_ffn_dim);
 			create_internal_memory(&ctx->mem.expert_outputs[i], GGML_TYPE_F32, ctx->model->embed_dim);
 		}
 	}

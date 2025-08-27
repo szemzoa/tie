@@ -236,12 +236,13 @@ void read_user_input(char *input_buf, size_t buf_size)
 // Process prompt tokens
 void process_prompt(struct ctx_t *ctx, int *prompt_tokens, size_t prompt_len)
 {
-        MemType hidden_state_slice;
+	MemType hidden_state_slice;
 
 	for (int i = 0; i < prompt_len; i++) {
-                // Create a slice for this token's position in the hidden_state buffer
-                hidden_state_slice = mem_slice(&ctx->mem.hidden_state, i * ctx->model->embed_dim);
-		dispatch_embedding_row(&ctx->model->token_embd, prompt_tokens[i], &hidden_state_slice, ctx->model->embed_dim);
+		// Create a slice for this token's position in the hidden_state buffer
+		hidden_state_slice = mem_slice(&ctx->mem.hidden_state, i * ctx->model->embed_dim);
+		dispatch_embedding_row(&ctx->model->token_embd, prompt_tokens[i], &hidden_state_slice,
+				       ctx->model->embed_dim);
 	}
 
 	for (int l = 0; l < ctx->model->num_layers; l++) {
@@ -249,7 +250,8 @@ void process_prompt(struct ctx_t *ctx, int *prompt_tokens, size_t prompt_len)
 	}
 
 	MemType hidden_state_first_slice = mem_slice(&ctx->mem.hidden_state, 0);
-	memcpy(hidden_state_first_slice.data, hidden_state_slice.data, ctx->model->embed_dim * ggml_type_size(ctx->mem.hidden_state.type));
+	memcpy(hidden_state_first_slice.data, hidden_state_slice.data,
+	       ctx->model->embed_dim * ggml_type_size(ctx->mem.hidden_state.type));
 
 	ctx->kv_pos += prompt_len;
 }
@@ -344,14 +346,14 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 				break;
 			}
 
-			dispatch_rms_norm(&ctx->mem.hidden_state, &ctx->model->output_norm,
-					  &ctx->mem.normed_ffn_input, ctx->model->embed_dim, ctx->model->norm_eps);
+			dispatch_rms_norm(&ctx->mem.hidden_state, &ctx->model->output_norm, &ctx->mem.normed_ffn_input,
+					  ctx->model->embed_dim, ctx->model->norm_eps);
 
-			dispatch_mat_vec(&ctx->mem.normed_ffn_input, output_tensor, &ctx->mem.logits, ctx->model->embed_dim,
-						 ctx->model->vocab_size, true);
+			dispatch_mat_vec(&ctx->mem.normed_ffn_input, output_tensor, &ctx->mem.logits,
+					 ctx->model->embed_dim, ctx->model->vocab_size, true);
 
-			int next_token = predict_next_token((float*)ctx->mem.logits.data, ctx->model->vocab_size, "temperature",
-							    0.7f, 20, 0.95f, prompt_tokens, prompt_len,
+			int next_token = predict_next_token((float *)ctx->mem.logits.data, ctx->model->vocab_size,
+							    "temperature", 0.7f, 20, 0.95f, prompt_tokens, prompt_len,
 							    generated_tokens, gen_len, ctx->model->repetition_penalty);
 
 			generate_output(ctx, next_token);
@@ -369,7 +371,8 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 
 			// Create a slice for this token's position in the hidden_state buffer
 			MemType hidden_state_slice = mem_slice(&ctx->mem.hidden_state, 0);
-			dispatch_embedding_row(&ctx->model->token_embd, next_token, &hidden_state_slice, ctx->model->embed_dim);
+			dispatch_embedding_row(&ctx->model->token_embd, next_token, &hidden_state_slice,
+					       ctx->model->embed_dim);
 
 			for (int l = 0; l < ctx->model->num_layers; l++) {
 				transformer_layer(ctx, l, 1);
@@ -398,6 +401,8 @@ static void print_usage(void)
 	printf("\t -c [context length]\r\n");
 	printf("\t -t [thread num]\r\n");
 }
+
+#include "math_scalar.h"
 
 int main(int argc, char *argv[])
 {
@@ -476,6 +481,7 @@ int main(int argc, char *argv[])
 
 	printf("Welcome to interactive chat. Type 'exit' to quit.\n");
 
+	//	kv_cache_reset(ctx);
 	generate_interactive(ctx, 8192);
 
 _cleanup:

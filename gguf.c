@@ -252,8 +252,7 @@ int gguf_get_metadata_size(struct ctx_t *ctx, char *key, uint64_t *size)
 	return -1;
 }
 
-#ifdef DEBUG_TENSORS
-char *tensor_get_type_name(uint32_t type)
+char *gguf_get_type_name(uint32_t type)
 {
 	switch (type) {
 	case GGML_TYPE_F32:
@@ -347,7 +346,6 @@ char *tensor_get_type_name(uint32_t type)
 
 	return NULL;
 }
-#endif
 
 void gguf_dump_metadata(struct ctx_t *ctx)
 {
@@ -544,7 +542,7 @@ void dump_tensors(struct ctx_t *ctx)
 		gguf_tensor *tensor = &ctx->tensors[i];
 
 		printf("tensor #%4llu name: %32s, ", i, ctx->tensors[i].name);
-		printf("type: %6s, ", tensor_get_type_name(tensor->type));
+		printf("type: %6s, ", gguf_get_type_name(tensor->type));
 		printf("shape: [ %llu,\t%llu,\t%llu,\t%llu ],", tensor->dimensions[0], tensor->dimensions[1],
 		       tensor->dimensions[2], tensor->dimensions[3]);
 		//		printf("\tsize: %.02f MB, offset: %llu\n", (float)tensor->size / 1024 / 1024,

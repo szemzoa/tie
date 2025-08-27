@@ -2,6 +2,12 @@
 #define __CONFIG_H__
 
 #define CONFIG_ENABLE_AVX2
+/*
+ *  Internal memory buffer types:
+ *	- GGML_TYPE_BF16
+ *	- GGML_TYPE_F32
+ */
+#define INTERNAL_MEMORY_TYPE	GGML_TYPE_BF16
 
 #define MAX_PROMPT_BATCH_SIZE 1024
 #define MAX_THREADS 32

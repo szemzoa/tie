@@ -63,6 +63,7 @@ struct context_memory_t {
 	MemType ffn_down_output;
 	MemType logits;
 	MemType *q_head_fp32_scratch;
+
 	float *attn_scores_buffer[MAX_THREADS];
 
 	// MoE
