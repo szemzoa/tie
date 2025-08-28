@@ -15,7 +15,7 @@ typedef struct {
 	int pos;
 	int head_start;
 	int head_end;
-	int thread_id; // The ID used to get a unique scratch buffer
+	int thread_id;
 } attention_task_t;
 
 typedef struct {
@@ -47,7 +47,6 @@ void kv_cache_reset(struct ctx_t *ctx)
         int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
 
         for (int i = 0; i < ctx->model->num_layers; i++) {
-                // Assume k and v have been allocated with the correct size and type
                 memset(ctx->kv_cache[i].k.data, 0,
                        ctx->model->seq_length * kv_dim * ggml_type_size(ctx->kv_cache[i].k.type));
                 memset(ctx->kv_cache[i].v.data, 0,
@@ -146,14 +145,14 @@ static void attention_task(void *arg)
 		MemType q_head_slice = mem_slice(&ctx->mem.Q, (size_t)h * ctx->model->head_dim);
 		MemType out_head_slice = mem_slice(&ctx->mem.attn_output, (size_t)h * ctx->model->head_dim);
 
-		// 3. Convert the source Q-head to FP32 using the new dispatch signature
+		// 3. Convert the source Q-head to FP32
 		dispatch_convert(&q_head_slice, q_head_fp32_scratch, ctx->model->head_dim);
 
 		// Determine the KV head index for this Q head (for GQA)
 		int kv_head_idx = h / (ctx->model->num_heads / ctx->model->num_kv_heads);
 
 		// 4. Calculate Raw Attention Scores
-		// Calculate the dot product of the current FP32 Q-head with all previous K-heads in the cache
+		// Calculate the dot product of the current Q-head with all previous K-heads in the cache
 		for (int t = 0; t <= current_pos; t++) {
 			void *k_head =
 				get_kv_head(&cache->k, t, kv_head_idx, ctx->model->head_dim, ctx->model->num_kv_heads);
@@ -231,7 +230,7 @@ static void attention_batch_task(void *arg)
 			// 3. Calculate pointer to the destination output head
 			int kv_head_idx = h / (ctx->model->num_heads / ctx->model->num_kv_heads);
 
-			// 1. Calculate Raw Attention Scores
+			// 4. Calculate Raw Attention Scores
 			for (int t = 0; t <= absolute_pos; t++) {
 				void *k_head =
 					get_kv_head(&cache->k, t, kv_head_idx, ctx->model->head_dim, ctx->model->num_kv_heads);
@@ -242,7 +241,7 @@ static void attention_batch_task(void *arg)
 				attn_scores_buffer[t] = score * ctx->model->attn_scale;
 			}
 
-			// 2. Calculate Softmax
+			// 5. Calculate Softmax
 			// Softmax is also over the full history up to the absolute_pos
 			float max_score = -INFINITY;
 			for (int t = 0; t <= absolute_pos; t++) {
@@ -260,7 +259,7 @@ static void attention_batch_task(void *arg)
 				attn_scores_buffer[t] *= inv_sum_exp;
 			}
 
-			// 3. Calculate Weighted Sum of V-vectors
+			// 6. Calculate Weighted Sum of V-vectors
 			memset(out_head_slice.data, 0, ctx->model->head_dim * ggml_type_size(out_head_slice.type));
 
 			for (int t = 0; t <= absolute_pos; t++) {
@@ -354,7 +353,7 @@ void softmax(float *x, int size)
 	float sum = 0.0f;
 	for (int i = 0; i < size; i++) {
 		x[i] = expf(x[i] - max_val);
-		sum = fmaf(x[i], 1.0f, sum); // Accumulate sum using FMA
+		sum = fmaf(x[i], 1.0f, sum);
 	}
 	// Normalize
 	for (int i = 0; i < size; i++) {
@@ -549,8 +548,7 @@ int transformer_layer(struct ctx_t *ctx, int layer_idx, int batch_len)
 			float *ffn_out_fp32_token_buffer = ctx->mem.expert_out_fp32.data;
 
 			// 2. Route, Select, and Gate
-			// The input type for the router is the intermediate type, but the output scores are always
-			// FP32.
+			// The input type for the router is the intermediate type, but the output scores are always FP32.
 			dispatch_mat_vec(&normed_input_for_token_i, &l->ffn_gate_inp, &ctx->mem.expert_scores,
 					 ctx->model->embed_dim, ctx->model->expert_count, false);
 
@@ -584,7 +582,7 @@ int transformer_layer(struct ctx_t *ctx, int layer_idx, int batch_len)
 
 			for (int j = 0; j < ctx->model->expert_used_count; j++) {
 				float gate_val = gate_values[j];
-				float *expert_result = ctx->mem.expert_outputs[j].data; // This is FP32
+				float *expert_result = ctx->mem.expert_outputs[j].data;
 				for (int k = 0; k < ctx->model->embed_dim; k++) {
 					ffn_out_fp32_token_buffer[k] += gate_val * expert_result[k];
 				}

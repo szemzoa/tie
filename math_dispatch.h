@@ -128,7 +128,7 @@ typedef struct {
 extern void dispatch_embedding_row(const Tensor *W, int row_index, MemType *O_slice, int embed_dim);
 extern void dispatch_rms_norm(const MemType *X_slice, const Tensor *W, MemType *O_slice, int size, float eps);
 extern void dispatch_mat_vec(const MemType *X, const Tensor *W, MemType *O, int in_dim, int out_dim, int use_threads);
-extern void dispatch_mat_mat(const MemType *X, const Tensor *W, MemType *O, int prompt_len, int in_dim, int out_dim,
+extern void dispatch_mat_mat(const MemType *X, const Tensor *W, MemType *O, int batch_len, int in_dim, int out_dim,
 			     int use_threads);
 extern void dispatch_apply_rope_cache(struct ctx_t *ctx, MemType *X_slice, int pos, int head_dim);
 extern void dispatch_accumulate_weighted_V(const MemType *V_slice, MemType *O_slice, float weight, int size);

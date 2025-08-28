@@ -24,20 +24,19 @@ static void mat_mat_task(void *arg);
 /*  The global dispatch tables, listing all available implementations */
 embedding_row_dispatch_t EMBEDDING_ROW_DISPATCH_TABLE[] = {
 #ifdef CONFIG_ENABLE_AVX2
+	{GGML_TYPE_Q6_K, GGML_TYPE_BF16, get_embedding_row_q6k_bf16_avx2, 1},
 	{GGML_TYPE_Q6_K, GGML_TYPE_F32, get_embedding_row_q6k_f32_avx2, 1},
 	{GGML_TYPE_Q4_K, GGML_TYPE_F32, get_embedding_row_q4k_f32_avx2, 1},
 	{GGML_TYPE_BF16, GGML_TYPE_BF16, get_embedding_row_bf16_bf16_avx2, 1},
 	{GGML_TYPE_BF16, GGML_TYPE_F32, get_embedding_row_bf16_f32_avx2, 1},
-	{GGML_TYPE_Q6_K, GGML_TYPE_BF16, get_embedding_row_q6k_bf16_avx2, 1},
 #endif
+	{GGML_TYPE_Q6_K, GGML_TYPE_BF16, get_embedding_row_q6k_bf16_scalar, 0},
+	{GGML_TYPE_Q4_K, GGML_TYPE_BF16, get_embedding_row_q4k_bf16_scalar, 0},
+	{GGML_TYPE_BF16, GGML_TYPE_BF16, get_embedding_row_bf16_bf16_scalar, 0},
 	{GGML_TYPE_Q6_K, GGML_TYPE_F32, get_embedding_row_q6k_f32_scalar, 0},
 	{GGML_TYPE_Q4_K, GGML_TYPE_F32, get_embedding_row_q4k_f32_scalar, 0},
 	{GGML_TYPE_BF16, GGML_TYPE_F32, get_embedding_row_bf16_f32_scalar, 0},
 	{GGML_TYPE_F32, GGML_TYPE_F32, get_embedding_row_f32_f32_scalar, 0},
-
-	{GGML_TYPE_Q6_K, GGML_TYPE_BF16, get_embedding_row_q6k_bf16_scalar, 0},
-	{GGML_TYPE_Q4_K, GGML_TYPE_BF16, get_embedding_row_q4k_bf16_scalar, 0},
-	{GGML_TYPE_BF16, GGML_TYPE_BF16, get_embedding_row_bf16_bf16_scalar, 0},
 };
 
 rms_norm_dispatch_t RMS_NORM_DISPATCH_TABLE[] = {
@@ -61,8 +60,8 @@ apply_rope_cache_dispatch_t APPLY_ROPE_CACHE_DISPATCH_TABLE[] = {
 
 accumulate_weighted_V_dispatch_t ACCUMULATE_WEIGHTED_V_DISPATCH_TABLE[] = {
 #ifdef CONFIG_ENABLE_AVX2
-	{GGML_TYPE_F32, GGML_TYPE_BF16, accumulate_weighted_V_f32_bf16_avx2, 1},
 	{GGML_TYPE_BF16, GGML_TYPE_BF16, accumulate_weighted_V_bf16_bf16_avx2, 1},
+	{GGML_TYPE_F32, GGML_TYPE_BF16, accumulate_weighted_V_f32_bf16_avx2, 1},
 #endif
 	{GGML_TYPE_BF16, GGML_TYPE_BF16, accumulate_weighted_V_bf16_bf16_scalar, 0},
 	{GGML_TYPE_F32, GGML_TYPE_BF16, accumulate_weighted_V_f32_bf16_scalar, 0},
@@ -150,14 +149,14 @@ swiglu_activation_dispatch_t SWIGLU_ACTIVATION_DISPATCH_TABLE[] = {
 
 convert_dispatch_t CONVERT_DISPATCH_TABLE[] = {
 #ifdef CONFIG_ENABLE_AVX2
-	{GGML_TYPE_BF16, GGML_TYPE_BF16, convert_bf16_bf16_avx2, 1},
 	{GGML_TYPE_BF16, GGML_TYPE_F32, convert_bf16_f32_avx2, 1},
+	{GGML_TYPE_BF16, GGML_TYPE_BF16, convert_bf16_bf16_avx2, 1},
 	{GGML_TYPE_F32, GGML_TYPE_BF16, convert_f32_bf16_avx2, 1},
 	{GGML_TYPE_F32, GGML_TYPE_F32, convert_f32_f32_avx2, 1},
 #endif
-	{GGML_TYPE_F32, GGML_TYPE_BF16, convert_f32_bf16_scalar, 0},
 	{GGML_TYPE_BF16, GGML_TYPE_F32, convert_bf16_f32_scalar, 0},
 	{GGML_TYPE_BF16, GGML_TYPE_BF16, convert_bf16_bf16_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_BF16, convert_f32_bf16_scalar, 0},
 	{GGML_TYPE_F32, GGML_TYPE_F32, convert_f32_f32_scalar, 0},
 };
 
@@ -309,16 +308,16 @@ static void mat_mat_task(void *arg)
 	free(task);
 }
 
-void dispatch_mat_mat(const MemType *X, const Tensor *W, MemType *O, int prompt_len, int in_dim, int out_dim,
+void dispatch_mat_mat(const MemType *X, const Tensor *W, MemType *O, int batch_len, int in_dim, int out_dim,
 		      int use_threads)
 {
 	// If batch size is 1, call the specialized and faster mat_vec dispatcher.
-	if (prompt_len == 1) {
+	if (batch_len == 1) {
 		return dispatch_mat_vec(X, W, O, in_dim, out_dim, use_threads);
 	}
 
 	int num_threads = thread_pool->num_threads;
-	int rows_per_thread = (prompt_len + num_threads - 1) / num_threads;
+	int rows_per_thread = (batch_len + num_threads - 1) / num_threads;
 
 	for (int i = 0; i < ARRAY_SIZE(MAT_MAT_DISPATCH_TABLE); ++i) {
 		mat_mat_dispatch_t *entry = &MAT_MAT_DISPATCH_TABLE[i];
@@ -334,8 +333,8 @@ void dispatch_mat_mat(const MemType *X, const Tensor *W, MemType *O, int prompt_
 			for (int t = 0; t < num_threads; t++) {
 				int start_row = t * rows_per_thread;
 				int end_row = start_row + rows_per_thread;
-				if (end_row > prompt_len)
-					end_row = prompt_len;
+				if (end_row > batch_len)
+					end_row = batch_len;
 				if (start_row >= end_row)
 					break;
 
