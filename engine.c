@@ -16,6 +16,7 @@ typedef struct {
 	int head_start;
 	int head_end;
 	int thread_id;
+	AttentionType attn_type;
 } attention_task_t;
 
 typedef struct {
@@ -25,6 +26,7 @@ typedef struct {
 	int end_token_idx;   // The last token (exclusive)
 	int batch_start_pos; // The absolute position of the beginning of the prompt batch
 	int thread_id;	     // The ID used to get a unique scratch buffer
+	AttentionType attn_type;
 } attention_batch_task_t;
 
 typedef struct {
@@ -44,14 +46,14 @@ float silu_table[SILU_TABLE_SIZE];
 
 void kv_cache_reset(struct ctx_t *ctx)
 {
-        int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
+	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
 
-        for (int i = 0; i < ctx->model->num_layers; i++) {
-                memset(ctx->kv_cache[i].k.data, 0,
-                       ctx->model->seq_length * kv_dim * ggml_type_size(ctx->kv_cache[i].k.type));
-                memset(ctx->kv_cache[i].v.data, 0,
-                       ctx->model->seq_length * kv_dim * ggml_type_size(ctx->kv_cache[i].v.type));
-        }
+	for (int i = 0; i < ctx->model->num_layers; i++) {
+		memset(ctx->kv_cache[i].k.data, 0,
+		       ctx->model->seq_length * kv_dim * ggml_type_size(ctx->kv_cache[i].k.type));
+		memset(ctx->kv_cache[i].v.data, 0,
+		       ctx->model->seq_length * kv_dim * ggml_type_size(ctx->kv_cache[i].v.type));
+	}
 }
 
 void silu_table_init()
@@ -62,9 +64,10 @@ void silu_table_init()
 	}
 }
 
-void rope_cache_init(struct ctx_t *ctx, int max_pos, int head_dim, float base)
+void rope_cache_init(struct ctx_t *ctx, rope_cache_t *rope_cache, int max_pos, int head_dim, float base)
 {
-	rope_cache_t *rope_cache = ctx->rope_cache;
+	float scaled_pos;
+
 	rope_cache->max_pos = max_pos;
 	rope_cache->head_dim = head_dim;
 
@@ -72,7 +75,21 @@ void rope_cache_init(struct ctx_t *ctx, int max_pos, int head_dim, float base)
 	rope_cache->cos = aligned_alloc(32, sizeof(float) * max_pos * (head_dim / 2));
 
 	for (int pos = 0; pos < max_pos; ++pos) {
-		float scaled_pos = (float)pos * ctx->model->yarn_scale_factor;
+
+		if (ctx->model->arch == ARCH_GEMMA3) {
+
+			if (base == 1000000.0f) {
+				// GLOBAL cache. Apply linear scaling to extend its context.
+				scaled_pos = (float)pos / ctx->model->rope_scale_factor;
+			} else {
+				// LOCAL cache oes not need scaling.
+				scaled_pos = (float)pos;
+			}
+
+		} else {
+			// For other models (YaRN scaling)
+			scaled_pos = (float)pos * ctx->model->yarn_scale_factor;
+		}
 
 		for (int i = 0; i < head_dim / 2; ++i) {
 			float exponent = (2.0f * (float)i) / (float)head_dim;
@@ -84,6 +101,8 @@ void rope_cache_init(struct ctx_t *ctx, int max_pos, int head_dim, float base)
 			rope_cache->cos[pos * (head_dim / 2) + i] = cosf(angle);
 		}
 	}
+
+	printf("RoPE init base=%.01f\n", base);
 }
 
 float silu_lookup(float x)
@@ -91,7 +110,6 @@ float silu_lookup(float x)
 	if (!isfinite(x)) {
 		// If x is not a valid number, we can't use the lookup table.
 		// Fallback to a direct, safe calculation or return 0.
-		// A direct calculation is safer if the result is needed.
 		return x / (1.0f + expf(-x));
 	}
 
@@ -121,12 +139,25 @@ MemType mem_slice(MemType *buffer, size_t offset_elements)
 	return slice;
 }
 
+void embedding_scale_gemma3(struct ctx_t *ctx, MemType *hidden_state_slice)
+{
+	float *hidden_data_fp32;
+
+	    float scale = sqrtf((float)ctx->model->embed_dim);
+	    hidden_data_fp32 = (float *)hidden_state_slice->data;
+	    for (int j = 0; j < ctx->model->embed_dim; j++) {
+		    float val = hidden_data_fp32[j];
+		    val *= scale;
+		    hidden_data_fp32[j] = val;
+	    }
+}
+
 static inline void *get_kv_head(const MemType *cache, int t, int kv_head_idx, int head_dim, int num_kv_heads)
 {
-        size_t element_size = ggml_type_size(cache->type);
-        size_t kv_dim = (size_t)num_kv_heads * head_dim;
-        size_t offset_elements = (size_t)t * kv_dim + (size_t)kv_head_idx * head_dim;
-        return (uint8_t *)cache->data + offset_elements * element_size;
+	size_t element_size = ggml_type_size(cache->type);
+	size_t kv_dim = (size_t)num_kv_heads * head_dim;
+	size_t offset_elements = (size_t)t * kv_dim + (size_t)kv_head_idx * head_dim;
+	return (uint8_t *)cache->data + offset_elements * element_size;
 }
 
 static void attention_task(void *arg)
@@ -135,35 +166,85 @@ static void attention_task(void *arg)
 	struct ctx_t *ctx = task->ctx;
 	int current_pos = task->pos;
 	LayerKVCache *cache = &ctx->kv_cache[task->layer_idx];
+	AttentionType attn_type = task->attn_type;
 
-	// 1. Get this thread's private scratch buffers
+	// Get this thread's private scratch buffers
 	MemType *q_head_fp32_scratch = &ctx->mem.q_head_fp32_scratch[task->thread_id];
 	float *attn_scores_buffer = ctx->mem.attn_scores_buffer[task->thread_id];
 
 	for (int h = task->head_start; h < task->head_end; h++) {
-		// 2. Create slices for the specific Q and Output heads upfront
+		// Create slices for the specific Q and Output heads upfront
 		MemType q_head_slice = mem_slice(&ctx->mem.Q, (size_t)h * ctx->model->head_dim);
 		MemType out_head_slice = mem_slice(&ctx->mem.attn_output, (size_t)h * ctx->model->head_dim);
 
-		// 3. Convert the source Q-head to FP32
+		// Convert the source Q-head to FP32
 		dispatch_convert(&q_head_slice, q_head_fp32_scratch, ctx->model->head_dim);
+
+		// PRE-SCALE THE QUERY
+		if (ctx->model->arch == ARCH_GEMMA3) {
+			ctx->model->attn_scale = 1.0f;
+
+			float q_scale = 1.0f / sqrtf((float)ctx->model->head_dim);
+			float *q_fp32_data = (float *)q_head_fp32_scratch->data;
+			for (int i = 0; i < ctx->model->head_dim; i++) {
+				q_fp32_data[i] *= q_scale;
+			}
+		}
 
 		// Determine the KV head index for this Q head (for GQA)
 		int kv_head_idx = h / (ctx->model->num_heads / ctx->model->num_kv_heads);
 
-		// 4. Calculate Raw Attention Scores
+		// Calculate Raw Attention Scores
 		// Calculate the dot product of the current Q-head with all previous K-heads in the cache
 		for (int t = 0; t <= current_pos; t++) {
-			void *k_head =
-				get_kv_head(&cache->k, t, kv_head_idx, ctx->model->head_dim, ctx->model->num_kv_heads);
 
-			MemType k_head_slice = {.type = GGML_TYPE_BF16, .data = (void *)k_head };
+			bool can_attend = false;
 
-			float score = dispatch_dot_product(q_head_fp32_scratch, &k_head_slice, ctx->model->head_dim);
-			attn_scores_buffer[t] = score * ctx->model->attn_scale;
+			if (attn_type == ATTN_TYPE_GLOBAL) {
+				// Global attention only needs the standard causal mask,
+				// which the loop condition (t <= absolute_pos) already enforces.
+				can_attend = true;
+
+			} else {
+
+				// Local attention needs the causal mask AND the sliding window check.
+				int sliding_window_start = (int)current_pos - (int)ctx->model->attn_sliding_window;
+				if (t >= sliding_window_start) {
+					can_attend = true;
+				}
+			}
+
+			if (can_attend) {
+
+				void *k_head = get_kv_head(&cache->k, t, kv_head_idx, ctx->model->head_dim,
+							   ctx->model->num_kv_heads);
+
+				MemType k_head_slice = {.type = cache->k.type, .data = (void *)k_head};
+
+				float score =
+					dispatch_dot_product(q_head_fp32_scratch, &k_head_slice, ctx->model->head_dim);
+
+				attn_scores_buffer[t] = score * ctx->model->attn_scale;
+
+			} else {
+				attn_scores_buffer[t] = -INFINITY;
+			}
 		}
 
-		// 5. Calculate Softmax
+		bool all_scores_are_masked = true;
+		for (int t = 0; t <= current_pos; t++) {
+			if (attn_scores_buffer[t] > -INFINITY) {
+				all_scores_are_masked = false;
+				break;
+			}
+		}
+
+		if (all_scores_are_masked && current_pos > 0) {
+			printf("WARNING: All keys were masked for query at current_pos %d in layer %d!\n", current_pos,
+			       task->layer_idx);
+		}
+
+		// Calculate Softmax
 		float max_score = -INFINITY;
 		for (int t = 0; t <= current_pos; t++) {
 			if (attn_scores_buffer[t] > max_score) {
@@ -181,7 +262,7 @@ static void attention_task(void *arg)
 
 		float inv_sum_exp = 1.0f / sum_exp;
 
-		// 6. Calculate Weighted Sum of V-vectors
+		// Calculate Weighted Sum of V-vectors
 		memset(out_head_slice.data, 0, ctx->model->head_dim * ggml_type_size(out_head_slice.type));
 
 		for (int t = 0; t <= current_pos; t++) {
@@ -190,8 +271,8 @@ static void attention_task(void *arg)
 
 			float attention_weight = attn_scores_buffer[t] * inv_sum_exp;
 
-			// 7. Create a MemType view of the data from the KV cache
-			MemType v_head_slice = {.type = ctx->kv_cache[kv_head_idx].v.type, .data = (void *)v_head_ptr};
+			// Create a MemType view of the data from the KV cache
+			MemType v_head_slice = {.type = cache->v.type, .data = (void *)v_head_ptr};
 
 			dispatch_accumulate_weighted_V(&v_head_slice, &out_head_slice, attention_weight,
 						       ctx->model->head_dim);
@@ -206,6 +287,7 @@ static void attention_batch_task(void *arg)
 	attention_batch_task_t *task = (attention_batch_task_t *)arg;
 	struct ctx_t *ctx = task->ctx;
 	int batch_start_pos = task->batch_start_pos;
+	AttentionType attn_type = task->attn_type;
 
 	// Get model dimensions and memory type info
 	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
@@ -220,28 +302,76 @@ static void attention_batch_task(void *arg)
 		int absolute_pos = batch_start_pos + i;
 
 		for (int h = 0; h < ctx->model->num_heads; h++) {
-			// 1. Calculate the pointer to the source Q-head
+			// Calculate the pointer to the source Q-head
 			MemType q_head_slice = mem_slice(&ctx->mem.Q, (size_t)i * q_dim + h * ctx->model->head_dim);
-			MemType out_head_slice = mem_slice(&ctx->mem.attn_output, (size_t)i * q_dim + h * ctx->model->head_dim);
+			MemType out_head_slice =
+				mem_slice(&ctx->mem.attn_output, (size_t)i * q_dim + h * ctx->model->head_dim);
 
-			// 2. Convert the source Q-head to FP32 in our scratch buffer
+			// Convert the source Q-head to FP32 in our scratch buffer
 			dispatch_convert(&q_head_slice, q_head_fp32_scratch, ctx->model->head_dim);
 
-			// 3. Calculate pointer to the destination output head
-			int kv_head_idx = h / (ctx->model->num_heads / ctx->model->num_kv_heads);
+			// PRE-SCALE THE QUERY
+			if (ctx->model->arch == ARCH_GEMMA3) {
 
-			// 4. Calculate Raw Attention Scores
-			for (int t = 0; t <= absolute_pos; t++) {
-				void *k_head =
-					get_kv_head(&cache->k, t, kv_head_idx, ctx->model->head_dim, ctx->model->num_kv_heads);
+				ctx->model->attn_scale = 1.0f;
 
-				MemType k_head_slice = { .type = GGML_TYPE_BF16, .data = (void *)k_head };
-
-				float score = dispatch_dot_product(q_head_fp32_scratch, &k_head_slice, ctx->model->head_dim);
-				attn_scores_buffer[t] = score * ctx->model->attn_scale;
+				float q_scale = 1.0f / sqrtf((float)ctx->model->head_dim);
+				float *q_fp32_data = (float *)q_head_fp32_scratch->data;
+				for (int i = 0; i < ctx->model->head_dim; i++) {
+					q_fp32_data[i] *= q_scale;
+				}
 			}
 
-			// 5. Calculate Softmax
+			// Calculate pointer to the destination output head
+			int kv_head_idx = h / (ctx->model->num_heads / ctx->model->num_kv_heads);
+
+			// Calculate Raw Attention Scores
+			for (int t = 0; t <= absolute_pos; t++) {
+
+				bool can_attend = false;
+
+				if (attn_type == ATTN_TYPE_GLOBAL) {
+					// Global attention only needs the standard causal mask,
+					// which the loop condition (t <= absolute_pos) already enforces.
+					can_attend = true;
+				} else {
+					// Local attention needs the causal mask AND the sliding window check.
+					int sliding_window_start =
+						(int)absolute_pos - (int)ctx->model->attn_sliding_window;
+					if (t >= sliding_window_start) {
+						can_attend = true;
+					}
+				}
+
+				if (can_attend) {
+					void *k_head = get_kv_head(&cache->k, t, kv_head_idx, ctx->model->head_dim,
+								   ctx->model->num_kv_heads);
+
+					MemType k_head_slice = {.type = cache->k.type, .data = (void *)k_head};
+
+					float score = dispatch_dot_product(q_head_fp32_scratch, &k_head_slice,
+									   ctx->model->head_dim);
+
+					attn_scores_buffer[t] = score * ctx->model->attn_scale;
+				} else {
+					attn_scores_buffer[t] = -INFINITY;
+				}
+			}
+
+			bool all_scores_are_masked = true;
+			for (int t = 0; t <= absolute_pos; t++) {
+				if (attn_scores_buffer[t] > -INFINITY) {
+					all_scores_are_masked = false;
+					break;
+				}
+			}
+
+			if (all_scores_are_masked && absolute_pos > 0) {
+				printf("WARNING: All keys were masked for query at absolute_pos %d in layer %d!\n",
+				       absolute_pos, task->layer_idx);
+			}
+
+			// Calculate Softmax
 			// Softmax is also over the full history up to the absolute_pos
 			float max_score = -INFINITY;
 			for (int t = 0; t <= absolute_pos; t++) {
@@ -259,17 +389,17 @@ static void attention_batch_task(void *arg)
 				attn_scores_buffer[t] *= inv_sum_exp;
 			}
 
-			// 6. Calculate Weighted Sum of V-vectors
+			// Calculate Weighted Sum of V-vectors
 			memset(out_head_slice.data, 0, ctx->model->head_dim * ggml_type_size(out_head_slice.type));
 
 			for (int t = 0; t <= absolute_pos; t++) {
-				void *v_head_ptr =
-					get_kv_head(&cache->v, t, kv_head_idx, ctx->model->head_dim, ctx->model->num_kv_heads);
+				void *v_head_ptr = get_kv_head(&cache->v, t, kv_head_idx, ctx->model->head_dim,
+							       ctx->model->num_kv_heads);
 
 				float attention_weight = attn_scores_buffer[t];
 
 				// Create a MemType view of the data from the KV cache
-				MemType v_head_slice = {.type = ctx->kv_cache[kv_head_idx].v.type, .data = (void *)v_head_ptr};
+				MemType v_head_slice = {.type = cache->v.type, .data = (void *)v_head_ptr};
 
 				dispatch_accumulate_weighted_V(&v_head_slice, &out_head_slice, attention_weight,
 							       ctx->model->head_dim);
@@ -279,7 +409,7 @@ static void attention_batch_task(void *arg)
 	free(task);
 }
 
-void attention_parallel(struct ctx_t *ctx, int layer_idx, int current_pos)
+void attention_parallel(struct ctx_t *ctx, int layer_idx, int current_pos, AttentionType attn_type)
 {
 	int num_threads = thread_pool->num_threads;
 	int heads_per_thread = (ctx->model->num_heads + num_threads - 1) / num_threads;
@@ -305,14 +435,15 @@ void attention_parallel(struct ctx_t *ctx, int layer_idx, int current_pos)
 					   .pos = current_pos,
 					   .head_start = head_start,
 					   .head_end = head_end,
-					   .thread_id = t};
+					   .thread_id = t,
+					   .attn_type = attn_type};
 		thread_pool_submit(thread_pool, attention_task, task);
 	}
 
 	thread_pool_wait(thread_pool);
 }
 
-void attention_batch(struct ctx_t *ctx, int batch_len, int layer_idx, int start_pos)
+void attention_batch(struct ctx_t *ctx, int batch_len, int layer_idx, int start_pos, AttentionType attn_type)
 {
 	int num_threads = thread_pool->num_threads;
 	int tokens_per_thread = (batch_len + num_threads - 1) / num_threads;
@@ -332,7 +463,8 @@ void attention_batch(struct ctx_t *ctx, int batch_len, int layer_idx, int start_
 						 .start_token_idx = start_token,
 						 .end_token_idx = end_token,
 						 .batch_start_pos = start_pos, // Pass the absolute starting position
-						 .thread_id = t};
+						 .thread_id = t,
+						 .attn_type = attn_type};
 		thread_pool_submit(thread_pool, attention_batch_task, task);
 	}
 	thread_pool_wait(thread_pool);
@@ -418,21 +550,22 @@ void process_expert_task(void *arg)
 	// Create temporary Tensor structs pointing to the correct data slices
 	Tensor expert_gate = {.mem.type = l->ffn_gate_exps.mem.type,
 			      .mem.data = (uint8_t *)l->ffn_gate_exps.mem.data + up_gate_offset_bytes};
-	Tensor expert_up = {.mem.type = l->ffn_up_exps.mem.type, .mem.data = (uint8_t *)l->ffn_up_exps.mem.data + up_gate_offset_bytes};
+	Tensor expert_up = {.mem.type = l->ffn_up_exps.mem.type,
+			    .mem.data = (uint8_t *)l->ffn_up_exps.mem.data + up_gate_offset_bytes};
 	Tensor expert_down = {.mem.type = l->ffn_down_exps.mem.type,
 			      .mem.data = (uint8_t *)l->ffn_down_exps.mem.data + down_offset_bytes};
 
 	// FFN forward pass
-	dispatch_mat_vec(normed_input, &expert_gate, ffn_hidden1, ctx->model->embed_dim, ctx->model->expert_ffn_dim,
-			 false);
-	dispatch_mat_vec(normed_input, &expert_up, ffn_hidden2, ctx->model->embed_dim, ctx->model->expert_ffn_dim,
+	dispatch_mat_vec(ctx, normed_input, &expert_gate, ffn_hidden1, ctx->model->embed_dim,
+			 ctx->model->expert_ffn_dim, false);
+	dispatch_mat_vec(ctx, normed_input, &expert_up, ffn_hidden2, ctx->model->embed_dim, ctx->model->expert_ffn_dim,
 			 false);
 
 	// SiLU
 	dispatch_swiglu_activation(ffn_hidden1, ffn_hidden2, ctx->model->expert_ffn_dim);
 
 	// Down-projection
-	dispatch_mat_vec(ffn_hidden1, &expert_down, expert_out, ctx->model->expert_ffn_dim, ctx->model->embed_dim,
+	dispatch_mat_vec(ctx, ffn_hidden1, &expert_down, expert_out, ctx->model->expert_ffn_dim, ctx->model->embed_dim,
 			 false);
 
 	free(task);
@@ -443,9 +576,32 @@ int transformer_layer(struct ctx_t *ctx, int layer_idx, int batch_len)
 	layer_weights *l = &ctx->model->layers[layer_idx];
 	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
 	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
+	AttentionType attn_type;
+	rope_cache_t *active_rope_cache;
 
 	// The absolute starting position for this batch
 	int start_pos = ctx->kv_pos;
+
+	// Determine the attention and rope cache type for the current layer
+	if (ctx->model->arch == ARCH_GEMMA3) {
+
+		if ((layer_idx + 1) % 6 == 0) {
+			attn_type = ATTN_TYPE_GLOBAL;
+			active_rope_cache = ctx->rope_cache_global; // Use the global cache
+		} else {
+			attn_type = ATTN_TYPE_LOCAL;
+			active_rope_cache = ctx->rope_cache_local; // Use the local cache
+		}
+
+		// Save the residual for the attention block.
+		// We use a scratch buffer to hold the original hidden_state.
+		memcpy(ctx->mem.residual_stratch.data, ctx->mem.hidden_state.data,
+		       batch_len * ctx->model->embed_dim * sizeof(float));
+
+	} else {
+		attn_type = ATTN_TYPE_GLOBAL;
+		active_rope_cache = ctx->rope_cache_global;
+	}
 
 	// ============ Attention Block ============
 	// RMSNorm on input
@@ -461,12 +617,14 @@ int transformer_layer(struct ctx_t *ctx, int layer_idx, int batch_len)
 	}
 
 	// Compute Q/K/V Matrices
-	dispatch_mat_mat(&ctx->mem.normed_qkv_input, &l->attn_q, &ctx->mem.Q, batch_len, ctx->model->embed_dim, q_dim,
-			 true);
-	dispatch_mat_mat(&ctx->mem.normed_qkv_input, &l->attn_k, &ctx->mem.K, batch_len, ctx->model->embed_dim, kv_dim,
-			 true);
-	dispatch_mat_mat(&ctx->mem.normed_qkv_input, &l->attn_v, &ctx->mem.V, batch_len, ctx->model->embed_dim, kv_dim,
-			 true);
+	dispatch_mat_mat(ctx, &ctx->mem.normed_qkv_input, &l->attn_q, &ctx->mem.Q, batch_len, ctx->model->embed_dim,
+			 q_dim, true);
+
+	dispatch_mat_mat(ctx, &ctx->mem.normed_qkv_input, &l->attn_k, &ctx->mem.K, batch_len, ctx->model->embed_dim,
+			 kv_dim, true);
+
+	dispatch_mat_mat(ctx, &ctx->mem.normed_qkv_input, &l->attn_v, &ctx->mem.V, batch_len, ctx->model->embed_dim,
+			 kv_dim, true);
 
 	// Apply RoPE
 	for (int i = 0; i < batch_len; i++) {
@@ -480,8 +638,9 @@ int transformer_layer(struct ctx_t *ctx, int layer_idx, int batch_len)
 				dispatch_rms_norm(&Q_slice, &l->attn_q_norm, &Q_slice, ctx->model->head_dim,
 						  ctx->model->norm_eps);
 			}
+
 			// Use the absolute position for RoPE
-			dispatch_apply_rope_cache(ctx, &Q_slice, absolute_pos, ctx->model->head_dim);
+			dispatch_apply_rope_cache(ctx, active_rope_cache, &Q_slice, absolute_pos, ctx->model->head_dim);
 		}
 
 		for (int h = 0; h < ctx->model->num_kv_heads; h++) {
@@ -491,8 +650,9 @@ int transformer_layer(struct ctx_t *ctx, int layer_idx, int batch_len)
 				dispatch_rms_norm(&K_slice, &l->attn_k_norm, &K_slice, ctx->model->head_dim,
 						  ctx->model->norm_eps);
 			}
+
 			// Use the absolute position for RoPE
-			dispatch_apply_rope_cache(ctx, &K_slice, absolute_pos, ctx->model->head_dim);
+			dispatch_apply_rope_cache(ctx, active_rope_cache, &K_slice, absolute_pos, ctx->model->head_dim);
 		}
 	}
 
@@ -501,19 +661,51 @@ int transformer_layer(struct ctx_t *ctx, int layer_idx, int batch_len)
 
 	// Multi-Head Attention Calculation
 	if (batch_len == 1) {
-		attention_parallel(ctx, layer_idx, start_pos);
+		attention_parallel(ctx, layer_idx, start_pos, attn_type);
 	} else {
-		attention_batch(ctx, batch_len, layer_idx, start_pos);
+		attention_batch(ctx, batch_len, layer_idx, start_pos, attn_type);
 	}
 
-	// Output projection and residual add
-	dispatch_mat_mat(&ctx->mem.attn_output, &l->attn_out, &ctx->mem.attn_proj_output, batch_len, q_dim,
+	// Output projection
+	dispatch_mat_mat(ctx, &ctx->mem.attn_output, &l->attn_out, &ctx->mem.attn_proj_output, batch_len, q_dim,
 			 ctx->model->embed_dim, true);
 
-	// Add residual
-	dispatch_apply_residual(&ctx->mem.hidden_state, &ctx->mem.attn_proj_output, batch_len * ctx->model->embed_dim);
+
+	if (ctx->model->arch == ARCH_GEMMA3) {
+
+		// Apply POST-ATTENTION norm.
+		for (int i = 0; i < batch_len; i++) {
+			size_t offset = (size_t)i * ctx->model->embed_dim;
+
+			MemType attn_proj_slice = mem_slice(&ctx->mem.attn_proj_output, offset);
+
+			dispatch_rms_norm(&attn_proj_slice, &l->post_attn_norm, &attn_proj_slice, ctx->model->embed_dim,
+					  ctx->model->norm_eps);
+		}
+
+		// Add the attention residual.
+		// Add the post-normed attention output to the original residual we saved.
+		// The result is stored in `hidden_state`.
+		dispatch_apply_residual(&ctx->mem.residual_stratch, &ctx->mem.attn_proj_output,
+					batch_len * ctx->model->embed_dim);
+
+		memcpy(ctx->mem.hidden_state.data, ctx->mem.residual_stratch.data,
+		       batch_len * ctx->model->embed_dim * sizeof(float));
+
+	} else {
+
+		// Add residual
+		dispatch_apply_residual(&ctx->mem.hidden_state, &ctx->mem.attn_proj_output,
+					batch_len * ctx->model->embed_dim);
+	}
 
 	// ============ FFN Block ============
+	if (ctx->model->arch == ARCH_GEMMA3) {
+		// Save the residual for the FFN block.
+		memcpy(ctx->mem.residual_stratch.data, ctx->mem.hidden_state.data,
+		       batch_len * ctx->model->embed_dim * sizeof(float));
+	}
+
 	// RMSNorm
 	for (int i = 0; i < batch_len; i++) {
 		size_t offset = (size_t)i * ctx->model->embed_dim;
@@ -528,6 +720,7 @@ int transformer_layer(struct ctx_t *ctx, int layer_idx, int batch_len)
 
 	// MoE
 	if (ctx->model->is_moe) {
+
 		// Get the size of a single quantization block for the expert tensors
 		size_t block_size_bytes = get_ggml_block_size(l->ffn_up_exps.mem.type);
 		if (block_size_bytes == 0) {
@@ -536,20 +729,21 @@ int transformer_layer(struct ctx_t *ctx, int layer_idx, int batch_len)
 
 		for (int i = 0; i < batch_len; i++) {
 
-			// 1. Get type-aware pointers for the current token
+			// Pointers for the current token
 			MemType normed_input_for_token_i =
 				mem_slice(&ctx->mem.normed_ffn_input, (size_t)i * ctx->model->embed_dim);
 
-			// Create a clean slice for the destination buffer.
+			// Create a slice for the destination buffer
 			MemType ffn_out_slice = mem_slice(&ctx->mem.ffn_down_output, (size_t)i * ctx->model->embed_dim);
 
 			// Use a per-thread scratch buffer for FP32 accumulation
 			MemType *ffn_out_fp32_scratch = &ctx->mem.expert_out_fp32;
 			float *ffn_out_fp32_token_buffer = ctx->mem.expert_out_fp32.data;
 
-			// 2. Route, Select, and Gate
-			// The input type for the router is the intermediate type, but the output scores are always FP32.
-			dispatch_mat_vec(&normed_input_for_token_i, &l->ffn_gate_inp, &ctx->mem.expert_scores,
+			// Route, Select, and Gate
+			// The input type for the router is the intermediate type, but the output scores are always
+			// FP32.
+			dispatch_mat_vec(ctx, &normed_input_for_token_i, &l->ffn_gate_inp, &ctx->mem.expert_scores,
 					 ctx->model->embed_dim, ctx->model->expert_count, false);
 
 			ExpertChoice top_experts[ctx->model->expert_used_count];
@@ -563,7 +757,7 @@ int transformer_layer(struct ctx_t *ctx, int layer_idx, int batch_len)
 
 			softmax(gate_values, ctx->model->expert_used_count);
 
-			// 3. Parallel Expert Processing
+			// Parallel Expert Processing
 			for (int j = 0; j < ctx->model->expert_used_count; j++) {
 				expert_task_t *task = malloc(sizeof(expert_task_t));
 				*task = (expert_task_t){
@@ -577,7 +771,7 @@ int transformer_layer(struct ctx_t *ctx, int layer_idx, int batch_len)
 			}
 			thread_pool_wait(thread_pool);
 
-			// 4. Accumulate results in the FP32 temporary buffer
+			// Accumulate results in the FP32 temporary buffer
 			memset(ffn_out_fp32_scratch->data, 0, ctx->model->embed_dim * sizeof(float));
 
 			for (int j = 0; j < ctx->model->expert_used_count; j++) {
@@ -588,30 +782,52 @@ int transformer_layer(struct ctx_t *ctx, int layer_idx, int batch_len)
 				}
 			}
 
-			// 5. Convert the final FP32 result to the destination format (e.g., BF16)
+			// Convert the final FP32 result to the destination format
 			dispatch_convert(ffn_out_fp32_scratch, &ffn_out_slice, ctx->model->embed_dim);
 		}
 
 	} else { // DENSE FFN
 
 		// Gate + Up projections
-		dispatch_mat_mat(&ctx->mem.normed_ffn_input, &l->ffn_gate, &ctx->mem.gate_proj_output, batch_len,
+		dispatch_mat_mat(ctx, &ctx->mem.normed_ffn_input, &l->ffn_gate, &ctx->mem.gate_proj_output, batch_len,
+				 ctx->model->embed_dim, ctx->model->ffn_dim, true);
+		dispatch_mat_mat(ctx, &ctx->mem.normed_ffn_input, &l->ffn_up, &ctx->mem.up_proj_output, batch_len,
 				 ctx->model->embed_dim, ctx->model->ffn_dim, true);
 
-		dispatch_mat_mat(&ctx->mem.normed_ffn_input, &l->ffn_up, &ctx->mem.up_proj_output, batch_len,
-				 ctx->model->embed_dim, ctx->model->ffn_dim, true);
-
-		// SwiGLU activation
-		dispatch_swiglu_activation(&ctx->mem.gate_proj_output, &ctx->mem.up_proj_output,
-					   batch_len * ctx->model->ffn_dim);
+		/* Call the interface activation function */
+		ctx->interface.activation(&ctx->mem.gate_proj_output, &ctx->mem.up_proj_output,
+						  batch_len * ctx->model->ffn_dim);
 
 		// Down projection
-		dispatch_mat_mat(&ctx->mem.gate_proj_output, &l->ffn_down, &ctx->mem.ffn_down_output, batch_len,
+		dispatch_mat_mat(ctx, &ctx->mem.gate_proj_output, &l->ffn_down, &ctx->mem.ffn_down_output, batch_len,
 				 ctx->model->ffn_dim, ctx->model->embed_dim, true);
 	}
 
-	// Final residual connection
-	dispatch_apply_residual(&ctx->mem.hidden_state, &ctx->mem.ffn_down_output, batch_len * ctx->model->embed_dim);
+	if (ctx->model->arch == ARCH_GEMMA3) {
+		// Apply POST-FFN norm.
+		for (int i = 0; i < batch_len; i++) {
+			size_t offset = (size_t)i * ctx->model->embed_dim;
+			MemType ffn_down_slice = mem_slice(&ctx->mem.ffn_down_output, offset);
+
+			dispatch_rms_norm(&ffn_down_slice, &l->post_ffw_norm, &ffn_down_slice, ctx->model->embed_dim,
+					  ctx->model->norm_eps);
+		}
+
+		// Second Residual Add.
+		// Add the post-normed FFN output to the residual we saved
+		dispatch_apply_residual(&ctx->mem.residual_stratch, &ctx->mem.ffn_down_output,
+					batch_len * ctx->model->embed_dim);
+
+		// Copy the correct final result back to hidden_state for the next layer.
+		memcpy(ctx->mem.hidden_state.data, ctx->mem.residual_stratch.data,
+		       batch_len * ctx->model->embed_dim * sizeof(float));
+
+	} else {
+
+		// Add residual
+		dispatch_apply_residual(&ctx->mem.hidden_state, &ctx->mem.ffn_down_output,
+					batch_len * ctx->model->embed_dim);
+	}
 
 	return 0;
 }

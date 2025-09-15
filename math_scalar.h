@@ -7,6 +7,7 @@ extern float bf16_to_fp32(uint16_t bf16);
 extern uint16_t fp32_to_bf16(float f);
 extern uint16_t fp32_to_bf16_rne(float f);
 extern float fp16_to_fp32(uint16_t h);
+//extern void get_scale_min_k4(int j, const uint8_t *scales, uint8_t *scale, int8_t *min);
 extern void get_scale_min_k4(int j, const uint8_t *scales, uint8_t *scale, uint8_t *min);
 
 extern float dot_product_f32_f32_scalar(const void *__restrict a, const void *__restrict b, int size);
@@ -70,7 +71,13 @@ extern void swiglu_activation_bf16_bf16_scalar(void *gate, const void *up, int s
 extern void store_KV_cache_f32_bf16_scalar(struct ctx_t *ctx, int layer_idx, int start_pos, int batch_len);
 extern void store_KV_cache_bf16_bf16_scalar(struct ctx_t *ctx, int layer_idx, int start_pos, int batch_len);
 
-extern void apply_rope_cache_f32_scalar(struct ctx_t *ctx, void *X, int pos, int head_dim);
-extern void apply_rope_cache_bf16_scalar(struct ctx_t *ctx, void *X, int pos, int head_dim);
+extern void apply_rope_cache_f32_scalar(struct ctx_t *ctx, rope_cache_t *rope_cache, void *X, int pos, int head_dim);
+extern void apply_rope_cache_bf16_scalar(struct ctx_t *ctx, rope_cache_t *rope_cache, void *X, int pos, int head_dim);
+
+extern void geglu_activation_f32_f32_scalar(void *gate, const void *up, int size);
+
+//extern void quantize_f32_to_q8_0_scalar(const float* src, block_q8_0* dst, int size);
+//extern void mat_vec_row_q8_0_q4k_f32_scalar(const void *X, const void *w_void, void *O,
+//                                      int in_dim, int start_row, int end_row);
 
 #endif

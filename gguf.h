@@ -73,6 +73,12 @@ enum gguf_metadata_value_type {
 	GGUF_METADATA_VALUE_TYPE_FLOAT64 = 12,
 };
 
+enum {
+	GGUF_TOKEN_TYPE_NORMAL = 1,
+	GGUF_TOKEN_TYPE_CONTROL = 3,
+	GGUF_TOKEN_TYPE_SPECIAL = 5,		// ?
+};
+
 typedef struct gguf_tensor_t {
 	char *name;
 	uint64_t dimensions[4];
@@ -92,7 +98,6 @@ struct gguf_metadata_kv_t {
 };
 
 #define QK_K 256
-
 typedef struct {
 	uint8_t ql[128];   // quants, lower 4 bits
 	uint8_t qh[64];	   // quants, upper 2 bits
@@ -107,6 +112,12 @@ typedef struct {
 	uint8_t qs[128];    // Packed 4-bit quantized weights
 } block_q4_k;
 
+#define QK8_0 32
+typedef struct {
+	uint16_t d;       // delta
+	int8_t qs[QK8_0]; // quants
+} block_q8_0;
+
 struct ctx_t;
 
 extern int gguf_parse(struct ctx_t *ctx, char *path);
@@ -116,8 +127,11 @@ extern int gguf_read_metadata_type_string(struct ctx_t *ctx, struct gguf_metadat
 extern int gguf_get_metadata_value(struct ctx_t *ctx, char *key, void *value);
 extern char *gguf_get_metadata_string(struct ctx_t *ctx, char *key);
 extern int gguf_get_metadata_size(struct ctx_t *ctx, char *key, uint64_t *size);
-extern int gguf_metadata_read_tokens_embed(struct ctx_t *ctx, char *key);
-extern int gguf_metadata_read_merges(struct ctx_t *ctx, char *key);
+
+extern int gguf_metadata_read_token_embeds(struct ctx_t *ctx, char *key, int detect_special);
+extern int gguf_metadata_read_token_merges(struct ctx_t *ctx, char *key);
+extern int gguf_metadata_read_token_types(struct ctx_t *ctx, char *key, int detect_special);
+extern int gguf_metadata_read_token_scores(struct ctx_t *ctx, char *key);
 
 extern int gguf_map_weights(struct ctx_t *ctx);
 extern void *get_tensor_data_ptr(struct ctx_t *ctx_ptr, const char *name, uint64_t *size_bytes);

@@ -11,14 +11,14 @@ typedef void (*rms_norm_fn)(void *O, const void *X, const Tensor *W, int size, f
 typedef void (*mat_vec_fn)(const void *X, const void *W, void *O, int in_dim, int out_dim, int use_threads);
 typedef void (*mat_mat_fn)(const void *X, const void *W, void *O, int prompt_len, int in_dim, int out_dim,
 			   int use_threads);
-typedef void (*apply_rope_cache_fn)(struct ctx_t *ctx, void *X, int pos, int head_dim);
+typedef void (*apply_rope_cache_fn)(struct ctx_t *ctx, rope_cache_t *rope_cache, void *X, int pos, int head_dim);
 typedef void (*accumulate_weighted_V_fn)(void *O, float W, const void *V, int size);
 typedef void (*store_KV_cache_fn)(struct ctx_t *ctx, int layer_idx, int start_pos, int batch_len);
 typedef void (*apply_residual_fn)(void *acc, const void *residual, int size);
 typedef void (*swiglu_fn)(void *gate, const void *up, int size);
+typedef void (*geglu_fn)(void *gate, const void *up, int size);
 typedef void (*convert_fn)(const void *src, void *dest, int size);
 typedef float (*dot_product_fn)(const void *vec_a, const void *vec_b, int size);
-
 
 typedef struct {
 	ggml_type input_type;
@@ -47,6 +47,7 @@ typedef struct {
 } mat_vec_task_t;
 
 typedef struct {
+	struct ctx_t *ctx;
 	const void *X;
 	const Tensor *W;
 	void *O;
@@ -112,6 +113,13 @@ typedef struct {
 } swiglu_activation_dispatch_t;
 
 typedef struct {
+	ggml_type gate_type;
+	ggml_type up_type;
+	geglu_fn func;
+	int accel;
+} geglu_activation_dispatch_t;
+
+typedef struct {
 	ggml_type input_type;
 	ggml_type output_type;
 	convert_fn func;
@@ -127,14 +135,15 @@ typedef struct {
 
 extern void dispatch_embedding_row(const Tensor *W, int row_index, MemType *O_slice, int embed_dim);
 extern void dispatch_rms_norm(const MemType *X_slice, const Tensor *W, MemType *O_slice, int size, float eps);
-extern void dispatch_mat_vec(const MemType *X, const Tensor *W, MemType *O, int in_dim, int out_dim, int use_threads);
-extern void dispatch_mat_mat(const MemType *X, const Tensor *W, MemType *O, int batch_len, int in_dim, int out_dim,
+extern void dispatch_mat_vec(struct ctx_t *ctx, const MemType *X, const Tensor *W, MemType *O, int in_dim, int out_dim, int use_threads);
+extern void dispatch_mat_mat(struct ctx_t *ctx, const MemType *X, const Tensor *W, MemType *O, int batch_len, int in_dim, int out_dim,
 			     int use_threads);
-extern void dispatch_apply_rope_cache(struct ctx_t *ctx, MemType *X_slice, int pos, int head_dim);
+extern void dispatch_apply_rope_cache(struct ctx_t *ctx, rope_cache_t *rope_cache, MemType *X_slice, int pos, int head_dim);
 extern void dispatch_accumulate_weighted_V(const MemType *V_slice, MemType *O_slice, float weight, int size);
 extern void dispatch_store_KV_cache(struct ctx_t *ctx, int layer_idx, int start_pos, int batch_len);
 extern void dispatch_apply_residual(MemType *acc, const MemType *residual, int size);
 extern void dispatch_swiglu_activation(MemType *gate, MemType *up, int size);
+extern void dispatch_geglu_activation(MemType *gate, MemType *up, int size);
 extern void dispatch_convert(const MemType *src, MemType *dest, int size);
 extern float dispatch_dot_product(const MemType *vec_a, const MemType *vec_b, int size);
 

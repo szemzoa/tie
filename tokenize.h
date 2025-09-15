@@ -5,8 +5,7 @@
 #include <stdbool.h>
 
 #define BPE_MAP_CAPACITY (256 * 1024)
-#define MAX_SPECIAL_TOKENS 128
-#define MAX_TOKEN_IDS 8192
+#define MAX_SPECIAL_TOKENS 8192
 #define MAX_CHUNKS 512
 #define MAX_SPANS 2048
 
@@ -56,6 +55,22 @@ typedef struct {
 	int count;
 } SpecialTokenList;
 
+typedef struct {
+    float score;      // The best score to reach this position
+    int token_id;   // The ID of the last token on the best path
+    int backpointer; // The starting index of that last token
+} DP_Entry;
+
+typedef struct {
+	TrieNode *root;
+	StringPool *pool;
+	unsigned char **token_table; // Points to each token string in pool->data
+	int *token_lens;	     // Length of each token
+	int *token_types;	     	// Token type
+	float *token_scores;	     	// Token scores
+	int token_count;	     // Total number of tokens
+} Tokenizer;
+
 extern struct ctx_t *ctx;
 
 extern char merge_pool[MAX_SPANS][128];
@@ -71,10 +86,13 @@ extern void free_string_pool(StringPool *pool);
 
 extern void bpe_map_insert(bpe_merge_map_t *map, uint64_t key, uint32_t rank);
 extern void replace_g_spaces(char *s);
+
 extern const unsigned char *get_token_string(const struct ctx_t *ctx, int token_id);
 extern int get_token_string_length(const struct ctx_t *ctx, int token_id);
 
 extern int vocab_lookup_token_id(TrieNode *root, const char *token, size_t len);
+
 extern int *tokenize_bpe(struct ctx_t *ctx, const char *text, size_t *num_tokens);
+extern int *tokenize_sp(struct ctx_t *ctx, const char *text, size_t *num_tokens);
 
 #endif

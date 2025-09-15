@@ -44,7 +44,7 @@ typedef struct {
 } MemType;
 
 typedef struct {
-	MemType	mem;
+	MemType mem;
 	bool is_mmaped;	      // Flag to know if we need to free() it
 	size_t size_in_bytes; // Total size of the tensor data
 } Tensor;
@@ -63,8 +63,10 @@ struct context_memory_t {
 	MemType ffn_down_output;
 	MemType logits;
 	MemType *q_head_fp32_scratch;
-
 	float *attn_scores_buffer[MAX_THREADS];
+
+	// Gemma3
+	MemType residual_stratch;
 
 	// MoE
 	MemType expert_scores; // buffer to hold the output of the router.
@@ -74,10 +76,14 @@ struct context_memory_t {
 	MemType expert_out_fp32;
 };
 
+typedef enum { ATTN_TYPE_GLOBAL, ATTN_TYPE_LOCAL } AttentionType;
+
 typedef struct {
 	MemType k;
 	MemType v;
 } LayerKVCache;
+
+typedef enum { LAYOUT_ROW_MAJOR, LAYOUT_COL_MAJOR } WeightLayout;
 
 typedef struct {
 	Tensor attn_norm;
@@ -99,11 +105,31 @@ typedef struct {
 	Tensor ffn_gate_exps;
 	Tensor ffn_up_exps;
 	Tensor ffn_down_exps;
+
+	/* gemma3 */
+	Tensor post_attn_norm;
+	Tensor post_ffw_norm;
 } layer_weights;
+
+enum {
+	ARCH_UNKNOWN = 0,
+	ARCH_QWEN3,
+	ARCH_GEMMA3,
+};
+
+typedef struct model_interface_t {
+	int *(*tokenize_prompt)(struct ctx_t *ctx, const char *input_buf, size_t *num_tokens);
+	void (*token_out)(struct ctx_t *ctx, const char *p, int len);
+	void (*embedding_scale)(struct ctx_t *ctx, MemType *hidden_state_slice);
+	void (*activation)(MemType *gate, MemType *up, int size);
+} model_interface_t;
 
 typedef struct {
 	char *arch_name;
+
+	int arch;
 	int is_moe;
+
 	int embed_dim;
 	int num_layers;
 	int num_heads;
@@ -115,9 +141,27 @@ typedef struct {
 	uint64_t vocab_size;
 	uint64_t merges_size;
 	int seq_length;
-	int eos_token;
+
+	int sot_token;		/* start of turn */
+	int eot_token;		/* end of turn */
+	int eos_token;		/* end of seq */
+	int bos_token;		/* begin of seq */
+	int unk_token;
+	int pad_token;
+	int add_bos_token;
+	int add_eos_token;
+	int bos_token_sent;
+
+	int role_user_token;
+	int role_model_token;
+	int newline_token;
+
 
 	float yarn_scale_factor;
+
+	float rope_scale_factor;      // GEMMA3
+	uint32_t attn_sliding_window; // GEMMA3
+
 	float repetition_penalty;
 	float attn_scale;
 
@@ -129,14 +173,15 @@ typedef struct {
 	Tensor output_norm;
 	layer_weights *layers;
 	Tensor output;
-} Qwen3Model;
+
+	WeightLayout weight_layout;
+} Model;
 
 struct ctx_t {
 	int fd;
 	size_t file_size;
 	void *mapped_data;
 	uint8_t *fptr;
-
 	uint64_t tensor_count;
 	uint64_t tensor_loaded;
 	uint64_t tensor_data_offset;
@@ -144,23 +189,24 @@ struct ctx_t {
 	struct gguf_metadata_kv_t *metadata;
 	gguf_tensor *tensors;
 
-	struct context_memory_t mem;
-	LayerKVCache *kv_cache;
-	rope_cache_t *rope_cache;
+	Model *model;
+	model_interface_t interface;
 
-	Qwen3Model *model;
+	struct context_memory_t mem;
 
 	uint32_t kv_pos;
+	LayerKVCache *kv_cache;
 
-	TrieNode *root;
-	StringPool *pool;
-
-	unsigned char **token_table; // Points to each token string in pool->data
-	int *token_lens;	     // Length of each token
-	int token_count;	     // Total number of tokens
+	rope_cache_t *rope_cache_local;
+	rope_cache_t *rope_cache_global;
 
 	unsigned int utf8_state;
 	unsigned int utf8_codepoint;
+
+	Tokenizer tokenizer;
 };
+
+extern void token_out_qwen3(struct ctx_t *ctx, const char *p, int len);
+extern void token_out_gemma3(struct ctx_t *ctx, const char *p, int len);
 
 #endif

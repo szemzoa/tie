@@ -2,14 +2,15 @@
 #include <stdbool.h>
 #include <string.h>
 #include <math.h>
-#include <immintrin.h>
 
+#include "config.h"
 #include "engine.h"
 #include "math_avx2.h"
 #include "math_scalar.h"
 
-
 #ifdef CONFIG_ENABLE_AVX2
+#include <immintrin.h>
+
 __attribute__((target("avx2"))) inline __m256 load_bf16_as_f32(const uint16_t *src)
 {
 	// Load 8 BF16s into 128-bit register
@@ -641,9 +642,9 @@ __attribute__((target("avx2"))) float dot_product_f32_q4k_avx2(const float *x, c
 	return _mm_cvtss_f32(sum_1);
 }
 
-__attribute__((target("avx2"))) void apply_rope_cache_f32_avx2(struct ctx_t *ctx, void *X, int pos, int head_dim)
+__attribute__((target("avx2"))) void apply_rope_cache_f32_avx2(struct ctx_t *ctx, rope_cache_t *rope_cache, void *X,
+							       int pos, int head_dim)
 {
-	rope_cache_t *rope_cache = ctx->rope_cache;
 	int h_dim_half = head_dim / 2;
 	float *x = (float *)X;
 
@@ -1083,9 +1084,9 @@ __attribute__((target("avx2"))) void apply_residual_bf16_bf16_avx2(void *acc, co
 	}
 }
 
-__attribute__((target("avx2"))) void apply_rope_cache_bf16_avx2(struct ctx_t *ctx, void *X, int pos, int head_dim)
+__attribute__((target("avx2"))) void apply_rope_cache_bf16_avx2(struct ctx_t *ctx, rope_cache_t *rope_cache, void *X,
+								int pos, int head_dim)
 {
-	rope_cache_t *rope_cache = ctx->rope_cache;
 	int h_dim_half = head_dim / 2;
 	uint16_t *x = (uint16_t *)X;
 
@@ -1582,6 +1583,82 @@ __attribute__((target("avx2"))) void get_embedding_row_q6k_bf16_avx2(const Tenso
 	for (int block_idx = 0; block_idx < blocks_per_row; block_idx++) {
 		dequantize_row_q6k_bf16_avx2(&src[row_block_offset + block_idx], (uint16_t *)dest + block_idx * QK_K,
 					     QK_K);
+	}
+}
+
+
+inline float gelu_stable(float x)
+{
+	return 0.5f * x * (1.0f + tanhf(sqrtf(2.0f / M_PI) * (x + 0.044715f * powf(x, 3.0f))));
+}
+
+void geglu_activation_f32_f32_avx2(void *gate, const void *up, int size)
+{
+	float *gate_fp32 = (float *)gate;
+	const float *up_fp32 = (const float *)up;
+
+	const int vec_stride = 8; // 8 floats per __m256
+	int i = 0;
+
+	// constants used in formula
+	const float sqrt_2_over_pi_f = 0.7978845608028654f; // sqrt(2/pi)
+	const float gelu_bias_f = 0.044715f;
+
+	const __m256 v_half = _mm256_set1_ps(0.5f);
+	const __m256 v_one = _mm256_set1_ps(1.0f);
+	const __m256 v_s2opi = _mm256_set1_ps(sqrt_2_over_pi_f);
+	const __m256 v_b = _mm256_set1_ps(gelu_bias_f);
+
+	// constants for tanh rational approx: (t*(t^2 + 27))/(9*t^2 + 27)
+	const __m256 v_27 = _mm256_set1_ps(27.0f);
+	const __m256 v_9 = _mm256_set1_ps(9.0f);
+
+	// clamp range for t to avoid extreme values (optional but stabilizes approx)
+	//    const __m256 v_t_max = _mm256_set1_ps(10.0f);
+	//    const __m256 v_t_min = _mm256_set1_ps(-10.0f);
+	const __m256 v_t_max = _mm256_set1_ps(4.0f);
+	const __m256 v_t_min = _mm256_set1_ps(-4.0f);
+
+	for (; i + vec_stride - 1 < size; i += vec_stride) {
+		// load gate and up
+		__m256 x = _mm256_loadu_ps(gate_fp32 + i); // gate
+		__m256 u = _mm256_loadu_ps(up_fp32 + i);   // up
+
+		// x3 = x * x * x
+		__m256 x2 = _mm256_mul_ps(x, x);
+		__m256 x3 = _mm256_mul_ps(x2, x);
+
+		// inner = sqrt(2/pi) * (x + 0.044715 * x^3)
+		__m256 inner = _mm256_fmadd_ps(v_b, x3, x); // x + b * x3
+		inner = _mm256_mul_ps(v_s2opi, inner);	    // s2opi * ( ... )
+
+		// clamp inner to [-10, 10] to stabilize rational tanh approx
+		inner = _mm256_min_ps(v_t_max, _mm256_max_ps(v_t_min, inner));
+
+		// tanh_approx = inner * (inner*inner + 27) / (9*inner*inner + 27)
+		__m256 t2 = _mm256_mul_ps(inner, inner); // inner^2
+		__m256 num = _mm256_add_ps(t2, v_27);	 // t^2 + 27
+		num = _mm256_mul_ps(inner, num);	 // inner * (t^2 + 27)
+
+		__m256 den = _mm256_mul_ps(v_9, t2); // 9 * t^2
+		den = _mm256_add_ps(den, v_27);	     // 9*t^2 + 27
+
+		__m256 tanh_approx = _mm256_div_ps(num, den); // approx tanh(inner)
+
+		// gelu = 0.5 * x * (1 + tanh_approx)
+		__m256 one_plus_t = _mm256_add_ps(v_one, tanh_approx);
+		__m256 gelu = _mm256_mul_ps(v_half, _mm256_mul_ps(x, one_plus_t));
+
+		// result = gelu * u
+		__m256 res = _mm256_mul_ps(gelu, u);
+
+		// store result back into gate buffer (matches scalar semantics)
+		_mm256_storeu_ps(gate_fp32 + i, res);
+	}
+
+	// tail: process remaining elements with scalar fallback
+	for (; i < size; ++i) {
+		gate_fp32[i] = gelu_stable(gate_fp32[i]) * up_fp32[i];
 	}
 }
 

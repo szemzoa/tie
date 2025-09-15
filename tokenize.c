@@ -5,6 +5,7 @@
 #include <ctype.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <math.h>
 
 #include "tokenize.h"
 #include "main.h"
@@ -49,25 +50,23 @@ int append_to_pool(StringPool *pool, const char *str, size_t len)
 	}
 	memcpy(pool->data + pool->size, str, len);
 	pool->size += len;
-//	pool->data[pool->size] = '\0';
-//	pool->size++;
 	return 1;
 }
 
 const unsigned char *get_token_string(const struct ctx_t *ctx, int token_id)
 {
-	if (token_id < 0 || token_id >= ctx->token_count)
+	if (token_id < 0 || token_id >= ctx->tokenizer.token_count)
 		return NULL;
 
-	return ctx->token_table[token_id];
+	return ctx->tokenizer.token_table[token_id];
 }
 
 int get_token_string_length(const struct ctx_t *ctx, int token_id)
 {
-	if (token_id < 0 || token_id >= ctx->token_count) 
+	if (token_id < 0 || token_id >= ctx->tokenizer.token_count)
 		return 0;
 
-	return ctx->token_lens[token_id];
+	return ctx->tokenizer.token_lens[token_id];
 }
 
 void insert_token(TrieNode *root, const char *token, size_t len, int token_id)
@@ -100,6 +99,7 @@ void free_string_pool(StringPool *pool)
 		free(pool);
 	}
 }
+
 
 void replace_g_spaces(char *s)
 {
@@ -228,7 +228,9 @@ char *preprocess_input(const char *text, size_t len, size_t *out_len)
 int *tokenize_bpe(struct ctx_t *ctx, const char *text, size_t *num_tokens)
 {
 	TokenChunk chunks[MAX_CHUNKS];
+	BpeTokenSpan spans[MAX_SPANS];
 	int chunk_count = 0;
+	int span_count = 0;
 	size_t text_len = strlen(text);
 	size_t p = 0;
 	while (p < text_len) {
@@ -268,9 +270,6 @@ int *tokenize_bpe(struct ctx_t *ctx, const char *text, size_t *num_tokens)
 		}
 	}
 
-	BpeTokenSpan spans[MAX_SPANS];
-	int span_count = 0;
-
 	for (int i = 0; i < chunk_count; i++) {
 		TokenChunk *c = &chunks[i];
 
@@ -289,7 +288,7 @@ int *tokenize_bpe(struct ctx_t *ctx, const char *text, size_t *num_tokens)
 		while (p < pre_len) {
 			int token_id;
 			size_t prev_p = p;
-			if (tokenize_step(ctx->root, processed, pre_len, &p, &token_id)) {
+			if (tokenize_step(ctx->tokenizer.root, processed, pre_len, &p, &token_id)) {
 				spans[span_count++] = (BpeTokenSpan){.token_id = token_id,
 								     .start = &processed[prev_p],
 								     .length = (int)(p - prev_p),
@@ -342,7 +341,7 @@ int *tokenize_bpe(struct ctx_t *ctx, const char *text, size_t *num_tokens)
 		memcpy(buf + len1, spans[best_idx + 1].start, len2);
 		int merged_len = len1 + len2;
 
-		int merged_id = vocab_lookup_token_id(ctx->root, buf, merged_len);
+		int merged_id = vocab_lookup_token_id(ctx->tokenizer.root, buf, merged_len);
 		if (merged_id < 0) {
 			fprintf(stderr, "ERROR: vocab lookup failed for merge '%.*s'\n", merged_len, buf);
 			break;
@@ -367,4 +366,145 @@ int *tokenize_bpe(struct ctx_t *ctx, const char *text, size_t *num_tokens)
 	}
 	*num_tokens = span_count;
 	return output_ids;
+}
+
+char *sp_preprocess_input(const char *text, size_t *out_len)
+{
+	size_t text_len = strlen(text);
+	size_t space_count = 0;
+	for (size_t i = 0; i < text_len; ++i) {
+		if (text[i] == ' ') {
+			space_count++;
+		}
+	}
+
+	// Each space ' ' (1 byte) becomes ' ' (3 bytes), so we need 2 extra bytes per space.
+	size_t new_len = text_len + space_count * 2;
+	char *out = malloc(new_len + 1);
+	if (!out) {
+		*out_len = 0;
+		return NULL;
+	}
+
+	size_t j = 0;
+	for (size_t i = 0; i < text_len; i++) {
+		if (text[i] == ' ') {
+			out[j++] = (char)0xE2;
+			out[j++] = (char)0x96;
+			out[j++] = (char)0x81;
+		} else {
+			out[j++] = text[i];
+		}
+	}
+	out[j] = '\0';
+	*out_len = j;
+	return out;
+}
+
+int *tokenize_sp(struct ctx_t *ctx, const char *text, size_t *num_tokens)
+{
+	size_t processed_text_len;
+	DP_Entry *dp;
+
+	char *processed_text = sp_preprocess_input(text, &processed_text_len);
+	if (!processed_text) {
+		*num_tokens = 0;
+		return NULL;
+	}
+
+	// Init Dynamic Programming (DP) Table
+	if ((dp = (DP_Entry *)malloc((processed_text_len + 1) * sizeof(DP_Entry))) == NULL) {
+		fprintf(stderr, "ERROR: %s OOM\n", __FUNCTION__);
+		free(processed_text);
+		return NULL;
+	}
+
+	dp[0].score = 0.0f;
+	for (size_t i = 1; i <= processed_text_len; i++) {
+		dp[i].score = -INFINITY;
+		dp[i].token_id = -1;
+		dp[i].backpointer = -1;
+	}
+
+	// FORWARD PASS
+	for (int i = 0; i < processed_text_len; ++i) {
+		// If we can't reach this position, we can't start a token from here
+		if (dp[i].score == -INFINITY) {
+			continue;
+		}
+
+		// Trie Traversal
+		TrieNode *node = ctx->tokenizer.root;
+
+		// Iterate through characters starting from position i
+		for (int j = i; j < processed_text_len; ++j) {
+			unsigned char byte = (unsigned char)processed_text[j];
+
+			// Move to the next node in the Trie
+			if (!node->children[byte]) {
+				break; // No more possible tokens from this path
+			}
+			node = node->children[byte];
+
+			// Check if the current node represents a valid token
+			if (node->token_id != -1) {
+				// We found a valid token. Let's get its properties.
+				int matched_token_id = node->token_id;
+				int matched_token_len = j - i + 1;
+				int end_pos = i + matched_token_len;
+
+				float candidate_score = dp[i].score + ctx->tokenizer.token_scores[matched_token_id];
+
+				// If this path is better than any previous path to end_pos...
+				if (candidate_score > dp[end_pos].score) {
+					// ...update the DP table with this new best path!
+					dp[end_pos].score = candidate_score;
+					dp[end_pos].token_id = matched_token_id;
+					dp[end_pos].backpointer = i;
+				}
+			}
+		}
+	}
+
+	// Backward Pass - Reconstruct the best path
+	// Check if a valid path was found to the end of the string
+	if (dp[processed_text_len].score == -INFINITY) {
+		fprintf(stderr, "ERROR: Could not tokenize the entire string.\n");
+		goto _tokenize_sp_error;
+	}
+
+	int temp_tokens[MAX_PROMPT_BATCH_SIZE];
+	int count = 0;
+	int current_pos = processed_text_len;
+
+	while (current_pos > 0) {
+		if (count >= MAX_PROMPT_BATCH_SIZE) {
+			fprintf(stderr, "ERROR: Exceeded MAX_TOKENS during tokenization.\n");
+			goto _tokenize_sp_error;
+		}
+		temp_tokens[count++] = dp[current_pos].token_id;
+		current_pos = dp[current_pos].backpointer;
+	}
+
+	int *output_ids = malloc(count * sizeof(int));
+	if (!output_ids) {
+		fprintf(stderr, "ERROR: %s OOM\n", __FUNCTION__);
+		goto _tokenize_sp_error;
+	}
+
+	// The tokens are in reverse order, so now copy them back in the correct order
+	for (int i = 0; i < count; ++i) {
+		output_ids[i] = temp_tokens[count - 1 - i];
+	}
+
+	*num_tokens = count;
+	free(processed_text);
+	free(dp);
+	return output_ids;
+
+_tokenize_sp_error:
+	free(dp);
+	free(processed_text);
+	*num_tokens = 0;
+	return NULL;
 }

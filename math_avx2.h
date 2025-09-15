@@ -19,8 +19,8 @@ extern void rms_norm_bf16_f32_f32_avx2(void *__restrict o_void, const void *__re
 				       const Tensor *__restrict W, int size, float eps);
 extern void rms_norm_bf16_f32_bf16_avx2(void *O, const void *X, const Tensor *W, int size, float eps);
 
-extern void apply_rope_cache_f32_avx2(struct ctx_t *ctx, void *X, int pos, int head_dim);
-extern void apply_rope_cache_bf16_avx2(struct ctx_t *ctx, void *X, int pos, int head_dim);
+extern void apply_rope_cache_f32_avx2(struct ctx_t *ctx, rope_cache_t *rope_cache, void *X, int pos, int head_dim);
+extern void apply_rope_cache_bf16_avx2(struct ctx_t *ctx, rope_cache_t *rope_cache, void *X, int pos, int head_dim);
 
 extern void apply_residual_f32_f32_avx2(void *acc_void, const void *residual_void, int size);
 extern void apply_residual_bf16_bf16_avx2(void *acc, const void *residual, int size);
@@ -49,6 +49,7 @@ extern void store_KV_cache_bf16_bf16_avx2(struct ctx_t *ctx, int layer_idx, int 
 
 extern void swiglu_activation_f32_f32_avx2(void *gate_void, const void *up_void, int size);
 extern void swiglu_activation_bf16_bf16_avx2(void *gate_void, const void *up_void, int size);
+extern void geglu_activation_f32_f32_avx2(void *gate, const void *up, int size);
 
 extern void convert_f32_bf16_avx2(const void *src, void *dest, int size);
 extern void convert_bf16_f32_avx2(const void *S, void *D, int n);

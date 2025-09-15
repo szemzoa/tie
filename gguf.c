@@ -197,6 +197,15 @@ int gguf_read_metadata_type_array(struct ctx_t *ctx, struct gguf_metadata_kv_t *
 		if (type == GGUF_METADATA_VALUE_TYPE_INT32) {
 			val = *(uint32_t *)ctx->fptr;
 			ctx->fptr += sizeof(uint32_t);
+
+//			if (strstr(metadata->name, "tokenizer.ggml.token_type")) {
+//			    printf("[%s] #%llu: type: %d\n", metadata->name, i, val);
+//			}
+		}
+
+		if (type == GGUF_METADATA_VALUE_TYPE_FLOAT32) {
+			val = *(float *)ctx->fptr;
+			ctx->fptr += sizeof(float);
 		}
 	}
 
@@ -455,7 +464,7 @@ int gguf_read_metadata(struct ctx_t *ctx)
 		ctx->fptr += sizeof(uint64_t);
 
 		if ((metadata->name = (char *)malloc(key_len + 1)) == NULL) {
-			perror("error reading metadata name, OOM\n");
+			printf("error reading metadata name, OOM, key_len: %llu\n", key_len);
 			return -1;
 		}
 		memset(metadata->name, 0, key_len + 1);
@@ -813,9 +822,8 @@ int gguf_parse(struct ctx_t *ctx, char *path)
 
 	gguf_read_metadata(ctx);
 
-	if (gguf_map_weights(ctx) != 0) { /* ... error handling ... */
+	if (gguf_map_weights(ctx) != 0)
 		return -1;
-	}
 
 	return 0;
 }
@@ -830,11 +838,15 @@ void gguf_close(struct ctx_t *ctx)
 
 int init_token_table(struct ctx_t *ctx, int num_tokens)
 {
-	ctx->token_table = calloc(num_tokens, sizeof(unsigned char *));
-	ctx->token_lens = calloc(num_tokens, sizeof(int));
-	ctx->token_count = num_tokens;
+	ctx->tokenizer.token_table = calloc(num_tokens, sizeof(unsigned char *));
 
-	if (!ctx->token_table || !ctx->token_lens) {
+	ctx->tokenizer.token_lens = calloc(num_tokens, sizeof(int));
+	ctx->tokenizer.token_types = calloc(num_tokens, sizeof(int));
+	ctx->tokenizer.token_scores = calloc(num_tokens, sizeof(float));
+
+	ctx->tokenizer.token_count = num_tokens;
+
+	if (!ctx->tokenizer.token_table || !ctx->tokenizer.token_lens || !ctx->tokenizer.token_types) {
 		fprintf(stderr, "Failed to allocate token table\n");
 		return -1;
 	}
@@ -847,10 +859,10 @@ static inline bool is_special_token_fast(const char *s, size_t len)
 	return len >= 6 && s[0] == '<' && s[len - 1] == '>';
 }
 
-int gguf_metadata_read_tokens_embed(struct ctx_t *ctx, char *key)
+int gguf_metadata_read_token_embeds(struct ctx_t *ctx, char *key, int detect_special)
 {
 	struct gguf_metadata_kv_t *metadata = NULL;
-	uint64_t i, str_len;
+	uint64_t i, len;
 
 	for (i = 0; i < ctx->metadata_kv_count; i++) {
 		if (!strcmp(ctx->metadata[i].name, key)) {
@@ -878,40 +890,125 @@ int gguf_metadata_read_tokens_embed(struct ctx_t *ctx, char *key)
 	}
 
 	for (i = 0; i < metadata->size; i++) {
-		memcpy(&str_len, ctx->fptr, sizeof(uint64_t));
+		memcpy(&len, ctx->fptr, sizeof(uint64_t));
 
 		ctx->fptr += sizeof(uint64_t);
 
 		const unsigned char *raw_token = (const unsigned char *)ctx->fptr;
 
-		unsigned char *token_ptr = ctx->pool->data + ctx->pool->size;
-		if (!append_to_pool(ctx->pool, raw_token, str_len)) {
+		unsigned char *token_ptr = ctx->tokenizer.pool->data + ctx->tokenizer.pool->size;
+		if (!append_to_pool(ctx->tokenizer.pool, raw_token, len)) {
 			printf("Failed to append token %llu to pool\n", i);
 			return -1;
 		}
 
-		ctx->token_table[i] = token_ptr;
-		ctx->token_lens[i] = str_len;
+		ctx->tokenizer.token_table[i] = token_ptr;
+		ctx->tokenizer.token_lens[i] = len;
 
-		insert_token(ctx->root, token_ptr, str_len, (int)i);
+		insert_token(ctx->tokenizer.root, token_ptr, len, (int)i);
 
 		// Detect special tokens
-		if (is_special_token_fast(token_ptr, str_len)) {
+		if (detect_special == 1) {
+		    if (is_special_token_fast(token_ptr, len)) {
 			if (special_tokens.count >= MAX_SPECIAL_TOKENS) {
 				printf("Too many special tokens\n");
 				return -1;
 			}
 			special_tokens.specials[special_tokens.count++] =
-				(SpecialToken){.text = token_ptr, .length = str_len, .token_id = (int)i};
+				(SpecialToken){.text = token_ptr, .length = len, .token_id = (int)i};
+		    }
 		}
 
-		ctx->fptr += str_len;
+		ctx->fptr += len;
 	}
 
 	return 0;
 }
 
-int gguf_metadata_read_merges(struct ctx_t *ctx, char *key)
+int gguf_metadata_read_token_types(struct ctx_t *ctx, char *key, int detect_special)
+{
+	struct gguf_metadata_kv_t *metadata = NULL;
+	uint64_t i;
+	uint32_t type;
+
+	for (i = 0; i < ctx->metadata_kv_count; i++) {
+		if (!strcmp(ctx->metadata[i].name, key)) {
+			metadata = &ctx->metadata[i];
+			break;
+		}
+	}
+
+	if (!metadata) {
+		printf("Failed to read %s\n", key);
+		return -1;
+	}
+
+	if (metadata->type != GGUF_METADATA_VALUE_TYPE_ARRAY) {
+		printf("%s has invalid type\n", key);
+		return -1;
+	}
+
+	ctx->fptr = metadata->arr_offset;
+
+	for (i = 0; i < metadata->size; i++) {
+		memcpy(&type, ctx->fptr, sizeof(int32_t));
+		ctx->fptr += sizeof(int32_t);
+
+		ctx->tokenizer.token_types[i] = type;
+
+		if (detect_special == 1)
+			continue;
+
+		if (type == GGUF_TOKEN_TYPE_CONTROL) {
+
+			special_tokens.specials[special_tokens.count++] = (SpecialToken)
+			{
+				.text = ctx->tokenizer.token_table[i],
+				.length = ctx->tokenizer.token_lens[i],
+				.token_id = (int)i
+	    		};
+		}
+	}
+
+	return 0;
+}
+
+int gguf_metadata_read_token_scores(struct ctx_t *ctx, char *key)
+{
+	struct gguf_metadata_kv_t *metadata = NULL;
+	uint64_t i;
+	float score;
+
+	for (i = 0; i < ctx->metadata_kv_count; i++) {
+		if (!strcmp(ctx->metadata[i].name, key)) {
+			metadata = &ctx->metadata[i];
+			break;
+		}
+	}
+
+	if (!metadata) {
+		printf("Failed to read %s\n", key);
+		return -1;
+	}
+
+	if (metadata->type != GGUF_METADATA_VALUE_TYPE_ARRAY) {
+		printf("%s has invalid type\n", key);
+		return -1;
+	}
+
+	ctx->fptr = metadata->arr_offset;
+
+	for (i = 0; i < metadata->size; i++) {
+		memcpy(&score, ctx->fptr, sizeof(float));
+		ctx->fptr += sizeof(float);
+
+		ctx->tokenizer.token_scores[i] = score;
+	}
+
+	return 0;
+}
+
+int gguf_metadata_read_token_merges(struct ctx_t *ctx, char *key)
 {
 	struct gguf_metadata_kv_t *metadata = NULL;
 	char merge_str[512];
@@ -964,8 +1061,8 @@ int gguf_metadata_read_merges(struct ctx_t *ctx, char *key)
 		const char *right = space + 1;
 
 		// 3. Lookup token IDs
-		int id1 = vocab_lookup_token_id(ctx->root, left, strlen(left));
-		int id2 = vocab_lookup_token_id(ctx->root, right, strlen(right));
+		int id1 = vocab_lookup_token_id(ctx->tokenizer.root, left, strlen(left));
+		int id2 = vocab_lookup_token_id(ctx->tokenizer.root, right, strlen(right));
 
 		// 4. Pack into key and insert
 		uint64_t key = ((uint64_t)id1 << 32) | (uint32_t)id2;
@@ -982,6 +1079,8 @@ size_t get_ggml_block_size(int type)
                 return sizeof(block_q4_k);
         case GGML_TYPE_Q6_K:
                 return sizeof(block_q6_k);
+        case GGML_TYPE_Q8_0:
+                return sizeof(block_q8_0);
         default:
                 printf("FATAL: MoE operates on unsupported tensor type %d\n", type);
                 return 0;
@@ -995,6 +1094,8 @@ size_t ggml_type_size(ggml_type type)
 		return sizeof(float);
 	case GGML_TYPE_BF16:
 		return sizeof(uint16_t);
+	case GGML_TYPE_Q8_0:
+                return sizeof(int8_t);
 	default:
                 printf("FATAL: Unknown size for type %d\n", type);
                 return 0;

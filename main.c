@@ -1,4 +1,3 @@
-#include <immintrin.h>
 #include <assert.h>
 #include <fcntl.h>
 #include <float.h>
@@ -23,6 +22,11 @@
 #include "predict.h"
 #include "tokenize.h"
 #include "version.h"
+
+#ifdef CONFIG_ENABLE_AVX2
+#include <immintrin.h>
+#endif
+
 
 #if 0
 #include <poll.h>
@@ -79,8 +83,8 @@ static char *set_lamp_state(const char *state)
 
 int tool_call_init(struct ctx_t *ctx, struct tool_call_t *tool_call)
 {
-	tool_call->token_start = vocab_lookup_token_id(ctx->root, "<tool_call>", 11);
-	tool_call->token_end = vocab_lookup_token_id(ctx->root, "</tool_call>", 12);
+	tool_call->token_start = vocab_lookup_token_id(ctx->tokenizer.root, "<tool_call>", 11);
+	tool_call->token_end = vocab_lookup_token_id(ctx->tokenizer.root, "</tool_call>", 12);
 	tool_call->len = 0;
 	tool_call->buffer[0] = '\0';
 	tool_call->state = TOOL_CALL_STATE_IDLE;
@@ -208,19 +212,40 @@ unsigned int decode_utf8(unsigned int *state, unsigned int *codep, unsigned char
 	return 0;
 }
 
+// Qwen3: needs UTF-8 streaming decode
+void token_out_qwen3(struct ctx_t *ctx, const char *p, int len)
+{
+	for (char *c = (char *)p; len > 0; c++, len--) {
+		unsigned int result = decode_utf8(&ctx->utf8_state, &ctx->utf8_codepoint, (unsigned char)*c);
+		if (result != 0 && result != 0xFFFD) {
+			printf("%c", result);
+		}
+	}
+}
+
+// Gemma3: SentencePiece detokenization
+void token_out_gemma3(struct ctx_t *ctx, const char *p, int len)
+{
+	for (int i = 0; i < len; i++) {
+		unsigned char ch = (unsigned char)p[i];
+		if (ch == 0xE2 && i + 2 < len && (unsigned char)p[i + 1] == 0x96 && (unsigned char)p[i + 2] == 0x81) {
+			// UTF-8 for "▁" (U+2581)
+			putchar(' ');
+			i += 2; // skip extra bytes
+		} else {
+			putchar(ch);
+		}
+	}
+}
+
 void generate_output(struct ctx_t *ctx, int current_token)
 {
 	const char *p = get_token_string(ctx, current_token);
 	int len = get_token_string_length(ctx, current_token);
 
-	for (char *c = (char *)p; len > 0; c++, len--) {
-		unsigned int result = decode_utf8(&ctx->utf8_state, &ctx->utf8_codepoint, (unsigned char)*c);
-		if (result != 0 && result != 0xFFFD) {
-			printf("%c", result);
-		} else if (result == 0xFFFD) {
-			printf("");
-		}
-	}
+	if (current_token != ctx->model->eos_token)
+		ctx->interface.token_out(ctx, p, len);
+
 	fflush(stdout);
 }
 
@@ -243,6 +268,10 @@ void process_prompt(struct ctx_t *ctx, int *prompt_tokens, size_t prompt_len)
 		hidden_state_slice = mem_slice(&ctx->mem.hidden_state, i * ctx->model->embed_dim);
 		dispatch_embedding_row(&ctx->model->token_embd, prompt_tokens[i], &hidden_state_slice,
 				       ctx->model->embed_dim);
+
+		if (ctx->interface.embedding_scale != NULL)
+			ctx->interface.embedding_scale(ctx, &hidden_state_slice);
+
 	}
 
 	for (int l = 0; l < ctx->model->num_layers; l++) {
@@ -272,6 +301,64 @@ static void enable_raw_mode(void)
 }
 #endif
 
+int *process_user_request(struct ctx_t *ctx, const char *input_buf, size_t *num_tokens)
+{
+	const size_t user_role_token_count = 1;
+	const size_t model_role_token_count = 1;
+	size_t user_text_token_count = 0;
+
+	int *user_text_tokens = ctx->interface.tokenize_prompt(ctx, input_buf, &user_text_token_count);
+	if (!user_text_tokens)
+		return NULL;
+
+	int *prompt_tokens = malloc(MAX_PROMPT_BATCH_SIZE * sizeof(int));
+	size_t prompt_len = 0;
+
+	// --- BOS ---
+	if (ctx->model->add_bos_token == 1 && ctx->model->bos_token_sent == 0) {
+		prompt_tokens[prompt_len++] = ctx->model->bos_token;
+		ctx->model->bos_token_sent = 1;
+	}
+
+	// --- Start of Turn: User ---
+	prompt_tokens[prompt_len++] = ctx->model->sot_token;
+	memcpy(&prompt_tokens[prompt_len], &ctx->model->role_user_token, user_role_token_count * sizeof(int));
+	prompt_len += user_role_token_count;
+	prompt_tokens[prompt_len++] = ctx->model->newline_token;
+
+	// --- User's actual message ---
+	memcpy(&prompt_tokens[prompt_len], user_text_tokens, user_text_token_count * sizeof(int));
+	prompt_len += user_text_token_count;
+
+	// --- Start of Turn: Model ---
+	prompt_tokens[prompt_len++] = ctx->model->eot_token;
+	prompt_tokens[prompt_len++] = ctx->model->newline_token;
+	prompt_tokens[prompt_len++] = ctx->model->sot_token;
+	memcpy(&prompt_tokens[prompt_len], &ctx->model->role_model_token, model_role_token_count * sizeof(int));
+	prompt_len += model_role_token_count;
+	prompt_tokens[prompt_len++] = ctx->model->newline_token;
+
+	free(user_text_tokens);
+	*num_tokens = prompt_len;
+
+	char buf[256];
+	printf("Tokens: \n");
+
+	for (int i = 0; i < prompt_len; i++) {
+		memset(buf, 0, 256);
+
+		int token_length = get_token_string_length(ctx, prompt_tokens[i]);
+		const unsigned char *token_str = get_token_string(ctx, prompt_tokens[i]);
+
+		memcpy(buf, token_str, token_length < 256 ? token_length : 0);
+
+		printf("#%u - %u, [%s]\n", i, prompt_tokens[i], buf);
+	}
+
+	return prompt_tokens;
+}
+
+
 void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 {
 	char input_buf[2048];
@@ -280,21 +367,28 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 	int gen_len;
 	struct tool_call_t tool_call;
 	Tensor *output_tensor = ctx->model->output.mem.data == NULL ? &ctx->model->token_embd : &ctx->model->output;
+	ctx->model->bos_token_sent = 0;
+	int *prompt_tokens;
 
 	// Initialize tool call handling
 	tool_call_init(ctx, &tool_call);
 
 #if 0
-	// Process system prompt immediately at start
-	size_t system_prompt_len = 0;
-	int *system_prompt_tokens = tokenize_bpe(ctx, system_prompt_with_tools, &system_prompt_len);
+	if (ctx->model->arch == ARCH_QWEN3) {
+	    // Process system prompt immediately at start
+	    size_t system_prompt_len = 0;
 
-	printf("--- Processing System Prompt: %zu tokens ---\n", system_prompt_len);
-	clock_gettime(CLOCK_REALTIME, &start);
-	process_prompt(ctx, system_prompt_tokens, system_prompt_len);
-	clock_gettime(CLOCK_REALTIME, &end);
-	printf("--- System Prompt Processed, time: %llu msec ---\n", elapsed_time_us(end, start) / 1000);
-	free(system_prompt_tokens);
+	    int *system_prompt_tokens = tokenize_bpe(ctx, system_prompt_with_tools, &system_prompt_len);
+
+	    printf("--- Processing System Prompt: %zu tokens ---\n", system_prompt_len);
+	    clock_gettime(CLOCK_REALTIME, &start);
+
+	    process_prompt(ctx, system_prompt_tokens, system_prompt_len);
+
+	    clock_gettime(CLOCK_REALTIME, &end);
+	    printf("--- System Prompt Processed, time: %llu msec ---\n", elapsed_time_us(end, start) / 1000);
+	    free(system_prompt_tokens);
+	}
 #endif
 
 	while (1) {
@@ -303,14 +397,14 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 
 			if (strncmp(input_buf, "exit", 4) == 0)
 				break;
-
-			snprintf(prompt_buf, sizeof(prompt_buf),
-				 "<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", input_buf);
 		} else {
-			snprintf(
-				prompt_buf, sizeof(prompt_buf),
-				"<|im_start|>user\n<tool_response>%s</tool_response><|im_end|>\n<|im_start|>assistant\n",
-				tool_call.result);
+
+			if (ctx->model->arch == ARCH_QWEN3) {
+				snprintf(
+					prompt_buf, sizeof(prompt_buf),
+					"<|im_start|>user\n<tool_response>%s</tool_response><|im_end|>\n<|im_start|>assistant\n",
+					tool_call.result);
+			}
 			tool_call.result = NULL;
 		}
 
@@ -322,8 +416,7 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 		}
 
 		size_t prompt_len = 0;
-
-		int *prompt_tokens = tokenize_bpe(ctx, prompt_buf, &prompt_len);
+		prompt_tokens = process_user_request(ctx, input_buf, &prompt_len);
 
 		printf("--- Prompt Processing at pos: %u (Matrix Mode) %zu tokens ---\n", ctx->kv_pos, prompt_len);
 		clock_gettime(CLOCK_REALTIME, &start);
@@ -336,11 +429,13 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 		       elapsed_time_us(end, start) / 1000);
 
 
-		printf("\n--- Generation Start (Max %d new tokens) ---\nQwen3: ", max_new_tokens);
+		printf("\n--- Generation Start (Max %d new tokens) ---\n%s: ", max_new_tokens,
+		       ctx->model->arch == ARCH_QWEN3 ? "Qwen3" : "Gemma3");
 		clock_gettime(CLOCK_REALTIME, &start);
 		gen_len = 0;
 
 		for (int step = 0; step < max_new_tokens; step++) {
+
 			if (ctx->kv_pos >= ctx->model->seq_length) {
 				printf("\nReached max sequence length.\n");
 				break;
@@ -349,11 +444,11 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 			dispatch_rms_norm(&ctx->mem.hidden_state, &ctx->model->output_norm, &ctx->mem.normed_ffn_input,
 					  ctx->model->embed_dim, ctx->model->norm_eps);
 
-			dispatch_mat_vec(&ctx->mem.normed_ffn_input, output_tensor, &ctx->mem.logits,
+			dispatch_mat_vec(ctx, &ctx->mem.normed_ffn_input, output_tensor, &ctx->mem.logits,
 					 ctx->model->embed_dim, ctx->model->vocab_size, true);
 
 			int next_token = predict_next_token((float *)ctx->mem.logits.data, ctx->model->vocab_size,
-							    "temperature", 0.7f, 20, 0.95f, prompt_tokens, prompt_len,
+							    "temperature", 0.7f, 64, 0.95f, prompt_tokens, prompt_len,
 							    generated_tokens, gen_len, ctx->model->repetition_penalty);
 
 			generate_output(ctx, next_token);
@@ -373,6 +468,9 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 			MemType hidden_state_slice = mem_slice(&ctx->mem.hidden_state, 0);
 			dispatch_embedding_row(&ctx->model->token_embd, next_token, &hidden_state_slice,
 					       ctx->model->embed_dim);
+
+			if (ctx->interface.embedding_scale != NULL)
+				ctx->interface.embedding_scale(ctx, &hidden_state_slice);
 
 			for (int l = 0; l < ctx->model->num_layers; l++) {
 				transformer_layer(ctx, l, 1);
@@ -403,6 +501,7 @@ static void print_usage(void)
 }
 
 #include "math_scalar.h"
+
 
 int main(int argc, char *argv[])
 {
@@ -457,8 +556,8 @@ int main(int argc, char *argv[])
 	if ((ctx = malloc(sizeof(struct ctx_t))) == NULL)
 		return -1;
 
-	ctx->root = create_node();
-	ctx->pool = create_string_pool(1024 * 1024 * 2);
+	ctx->tokenizer.root = create_node();
+	ctx->tokenizer.pool = create_string_pool(1024 * 1024 * 1);
 	ctx->utf8_state = 0;
 	ctx->utf8_codepoint = 0;
 
