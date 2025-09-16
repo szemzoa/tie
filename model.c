@@ -89,7 +89,7 @@ int model_load(struct ctx_t *ctx, int use_mmap, int context_length)
 	}
 	printf("set context_length: %u\n", ctx->model->seq_length);
 	LOAD_MODEL_PARAM(norm_eps, "attention.layer_norm_rms_epsilon");
-	LOAD_MODEL_PARAM(eos_token, "embedding_length");
+
 
 	/* Only GEMMA3 */
 	snprintf(name_buffer, sizeof(name_buffer), "%s.rope.scaling.factor", ctx->model->arch_name);
@@ -113,10 +113,10 @@ int model_load(struct ctx_t *ctx, int use_mmap, int context_length)
 	}
 #undef LOAD_MODEL_PARAM
 
-	gguf_get_metadata_value(ctx, "tokenizer.ggml.eos_token_id", &ctx->model->eos_token);
-	gguf_get_metadata_value(ctx, "tokenizer.ggml.bos_token_id", &ctx->model->bos_token);
-	gguf_get_metadata_value(ctx, "tokenizer.ggml.unknown_token_id", &ctx->model->unk_token);
-	gguf_get_metadata_value(ctx, "tokenizer.ggml.pad_token_id", &ctx->model->pad_token);
+	gguf_get_metadata_value(ctx, "tokenizer.ggml.eos_token_id", &ctx->model->eos_token_id);
+	gguf_get_metadata_value(ctx, "tokenizer.ggml.bos_token_id", &ctx->model->bos_token_id);
+	gguf_get_metadata_value(ctx, "tokenizer.ggml.unknown_token_id", &ctx->model->unk_token_id);
+	gguf_get_metadata_value(ctx, "tokenizer.ggml.pad_token_id", &ctx->model->pad_token_id);
 	gguf_get_metadata_value(ctx, "tokenizer.ggml.add_bos_token", &ctx->model->add_bos_token);
 	gguf_get_metadata_value(ctx, "tokenizer.ggml.add_eos_token", &ctx->model->add_eos_token);
 
@@ -298,11 +298,11 @@ int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penal
 	    case ARCH_QWEN3:
 		ctx->interface.tokenize_prompt = tokenize_bpe;
 		ctx->interface.token_out = token_out_qwen3;
-		ctx->model->sot_token = 151644;
-		ctx->model->eot_token = 151645;
-		ctx->model->newline_token = 198;
-		ctx->model->role_user_token = 872;
-		ctx->model->role_model_token = 77091;
+		ctx->model->sot_token_id = 151644;
+		ctx->model->eot_token_id = 151645;
+		ctx->model->newline_token_id = 198;
+		ctx->model->role_user_token_id = 872;
+		ctx->model->role_model_token_id = 77091;
 
 		ctx->interface.embedding_scale = NULL;
 		ctx->interface.activation = dispatch_swiglu_activation;
@@ -311,12 +311,12 @@ int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penal
 	    case ARCH_GEMMA3:
 		ctx->interface.tokenize_prompt = tokenize_sp;
 		ctx->interface.token_out = token_out_gemma3;
-		ctx->model->sot_token = 105;
-		ctx->model->eot_token = 106;
-		ctx->model->eos_token = 106;
-		ctx->model->newline_token = 107;
-		ctx->model->role_user_token = 2364;
-		ctx->model->role_model_token = 4368;
+		ctx->model->sot_token_id = 105;
+		ctx->model->eot_token_id = 106;
+		ctx->model->eos_token_id = 106;
+		ctx->model->newline_token_id = 107;
+		ctx->model->role_user_token_id = 2364;
+		ctx->model->role_model_token_id = 4368;
 
 		ctx->interface.embedding_scale = embedding_scale_gemma3;
 		ctx->interface.activation = dispatch_geglu_activation;
@@ -499,7 +499,7 @@ void model_cleanup(struct ctx_t *ctx, int use_mmap)
 	}
 	free(ctx->kv_cache);
 
-	if (use_mmap == 1) {
+	if (use_mmap == 0) {
 
 		free(ctx->model->token_embd.mem.data);
 		free(ctx->model->output_norm.mem.data);

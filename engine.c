@@ -12,22 +12,16 @@
 typedef struct {
 	struct ctx_t *ctx;
 	int layer_idx;
-	int pos;
-	int head_start;
-	int head_end;
+	int batch_start_pos;
+	AttentionType attn_type;
 	int thread_id;
-	AttentionType attn_type;
-} attention_task_t;
 
-typedef struct {
-	struct ctx_t *ctx;
-	int layer_idx;
-	int start_token_idx; // The first token in the batch this thread will process
-	int end_token_idx;   // The last token (exclusive)
-	int batch_start_pos; // The absolute position of the beginning of the prompt batch
-	int thread_id;	     // The ID used to get a unique scratch buffer
-	AttentionType attn_type;
-} attention_batch_task_t;
+	// These define the chunk of work
+	int token_start_idx; // First token this thread works on
+	int token_end_idx;   // Last token (exclusive)
+	int head_start;	     // First head this thread works on
+	int head_end;	     // Last head (exclusive)
+} attention_worker_task_t;
 
 typedef struct {
 	struct ctx_t *ctx;
@@ -143,13 +137,13 @@ void embedding_scale_gemma3(struct ctx_t *ctx, MemType *hidden_state_slice)
 {
 	float *hidden_data_fp32;
 
-	    float scale = sqrtf((float)ctx->model->embed_dim);
-	    hidden_data_fp32 = (float *)hidden_state_slice->data;
-	    for (int j = 0; j < ctx->model->embed_dim; j++) {
-		    float val = hidden_data_fp32[j];
-		    val *= scale;
-		    hidden_data_fp32[j] = val;
-	    }
+	float scale = sqrtf((float)ctx->model->embed_dim);
+	hidden_data_fp32 = (float *)hidden_state_slice->data;
+	for (int j = 0; j < ctx->model->embed_dim; j++) {
+		float val = hidden_data_fp32[j];
+		val *= scale;
+		hidden_data_fp32[j] = val;
+	}
 }
 
 static inline void *get_kv_head(const MemType *cache, int t, int kv_head_idx, int head_dim, int num_kv_heads)
@@ -160,133 +154,10 @@ static inline void *get_kv_head(const MemType *cache, int t, int kv_head_idx, in
 	return (uint8_t *)cache->data + offset_elements * element_size;
 }
 
-static void attention_task(void *arg)
+static void attention_worker(void *arg)
 {
-	attention_task_t *task = (attention_task_t *)arg;
+	attention_worker_task_t *task = (attention_worker_task_t *)arg;
 	struct ctx_t *ctx = task->ctx;
-	int current_pos = task->pos;
-	LayerKVCache *cache = &ctx->kv_cache[task->layer_idx];
-	AttentionType attn_type = task->attn_type;
-
-	// Get this thread's private scratch buffers
-	MemType *q_head_fp32_scratch = &ctx->mem.q_head_fp32_scratch[task->thread_id];
-	float *attn_scores_buffer = ctx->mem.attn_scores_buffer[task->thread_id];
-
-	for (int h = task->head_start; h < task->head_end; h++) {
-		// Create slices for the specific Q and Output heads upfront
-		MemType q_head_slice = mem_slice(&ctx->mem.Q, (size_t)h * ctx->model->head_dim);
-		MemType out_head_slice = mem_slice(&ctx->mem.attn_output, (size_t)h * ctx->model->head_dim);
-
-		// Convert the source Q-head to FP32
-		dispatch_convert(&q_head_slice, q_head_fp32_scratch, ctx->model->head_dim);
-
-		// PRE-SCALE THE QUERY
-		if (ctx->model->arch == ARCH_GEMMA3) {
-			ctx->model->attn_scale = 1.0f;
-
-			float q_scale = 1.0f / sqrtf((float)ctx->model->head_dim);
-			float *q_fp32_data = (float *)q_head_fp32_scratch->data;
-			for (int i = 0; i < ctx->model->head_dim; i++) {
-				q_fp32_data[i] *= q_scale;
-			}
-		}
-
-		// Determine the KV head index for this Q head (for GQA)
-		int kv_head_idx = h / (ctx->model->num_heads / ctx->model->num_kv_heads);
-
-		// Calculate Raw Attention Scores
-		// Calculate the dot product of the current Q-head with all previous K-heads in the cache
-		for (int t = 0; t <= current_pos; t++) {
-
-			bool can_attend = false;
-
-			if (attn_type == ATTN_TYPE_GLOBAL) {
-				// Global attention only needs the standard causal mask,
-				// which the loop condition (t <= absolute_pos) already enforces.
-				can_attend = true;
-
-			} else {
-
-				// Local attention needs the causal mask AND the sliding window check.
-				int sliding_window_start = (int)current_pos - (int)ctx->model->attn_sliding_window;
-				if (t >= sliding_window_start) {
-					can_attend = true;
-				}
-			}
-
-			if (can_attend) {
-
-				void *k_head = get_kv_head(&cache->k, t, kv_head_idx, ctx->model->head_dim,
-							   ctx->model->num_kv_heads);
-
-				MemType k_head_slice = {.type = cache->k.type, .data = (void *)k_head};
-
-				float score =
-					dispatch_dot_product(q_head_fp32_scratch, &k_head_slice, ctx->model->head_dim);
-
-				attn_scores_buffer[t] = score * ctx->model->attn_scale;
-
-			} else {
-				attn_scores_buffer[t] = -INFINITY;
-			}
-		}
-
-		bool all_scores_are_masked = true;
-		for (int t = 0; t <= current_pos; t++) {
-			if (attn_scores_buffer[t] > -INFINITY) {
-				all_scores_are_masked = false;
-				break;
-			}
-		}
-
-		if (all_scores_are_masked && current_pos > 0) {
-			printf("WARNING: All keys were masked for query at current_pos %d in layer %d!\n", current_pos,
-			       task->layer_idx);
-		}
-
-		// Calculate Softmax
-		float max_score = -INFINITY;
-		for (int t = 0; t <= current_pos; t++) {
-			if (attn_scores_buffer[t] > max_score) {
-				max_score = attn_scores_buffer[t];
-			}
-		}
-
-		float sum_exp = 0.0f;
-		for (int t = 0; t <= current_pos; t++) {
-			// Exponentiate with max score subtraction for numerical stability
-			float val = expf(attn_scores_buffer[t] - max_score);
-			attn_scores_buffer[t] = val;	    // Store the exponentiated value
-			sum_exp = fmaf(val, 1.0f, sum_exp); // Accumulate sum using FMA
-		}
-
-		float inv_sum_exp = 1.0f / sum_exp;
-
-		// Calculate Weighted Sum of V-vectors
-		memset(out_head_slice.data, 0, ctx->model->head_dim * ggml_type_size(out_head_slice.type));
-
-		for (int t = 0; t <= current_pos; t++) {
-			void *v_head_ptr =
-				get_kv_head(&cache->v, t, kv_head_idx, ctx->model->head_dim, ctx->model->num_kv_heads);
-
-			float attention_weight = attn_scores_buffer[t] * inv_sum_exp;
-
-			// Create a MemType view of the data from the KV cache
-			MemType v_head_slice = {.type = cache->v.type, .data = (void *)v_head_ptr};
-
-			dispatch_accumulate_weighted_V(&v_head_slice, &out_head_slice, attention_weight,
-						       ctx->model->head_dim);
-		}
-	}
-
-	free(task);
-}
-
-static void attention_batch_task(void *arg)
-{
-	attention_batch_task_t *task = (attention_batch_task_t *)arg;
-	struct ctx_t *ctx = task->ctx;
-	int batch_start_pos = task->batch_start_pos;
 	AttentionType attn_type = task->attn_type;
 
 	// Get model dimensions and memory type info
@@ -297,11 +168,13 @@ static void attention_batch_task(void *arg)
 	float *attn_scores_buffer = ctx->mem.attn_scores_buffer[task->thread_id];
 	MemType *q_head_fp32_scratch = &ctx->mem.q_head_fp32_scratch[task->thread_id];
 
-	// Each thread processes a *range* of query tokens from the prompt batch
-	for (int i = task->start_token_idx; i < task->end_token_idx; i++) {
-		int absolute_pos = batch_start_pos + i;
+	// Loop over the assigned range of tokens
+	for (int i = task->token_start_idx; i < task->token_end_idx; i++) {
+		int absolute_pos = task->batch_start_pos + i;
 
-		for (int h = 0; h < ctx->model->num_heads; h++) {
+		// Loop over the assigned range of heads
+		for (int h = task->head_start; h < task->head_end; h++) {
+
 			// Calculate the pointer to the source Q-head
 			MemType q_head_slice = mem_slice(&ctx->mem.Q, (size_t)i * q_dim + h * ctx->model->head_dim);
 			MemType out_head_slice =
@@ -409,64 +282,67 @@ static void attention_batch_task(void *arg)
 	free(task);
 }
 
-void attention_parallel(struct ctx_t *ctx, int layer_idx, int current_pos, AttentionType attn_type)
+void attention(struct ctx_t *ctx, int batch_len, int layer_idx, int start_pos, AttentionType attn_type)
 {
 	int num_threads = thread_pool->num_threads;
-	int heads_per_thread = (ctx->model->num_heads + num_threads - 1) / num_threads;
 
-	for (int t = 0; t < num_threads; t++) {
-		int head_start = t * heads_per_thread;
-		int head_end = head_start + heads_per_thread;
-		if (head_end > ctx->model->num_heads) {
-			head_end = ctx->model->num_heads;
-		}
-		if (head_start >= head_end) {
-			break;
+	// Parallelize over HEADS
+	if (batch_len == 1) {
+		int heads_per_thread = (ctx->model->num_heads + num_threads - 1) / num_threads;
+
+		for (int t = 0; t < num_threads; t++) {
+			int head_start = t * heads_per_thread;
+			int head_end = head_start + heads_per_thread;
+			if (head_end > ctx->model->num_heads)
+				head_end = ctx->model->num_heads;
+			if (head_start >= head_end)
+				break;
+
+			attention_worker_task_t *task = malloc(sizeof(attention_worker_task_t));
+			*task = (attention_worker_task_t){
+				.ctx = ctx,
+				.layer_idx = layer_idx,
+				.batch_start_pos = start_pos,
+				.attn_type = attn_type,
+				.thread_id = t,
+				.token_start_idx = 0,	  // Process the single token at index 0
+				.token_end_idx = 1,	  //
+				.head_start = head_start, // Each thread gets a different slice of heads
+				.head_end = head_end,	  //
+			};
+			thread_pool_submit(thread_pool, attention_worker, task);
 		}
 
-		attention_task_t *task = malloc(sizeof(attention_task_t));
-		if (!task) {
-			fprintf(stderr, "ERROR: Failed to allocate memory for attention_task\n");
-			continue;
-		}
-
-		*task = (attention_task_t){.ctx = ctx,
-					   .layer_idx = layer_idx,
-					   .pos = current_pos,
-					   .head_start = head_start,
-					   .head_end = head_end,
-					   .thread_id = t,
-					   .attn_type = attn_type};
-		thread_pool_submit(thread_pool, attention_task, task);
+		thread_pool_wait(thread_pool);
+		return;
 	}
 
-	thread_pool_wait(thread_pool);
-}
-
-void attention_batch(struct ctx_t *ctx, int batch_len, int layer_idx, int start_pos, AttentionType attn_type)
-{
-	int num_threads = thread_pool->num_threads;
+	// Parallelize over TOKENS
 	int tokens_per_thread = (batch_len + num_threads - 1) / num_threads;
 
 	for (int t = 0; t < num_threads; t++) {
-		int start_token = t * tokens_per_thread;
-		int end_token = start_token + tokens_per_thread;
-
-		if (start_token >= batch_len)
+		int token_start = t * tokens_per_thread;
+		int token_end = token_start + tokens_per_thread;
+		if (token_end > batch_len)
+			token_end = batch_len;
+		if (token_start >= token_end)
 			break;
-		if (end_token > batch_len)
-			end_token = batch_len;
 
-		attention_batch_task_t *task = malloc(sizeof(attention_batch_task_t));
-		*task = (attention_batch_task_t){.ctx = ctx,
-						 .layer_idx = layer_idx,
-						 .start_token_idx = start_token,
-						 .end_token_idx = end_token,
-						 .batch_start_pos = start_pos, // Pass the absolute starting position
-						 .thread_id = t,
-						 .attn_type = attn_type};
-		thread_pool_submit(thread_pool, attention_batch_task, task);
+		attention_worker_task_t *task = malloc(sizeof(attention_worker_task_t));
+		*task = (attention_worker_task_t){
+			.ctx = ctx,
+			.layer_idx = layer_idx,
+			.batch_start_pos = start_pos,
+			.attn_type = attn_type,
+			.thread_id = t,
+			.token_start_idx = token_start,	   // Each thread gets a different slice of tokens
+			.token_end_idx = token_end,	   //
+			.head_start = 0,		   // Each thread processes all heads
+			.head_end = ctx->model->num_heads, //
+		};
+		thread_pool_submit(thread_pool, attention_worker, task);
 	}
+
 	thread_pool_wait(thread_pool);
 }
 
@@ -660,11 +536,7 @@ int transformer_layer(struct ctx_t *ctx, int layer_idx, int batch_len)
 	dispatch_store_KV_cache(ctx, layer_idx, start_pos, batch_len);
 
 	// Multi-Head Attention Calculation
-	if (batch_len == 1) {
-		attention_parallel(ctx, layer_idx, start_pos, attn_type);
-	} else {
-		attention_batch(ctx, batch_len, layer_idx, start_pos, attn_type);
-	}
+	attention(ctx, batch_len, layer_idx, start_pos, attn_type);
 
 	// Output projection
 	dispatch_mat_mat(ctx, &ctx->mem.attn_output, &l->attn_out, &ctx->mem.attn_proj_output, batch_len, q_dim,
@@ -796,7 +668,7 @@ int transformer_layer(struct ctx_t *ctx, int layer_idx, int batch_len)
 
 		/* Call the interface activation function */
 		ctx->interface.activation(&ctx->mem.gate_proj_output, &ctx->mem.up_proj_output,
-						  batch_len * ctx->model->ffn_dim);
+					  batch_len * ctx->model->ffn_dim);
 
 		// Down projection
 		dispatch_mat_mat(ctx, &ctx->mem.gate_proj_output, &l->ffn_down, &ctx->mem.ffn_down_output, batch_len,

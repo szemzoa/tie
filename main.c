@@ -37,6 +37,7 @@ static struct termios orig_termios;
 #define DEBOUNCE_MS 200
 #endif
 
+
 const char *system_prompt_with_tools =
 	"<|im_start|>system\n"
 	"You may call one or more functions to assist with the user query.\n"
@@ -160,7 +161,7 @@ int tool_call_handler(struct ctx_t *ctx, struct tool_call_t *tool_call, int toke
 		break;
 
 	case TOOL_CALL_STATE_END:
-		if (token == ctx->model->eos_token) {
+		if (token == ctx->model->eos_token_id) {
 			tool_call->result = execute_tool_from_buffer(tool_call->buffer);
 		}
 		tool_call->len = 0;
@@ -243,7 +244,7 @@ void generate_output(struct ctx_t *ctx, int current_token)
 	const char *p = get_token_string(ctx, current_token);
 	int len = get_token_string_length(ctx, current_token);
 
-	if (current_token != ctx->model->eos_token)
+	if (current_token != ctx->model->eos_token_id)
 		ctx->interface.token_out(ctx, p, len);
 
 	fflush(stdout);
@@ -303,8 +304,6 @@ static void enable_raw_mode(void)
 
 int *process_user_request(struct ctx_t *ctx, const char *input_buf, size_t *num_tokens)
 {
-	const size_t user_role_token_count = 1;
-	const size_t model_role_token_count = 1;
 	size_t user_text_token_count = 0;
 
 	int *user_text_tokens = ctx->interface.tokenize_prompt(ctx, input_buf, &user_text_token_count);
@@ -316,31 +315,31 @@ int *process_user_request(struct ctx_t *ctx, const char *input_buf, size_t *num_
 
 	// --- BOS ---
 	if (ctx->model->add_bos_token == 1 && ctx->model->bos_token_sent == 0) {
-		prompt_tokens[prompt_len++] = ctx->model->bos_token;
+		prompt_tokens[prompt_len++] = ctx->model->bos_token_id;
 		ctx->model->bos_token_sent = 1;
 	}
 
 	// --- Start of Turn: User ---
-	prompt_tokens[prompt_len++] = ctx->model->sot_token;
-	memcpy(&prompt_tokens[prompt_len], &ctx->model->role_user_token, user_role_token_count * sizeof(int));
-	prompt_len += user_role_token_count;
-	prompt_tokens[prompt_len++] = ctx->model->newline_token;
+	prompt_tokens[prompt_len++] = ctx->model->sot_token_id;
+	memcpy(&prompt_tokens[prompt_len], &ctx->model->role_user_token_id, sizeof(int));
+	prompt_len++;
+	prompt_tokens[prompt_len++] = ctx->model->newline_token_id;
 
 	// --- User's actual message ---
 	memcpy(&prompt_tokens[prompt_len], user_text_tokens, user_text_token_count * sizeof(int));
 	prompt_len += user_text_token_count;
 
 	// --- Start of Turn: Model ---
-	prompt_tokens[prompt_len++] = ctx->model->eot_token;
-	prompt_tokens[prompt_len++] = ctx->model->newline_token;
-	prompt_tokens[prompt_len++] = ctx->model->sot_token;
-	memcpy(&prompt_tokens[prompt_len], &ctx->model->role_model_token, model_role_token_count * sizeof(int));
-	prompt_len += model_role_token_count;
-	prompt_tokens[prompt_len++] = ctx->model->newline_token;
+	prompt_tokens[prompt_len++] = ctx->model->eot_token_id;
+	prompt_tokens[prompt_len++] = ctx->model->newline_token_id;
+	prompt_tokens[prompt_len++] = ctx->model->sot_token_id;
+	memcpy(&prompt_tokens[prompt_len], &ctx->model->role_model_token_id, sizeof(int));
+	prompt_len++;
+	prompt_tokens[prompt_len++] = ctx->model->newline_token_id;
 
 	free(user_text_tokens);
 	*num_tokens = prompt_len;
-
+#if 0
 	char buf[256];
 	printf("Tokens: \n");
 
@@ -354,7 +353,7 @@ int *process_user_request(struct ctx_t *ctx, const char *input_buf, size_t *num_
 
 		printf("#%u - %u, [%s]\n", i, prompt_tokens[i], buf);
 	}
-
+#endif
 	return prompt_tokens;
 }
 
@@ -458,7 +457,7 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 			if (gen_len < max_new_tokens)
 				generated_tokens[gen_len++] = next_token;
 
-			if (next_token == ctx->model->eos_token) {
+			if (next_token == ctx->model->eos_token_id) {
 				printf("\n--- EOS token reached ---\n");
 				tool_call_handler(ctx, &tool_call, next_token);
 				break;
@@ -499,9 +498,6 @@ static void print_usage(void)
 	printf("\t -c [context length]\r\n");
 	printf("\t -t [thread num]\r\n");
 }
-
-#include "math_scalar.h"
-
 
 int main(int argc, char *argv[])
 {
@@ -557,7 +553,7 @@ int main(int argc, char *argv[])
 		return -1;
 
 	ctx->tokenizer.root = create_node();
-	ctx->tokenizer.pool = create_string_pool(1024 * 1024 * 1);
+	ctx->tokenizer.pool = create_string_pool(1024 * 1024 * 4);
 	ctx->utf8_state = 0;
 	ctx->utf8_codepoint = 0;
 

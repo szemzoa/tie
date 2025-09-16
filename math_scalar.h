@@ -7,7 +7,6 @@ extern float bf16_to_fp32(uint16_t bf16);
 extern uint16_t fp32_to_bf16(float f);
 extern uint16_t fp32_to_bf16_rne(float f);
 extern float fp16_to_fp32(uint16_t h);
-//extern void get_scale_min_k4(int j, const uint8_t *scales, uint8_t *scale, int8_t *min);
 extern void get_scale_min_k4(int j, const uint8_t *scales, uint8_t *scale, uint8_t *min);
 
 extern float dot_product_f32_f32_scalar(const void *__restrict a, const void *__restrict b, int size);

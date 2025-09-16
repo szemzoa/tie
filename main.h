@@ -142,23 +142,20 @@ typedef struct {
 	uint64_t merges_size;
 	int seq_length;
 
-	int sot_token;		/* start of turn */
-	int eot_token;		/* end of turn */
-	int eos_token;		/* end of seq */
-	int bos_token;		/* begin of seq */
-	int unk_token;
-	int pad_token;
+	int sot_token_id;		/* start of turn */
+	int eot_token_id;		/* end of turn */
+	int eos_token_id;		/* end of seq */
+	int bos_token_id;		/* begin of seq */
+	int unk_token_id;
+	int pad_token_id;
+	int role_user_token_id;
+	int role_model_token_id;
+	int newline_token_id;
 	int add_bos_token;
 	int add_eos_token;
 	int bos_token_sent;
 
-	int role_user_token;
-	int role_model_token;
-	int newline_token;
-
-
 	float yarn_scale_factor;
-
 	float rope_scale_factor;      // GEMMA3
 	uint32_t attn_sliding_window; // GEMMA3
 
