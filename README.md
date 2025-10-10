@@ -97,7 +97,7 @@ Special tokens: 26
 
 - Clang or GCC (x86_64 with AVX2 + FMA)
 - 8GB RAM for 4B model
-- macOS
+- macOS, Linux
 
 ---
 
