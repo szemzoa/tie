@@ -5,6 +5,7 @@
 #include <string.h>
 #include <math.h>
 #include "model.h"
+#include "model_defs.h"
 #include "gguf.h"
 #include "main.h"
 #include "threadpool.h"
@@ -12,12 +13,42 @@
 #include "math_dispatch.h"
 
 
-int load_tensor(struct ctx_t *ctx, char *name, Tensor *tensor, int use_mmap)
+#define MAX_CHUNK_SIZE (1LL << 30) // 1073741824 bytes
+static ssize_t safe_pread(int fd, void *buf, uint64_t count, off_t offset)
+{
+	if (count == 0)
+		return 0;
+
+	ssize_t total_read = 0;
+	uint8_t *ptr = (uint8_t *)buf;
+
+	while (count > 0) {
+		size_t chunk = (count > MAX_CHUNK_SIZE) ? MAX_CHUNK_SIZE : (size_t)count;
+		ssize_t ret = pread(fd, ptr, chunk, offset);
+
+		if (ret < 0) {
+			return -1;
+		} else if (ret == 0) {
+			return total_read;
+		}
+
+		total_read += ret;
+		ptr += ret;
+		offset += ret;
+		count -= ret;
+	}
+
+	return total_read;
+}
+
+static int model_load_tensor(struct ctx_t *ctx, char *name, Tensor *tensor, int use_mmap)
 {
 	gguf_tensor *ggtensor;
 
-	if ((ggtensor = get_tensor(ctx, name)) == NULL)
+	if ((ggtensor = get_tensor(ctx, name)) == NULL) {
+		printf("tensor not found: %s\n", name);
 		return -1;
+	}
 
 	tensor->mem.type = ggtensor->type;
 	tensor->size_in_bytes = ggtensor->size;
@@ -28,90 +59,294 @@ int load_tensor(struct ctx_t *ctx, char *name, Tensor *tensor, int use_mmap)
 		tensor->is_mmaped = true;
 	} else {
 		// Allocate new memory and read the tensor data from the file
-		tensor->mem.data = aligned_alloc(128, ggtensor->size);
+		tensor->mem.data = aligned_alloc(32, ggtensor->size);
 		if (!tensor->mem.data) {
 			printf("%s OOM\n", __FUNCTION__);
 			return -1;
 		}
 
-		pread(ctx->fd, tensor->mem.data, ggtensor->size, ggtensor->offset + ctx->tensor_data_offset);
+		if (safe_pread(ctx->fd, tensor->mem.data, ggtensor->size, ggtensor->offset + ctx->tensor_data_offset)
+		    != ggtensor->size) {
+			printf("%s failed to read Tensor: %s\n", __FUNCTION__, name);
+			return -1;
+		}
+
 		tensor->is_mmaped = false;
 	}
 
 	ctx->tensor_loaded++;
+	return 0;
+}
+
+static const ModelDef *find_model_def(int arch)
+{
+	const ModelDef *def = NULL;
+
+	switch (arch) {
+	case ARCH_QWEN3:
+		def = &QWEN3_DEF;
+		break;
+
+	case ARCH_GEMMA3:
+		def = &GEMMA3_DEF;
+		break;
+
+	case ARCH_GEMMA3N:
+		def = &GEMMA3N_DEF;
+		break;
+	default:
+		fprintf(stderr, "Failed to detect model\n");
+		break;
+	}
+
+	return def;
+}
+
+int model_load_weights(struct ctx_t *ctx, int use_mmap, int context_length)
+{
+	const ModelDef *def;
+	char name_buffer[256];
+
+	ctx->tensor_loaded = 0;
+
+	if ((def = find_model_def(ctx->model->arch)) == NULL) {
+		fprintf(stderr, "Failed to find model defininition for load weights\n");
+		goto _model_load_error;
+	}
+
+	for (size_t i = 0; i < def->num_global_tensors; i++) {
+		const TensorDef *tdef = &def->global_tensors[i];
+
+		// Calculate the destination pointer into the main Model struct
+		Tensor *dest_tensor = (Tensor *)((uint8_t *)ctx->model + tdef->offset);
+
+		if (model_load_tensor(ctx, (char *)tdef->name_fmt, dest_tensor, use_mmap) != 0) {
+
+			if (tdef->flags & FLAG_OPTIONAL) {
+				// This is not an error, just print an info message
+				printf("Info: Optional tensor '%s' not found.\n", tdef->name_fmt);
+			} else {
+				fprintf(stderr, "Failed to load required tensor %s\n", tdef->name_fmt);
+				goto _model_load_error;
+			}
+		}
+	}
+
+	ctx->model->layers = calloc(ctx->model->num_layers, sizeof(layer_weights));
+
+	for (uint32_t block_idx = 0; block_idx < ctx->model->num_layers; block_idx++) {
+		for (size_t i = 0; i < def->num_layer_tensors; i++) {
+			const TensorDef *tdef = &def->layer_tensors[i];
+
+			if ((tdef->flags & FLAG_DENSE_ONLY) && ctx->model->is_moe)
+				continue;
+
+			if ((tdef->flags & FLAG_MOE_ONLY) && !ctx->model->is_moe)
+				continue;
+
+			layer_weights *layer = &ctx->model->layers[block_idx];
+			Tensor *dest_tensor = (Tensor *)((uint8_t *)layer + tdef->offset);
+
+			snprintf(name_buffer, sizeof(name_buffer), tdef->name_fmt, block_idx);
+			if (model_load_tensor(ctx, name_buffer, dest_tensor, use_mmap) != 0) {
+
+				if (tdef->flags & FLAG_OPTIONAL) {
+					// This is not an error, just print an info message
+					printf("Info: Optional tensor '%s' not found.\n", tdef->name_fmt);
+				} else {
+					fprintf(stderr, "Failed to load required tensor %s\n", tdef->name_fmt);
+					goto _model_load_error_layer;
+				}
+			}
+		}
+	}
+
+	return 0;
+
+_model_load_error_layer:
+	free(ctx->model->layers);
+
+_model_load_error:
+	return -1;
+}
+
+int model_load_metadata(struct ctx_t *ctx)
+{
+	const ModelDef *def;
+	char key_buffer[256];
+
+	if ((def = find_model_def(ctx->model->arch)) == NULL) {
+		fprintf(stderr, "Failed to find model defininition for metadata\n");
+		goto _model_load_metadata_error;
+	}
+
+	for (size_t i = 0; i < def->num_metadata_defs; i++) {
+		const MetadataDef *mdef = &def->metadata_defs[i];
+
+		snprintf(key_buffer, sizeof(key_buffer), mdef->key_fmt, ctx->model->arch_name);
+
+		// Calculate the destination pointer in the Model struct
+		void *dest_ptr = (uint8_t *)ctx->model + mdef->offset;
+
+		if (gguf_get_metadata_value(ctx, key_buffer, dest_ptr) != 0) {
+			if (!mdef->is_optional) {
+				fprintf(stderr, "Failed to load required metadata key: %s\n", key_buffer);
+				goto _model_load_metadata_error;
+			}
+		}
+	}
+
+	/* fallbacks */
+	if (ctx->model->rope_scale_factor == 0.0f) {
+		ctx->model->rope_scale_factor = 1.0f;
+	}
+
+	if (ctx->model->expert_count != 0) {
+		ctx->model->is_moe = 1;
+	} else {
+		ctx->model->is_moe = 0;
+	}
+
+	printf("Info: %s model detected\n", ctx->model->is_moe == 0 ? "Dense" : "MoE");
+
+	return 0;
+
+_model_load_metadata_error:
+	return -1;
+}
+
+int model_mem_init(struct ctx_t *ctx)
+{
+	const ModelDef *def;
+
+	if ((def = find_model_def(ctx->model->arch)) == NULL) {
+		fprintf(stderr, "Failed to find model defininition for memory init\n");
+		return -1;
+	}
+
+	printf("Initializing memory buffers...\n");
+
+	// Standard Buffers
+	for (size_t i = 0; i < def->num_buffer_defs; i++) {
+		const BufferDef *bdef = &def->buffer_defs[i];
+
+		// Skip conditional buffers if the condition isn't met
+		if ((bdef->flags & FLAG_MOE_ONLY) && !ctx->model->is_moe)
+			continue;
+
+		MemType *dest_buffer = (MemType *)((uint8_t *)&ctx->mem + bdef->offset);
+		size_t size_multiplier = 0;
+
+		// Resolve size type to runtime value
+		switch (bdef->size_type) {
+
+		case SIZE_EMBED_DIM:
+			size_multiplier = ctx->model->embed_dim;
+			break;
+		case SIZE_VOCAB_SIZE:
+			size_multiplier = ctx->model->vocab_size;
+			break;
+		case SIZE_FFN_DIM:
+			size_multiplier = ctx->model->ffn_dim;
+			break;
+		case SIZE_Q_DIM:
+			size_multiplier = ctx->model->num_heads * ctx->model->head_dim;
+			break;
+		case SIZE_KV_DIM:
+			size_multiplier = ctx->model->num_kv_heads * ctx->model->head_dim;
+			break;
+		case SIZE_NUM_LAYERS_X_PLI_DIM:
+			size_multiplier = ctx->model->num_layers * ctx->model->pli_dim;
+			break;
+			//            case SIZE_EXPERT_COUNT: size_multiplier = ctx->model->expert_count;
+			//        	    break;
+		}
+
+		alloc_memtype(dest_buffer, bdef->type, size_multiplier * MAX_PROMPT_BATCH_SIZE);
+	}
+
+	// Explicit Block for Special MoE Array Buffers
+	if (ctx->model->is_moe) {
+
+		alloc_memtype(&ctx->mem.expert_scores, GGML_TYPE_F32, ctx->model->expert_count);
+		alloc_memtype(&ctx->mem.expert_out_fp32, GGML_TYPE_F32, ctx->model->embed_dim);
+
+		ctx->mem.ffn_hidden1_scratch = malloc(ctx->model->expert_count * sizeof(MemType));
+		ctx->mem.ffn_hidden2_scratch = malloc(ctx->model->expert_count * sizeof(MemType));
+		ctx->mem.expert_outputs = malloc(ctx->model->expert_count * sizeof(MemType));
+		// ... null checks ...
+
+		for (int i = 0; i < ctx->model->expert_count; i++) {
+			alloc_memtype(&ctx->mem.ffn_hidden1_scratch[i], GGML_TYPE_BF16, ctx->model->expert_ffn_dim);
+			alloc_memtype(&ctx->mem.ffn_hidden2_scratch[i], GGML_TYPE_BF16, ctx->model->expert_ffn_dim);
+			alloc_memtype(&ctx->mem.expert_outputs[i], GGML_TYPE_F32, ctx->model->embed_dim);
+		}
+	}
+
+	// Special Per-Thread Buffers
+	ctx->mem.q_head_fp32_scratch = malloc(thread_pool->num_threads * sizeof(MemType));
+	// ... null check ...
+
+	for (int t = 0; t < thread_pool->num_threads; t++) {
+		alloc_memtype(&ctx->mem.q_head_fp32_scratch[t], GGML_TYPE_F32, ctx->model->head_dim);
+		ctx->mem.attn_scores_buffer[t] = aligned_alloc(32, (long long)ctx->model->seq_length * sizeof(float));
+		// ... null check ...
+	}
+
+	// Special AltUp Buffers
+	if (ctx->model->altup_num_inputs > 0) {
+
+		ctx->mem.altup_hidden_states = malloc(ctx->model->altup_num_inputs * sizeof(MemType));
+		ctx->mem.altup_predicted_states = malloc(ctx->model->altup_num_inputs * sizeof(MemType));
+
+		for (int i = 0; i < ctx->model->altup_num_inputs; i++) {
+			alloc_memtype(&ctx->mem.altup_hidden_states[i], GGML_TYPE_F32,
+				      ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
+
+			alloc_memtype(&ctx->mem.altup_predicted_states[i], GGML_TYPE_F32,
+				      ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
+		}
+	}
 
 	return 0;
 }
 
 int model_load(struct ctx_t *ctx, int use_mmap, int context_length)
 {
-	char name_buffer[256];
+	int detect_special;
 
-	ctx->model = malloc(sizeof(Model));
-	if (!ctx->model) {
+	if ((ctx->model = malloc(sizeof(Model))) == NULL) {
 		perror("Failed to allocate model");
 		return -1;
 	}
+
 	ctx->model->arch = ARCH_UNKNOWN;
+	ctx->model->shared_kv_layers = 0;
+	ctx->model->final_logit_softcap = 0;
+	ctx->model->weight_layout = LAYOUT_ROW_MAJOR;
 
 	ctx->model->arch_name = gguf_get_metadata_string(ctx, "general.architecture");
 
-	if (strstr(ctx->model->arch_name, "gemma3"))
+	if (!strncmp(ctx->model->arch_name, "gemma3n", 7)) {
+		ctx->model->arch = ARCH_GEMMA3N;
+	} else if (strstr(ctx->model->arch_name, "gemma3")) {
 		ctx->model->arch = ARCH_GEMMA3;
-
-	if (strstr(ctx->model->arch_name, "qwen3") || strstr(ctx->model->arch_name, "qwen3moe"))
+	} else if (strstr(ctx->model->arch_name, "qwen3") || strstr(ctx->model->arch_name, "qwen3moe")) {
 		ctx->model->arch = ARCH_QWEN3;
-
-	if (ctx->model->arch == ARCH_UNKNOWN) {
+	} else {
 		perror("Failed to detect model");
 		free(ctx->model);
 		return -1;
 	}
 
-#define LOAD_MODEL_PARAM(field, metadata_name)                                                                         \
-	snprintf(name_buffer, sizeof(name_buffer), "%s.%s", ctx->model->arch_name, metadata_name);                     \
-	if (gguf_get_metadata_value(ctx, name_buffer, &ctx->model->field) != 0) {                                      \
-		fprintf(stderr, "Failed to load %s\n", name_buffer);                                                   \
-		goto _metadata_load_error;                                                                             \
+	if (model_load_metadata(ctx) != 0) {
+		goto _metadata_load_error;
 	}
 
-	LOAD_MODEL_PARAM(embed_dim, "embedding_length");
-	LOAD_MODEL_PARAM(num_layers, "block_count");
-	LOAD_MODEL_PARAM(num_heads, "attention.head_count");
-	LOAD_MODEL_PARAM(num_kv_heads, "attention.head_count_kv");
-	LOAD_MODEL_PARAM(head_dim, "attention.key_length");
-	LOAD_MODEL_PARAM(ffn_dim, "feed_forward_length");
-	LOAD_MODEL_PARAM(rope_freq_base, "rope.freq_base");
-	if (context_length == 0) {
-		LOAD_MODEL_PARAM(seq_length, "context_length");
-	} else {
+	if (context_length != 0) {
 		ctx->model->seq_length = context_length;
+		printf("set context_length: %u\n", ctx->model->seq_length);
 	}
-	printf("set context_length: %u\n", ctx->model->seq_length);
-	LOAD_MODEL_PARAM(norm_eps, "attention.layer_norm_rms_epsilon");
-
-
-	/* Only GEMMA3 */
-	snprintf(name_buffer, sizeof(name_buffer), "%s.rope.scaling.factor", ctx->model->arch_name);
-	gguf_get_metadata_value(ctx, name_buffer, &ctx->model->rope_scale_factor);
-	if (ctx->model->rope_scale_factor == 0.0f)
-		ctx->model->rope_scale_factor = 1.0f;
-
-	/* Only GEMMA3 */
-	snprintf(name_buffer, sizeof(name_buffer), "%s.attention.sliding_window", ctx->model->arch_name);
-	gguf_get_metadata_value(ctx, name_buffer, &ctx->model->attn_sliding_window);
-
-
-	snprintf(name_buffer, sizeof(name_buffer), "%s.expert_count", ctx->model->arch_name);
-	if (gguf_get_metadata_value(ctx, name_buffer, &ctx->model->expert_count) != 0) {
-		ctx->model->is_moe = 0;
-	} else {
-		ctx->model->is_moe = 1;
-
-		LOAD_MODEL_PARAM(expert_used_count, "expert_used_count");
-		LOAD_MODEL_PARAM(expert_ffn_dim, "expert_feed_forward_length");
-	}
-#undef LOAD_MODEL_PARAM
 
 	gguf_get_metadata_value(ctx, "tokenizer.ggml.eos_token_id", &ctx->model->eos_token_id);
 	gguf_get_metadata_value(ctx, "tokenizer.ggml.bos_token_id", &ctx->model->bos_token_id);
@@ -120,32 +355,34 @@ int model_load(struct ctx_t *ctx, int use_mmap, int context_length)
 	gguf_get_metadata_value(ctx, "tokenizer.ggml.add_bos_token", &ctx->model->add_bos_token);
 	gguf_get_metadata_value(ctx, "tokenizer.ggml.add_eos_token", &ctx->model->add_eos_token);
 
+	detect_special = 0;
+	if (ctx->model->arch == ARCH_QWEN3)
+		detect_special = 1;
+
 	/* load tokens */
-	if (gguf_metadata_read_token_embeds(ctx, "tokenizer.ggml.tokens", ctx->model->arch == ARCH_GEMMA3 ? 0 : 1)
-	    != 0) {
+	if (gguf_metadata_read_token_embeds(ctx, "tokenizer.ggml.tokens", detect_special) != 0) {
 		free(ctx->model);
 		perror("Failed to read tokens_embed array");
 		return -1;
 	}
 
 	/* load token types */
-	if (gguf_metadata_read_token_types(ctx, "tokenizer.ggml.token_type", ctx->model->arch == ARCH_GEMMA3 ? 0 : 1)
-	    != 0) {
+	if (gguf_metadata_read_token_types(ctx, "tokenizer.ggml.token_type", detect_special) != 0) {
 		free(ctx->model);
 		perror("Failed to read ggml.type array");
 		return -1;
 	}
-
 	printf("Found %u special tokens\n", special_tokens.count);
-/*
-	for (int i = 0; i < special_tokens.count; i++) {
-	    char buf[256];
-	    memset(buf, 0, 256);
-	    memcpy(buf, special_tokens.specials[i].text, special_tokens.specials[i].length);
 
-	    printf("#%u token_id = %u, token_string: %s\n", i, special_tokens.specials[i].token_id, buf);
-	}
-*/
+	/*
+		for (int i = 0; i < special_tokens.count; i++) {
+		    char buf[256];
+		    memset(buf, 0, 256);
+		    memcpy(buf, special_tokens.specials[i].text, special_tokens.specials[i].length);
+
+		    printf("#%u token_id = %u, token_string: %s\n", i, special_tokens.specials[i].token_id, buf);
+		}
+	*/
 
 	/* load token merges */
 	if (ctx->model->arch == ARCH_QWEN3) {
@@ -157,7 +394,7 @@ int model_load(struct ctx_t *ctx, int use_mmap, int context_length)
 	}
 
 	/* load token scores */
-	if (ctx->model->arch == ARCH_GEMMA3) {
+	if (detect_special == 0) {
 		if (gguf_metadata_read_token_scores(ctx, "tokenizer.ggml.scores") != 0) {
 			free(ctx->model);
 			perror("Failed to read ggml.scores array");
@@ -165,74 +402,18 @@ int model_load(struct ctx_t *ctx, int use_mmap, int context_length)
 		}
 	}
 
-	ctx->tensor_loaded = 0;
-
-	if (load_tensor(ctx, "token_embd.weight", &ctx->model->token_embd, use_mmap) != 0) {
-		fprintf(stderr, "Failed to load token_embd.weight\n");
+	if (model_load_weights(ctx, use_mmap, context_length) != 0) {
+		printf("Failed to load model weights\n");
 		free(ctx->model);
 		return -1;
 	}
-
-	if (load_tensor(ctx, "output_norm.weight", &ctx->model->output_norm, use_mmap) != 0) {
-		fprintf(stderr, "Failed to load token_embd.weight\n");
-		free(ctx->model);
-		return -1;
-	}
-
-	if (load_tensor(ctx, "output.weight", &ctx->model->output, use_mmap) != 0) {
-		printf("Model using tied embedding, no output weight\n");
-	}
-
-	if ((ctx->model->layers = calloc(ctx->model->num_layers, sizeof(layer_weights))) == NULL) {
-		free(ctx->model);
-		perror("Failed to allocate layer_weights array");
-		free(ctx->model);
-		return -1;
-	}
-
-#define LOAD_LAYER_WEIGHT(field, name_fmt_str)                                                                         \
-	snprintf(name_buffer, sizeof(name_buffer), name_fmt_str, block_idx);                                           \
-	if (load_tensor(ctx, name_buffer, &ctx->model->layers[block_idx].field, use_mmap) != 0) {                      \
-		fprintf(stderr, "Failed to load %s\n", name_buffer);                                                   \
-		goto _tensor_load_error;                                                                               \
-	}
-
-	for (uint32_t block_idx = 0; block_idx < ctx->model->num_layers; block_idx++) {
-		LOAD_LAYER_WEIGHT(attn_q, "blk.%u.attn_q.weight");
-		LOAD_LAYER_WEIGHT(attn_k, "blk.%u.attn_k.weight");
-		LOAD_LAYER_WEIGHT(attn_v, "blk.%u.attn_v.weight");
-		LOAD_LAYER_WEIGHT(attn_norm, "blk.%u.attn_norm.weight");
-		LOAD_LAYER_WEIGHT(attn_q_norm, "blk.%u.attn_q_norm.weight");
-		LOAD_LAYER_WEIGHT(attn_k_norm, "blk.%u.attn_k_norm.weight");
-		LOAD_LAYER_WEIGHT(attn_out, "blk.%u.attn_output.weight");
-		LOAD_LAYER_WEIGHT(ffn_norm, "blk.%u.ffn_norm.weight");
-
-		if (ctx->model->is_moe == 0) {
-			LOAD_LAYER_WEIGHT(ffn_gate, "blk.%u.ffn_gate.weight");
-			LOAD_LAYER_WEIGHT(ffn_up, "blk.%u.ffn_up.weight");
-			LOAD_LAYER_WEIGHT(ffn_down, "blk.%u.ffn_down.weight");
-		} else {
-			LOAD_LAYER_WEIGHT(ffn_gate_inp, "blk.%u.ffn_gate_inp.weight");
-			LOAD_LAYER_WEIGHT(ffn_gate_exps, "blk.%u.ffn_gate_exps.weight");
-			LOAD_LAYER_WEIGHT(ffn_down_exps, "blk.%u.ffn_down_exps.weight");
-			LOAD_LAYER_WEIGHT(ffn_up_exps, "blk.%u.ffn_up_exps.weight");
-		}
-
-		if (ctx->model->arch == ARCH_GEMMA3) {
-			LOAD_LAYER_WEIGHT(post_attn_norm, "blk.%u.post_attention_norm.weight");
-			LOAD_LAYER_WEIGHT(post_ffw_norm, "blk.%u.post_ffw_norm.weight");
-		}
-	}
-#undef LOAD_LAYER_WEIGHT
 
 #ifdef DEBUG_TENSORS
 	dump_tensors(ctx);
 #endif
+
 	printf("Loaded %llu/%llu tensors\n", ctx->tensor_loaded, ctx->tensor_count);
 	return 0;
-
-_tensor_load_error:
-	free(ctx->model->layers);
 
 _metadata_load_error:
 	free(ctx->model);
@@ -240,87 +421,52 @@ _metadata_load_error:
 	return -1;
 }
 
-static inline void *xaligned_alloc(size_t alignment, size_t size_bytes)
+int init_KV_cache(struct ctx_t *ctx)
 {
-	// aligned_alloc requires size % alignment == 0
-	size_t padded = (size_bytes + (alignment - 1)) & ~(alignment - 1);
+	printf("Initializing KV cache\n");
 
-	void *p = NULL;
-	if (posix_memalign(&p, alignment, padded) != 0)
-		return NULL;
+	ctx->kv_cache = calloc(ctx->model->num_layers, sizeof(LayerKVCache));
 
-	return p;
-}
-
-static inline void create_internal_memory(MemType *m, ggml_type t, size_t nelems)
-{
-	m->type = t;
-	size_t total = nelems * ggml_type_size(t);
-	void *ptr = xaligned_alloc(32, total);
-	if (!ptr) {
-		fprintf(stderr, "ERROR: alloc %zu bytes for MemType failed\n", total);
-		exit(1);
+	if (!ctx->kv_cache) {
+		perror("Failed to allocate LayerKVCache array");
+		return -1;
 	}
-	m->data = ptr;
+
+	long long k_elements_per_layer =
+		(long long)ctx->model->seq_length * ctx->model->num_kv_heads * ctx->model->head_dim;
+
+	printf("KV cache elements per layer: %lld\n", k_elements_per_layer);
+	for (int i = 0; i < ctx->model->num_layers; i++) {
+		alloc_memtype(&ctx->kv_cache[i].k, GGML_TYPE_BF16, k_elements_per_layer);
+		alloc_memtype(&ctx->kv_cache[i].v, GGML_TYPE_BF16, k_elements_per_layer);
+
+		if (!ctx->kv_cache[i].k.data || !ctx->kv_cache[i].v.data) {
+			perror("Failed to allocate K or V cache for a layer");
+			for (int j = 0; j < i; ++j) {
+				free_memtype(&ctx->kv_cache[j].k);
+				free_memtype(&ctx->kv_cache[j].v);
+			}
+			free(ctx->kv_cache);
+			return -1;
+		}
+	}
+	printf("KV cache uses: %lld MB\n",
+	       (k_elements_per_layer * sizeof(uint16_t)) * 2 * ctx->model->num_layers / 1024 / 1024);
+
+	ctx->kv_pos = 0;
+	return 0;
 }
 
-static inline void release_internal_memory(MemType *m)
-{
-	free(m->data);
-}
 
 int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penality)
 {
+	const ModelDef *def;
 	char *general_name = gguf_get_metadata_string(ctx, "general.name");
 
-	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
-	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
 
-	ctx->model->yarn_scale_factor = yarn_scale_factor;
-	ctx->model->repetition_penalty = repetiton_penality;
-	ctx->model->attn_scale = 1.0f / sqrtf(ctx->model->head_dim);
-
-	printf("Initializing %s %s model with the following configuration:\n", general_name,
-	       ctx->model->is_moe == 0 ? "dense" : "MoE");
-	printf("Embed Dim: %d, Layers: %d, Heads: %d, KV Heads: %d, Head Dim: %d\n", ctx->model->embed_dim,
-	       ctx->model->num_layers, ctx->model->num_heads, ctx->model->num_kv_heads, ctx->model->head_dim);
-	printf("FFN Dim: %d, Rope Base: %.1f, Seq Len: %d, Vocab: %llu\n", ctx->model->ffn_dim,
-	       ctx->model->rope_freq_base, ctx->model->seq_length, ctx->model->vocab_size);
-	printf("Yarn Scale: %.2f, eps: %f, rope_scale: %.1f, sliding_window: %u\n", ctx->model->yarn_scale_factor,
-	       ctx->model->norm_eps, ctx->model->rope_scale_factor, ctx->model->attn_sliding_window);
-
-	if (ctx->model->is_moe == 1) {
-		printf("Expert Count: %d, Expert Used Count: %d, Expert FFN Dim: %d\n", ctx->model->expert_count,
-		       ctx->model->expert_used_count, ctx->model->expert_ffn_dim);
-	}
-
-	switch (ctx->model->arch) {
-	    case ARCH_QWEN3:
-		ctx->interface.tokenize_prompt = tokenize_bpe;
-		ctx->interface.token_out = token_out_qwen3;
-		ctx->model->sot_token_id = 151644;
-		ctx->model->eot_token_id = 151645;
-		ctx->model->newline_token_id = 198;
-		ctx->model->role_user_token_id = 872;
-		ctx->model->role_model_token_id = 77091;
-
-		ctx->interface.embedding_scale = NULL;
-		ctx->interface.activation = dispatch_swiglu_activation;
-		break;
-
-	    case ARCH_GEMMA3:
-		ctx->interface.tokenize_prompt = tokenize_sp;
-		ctx->interface.token_out = token_out_gemma3;
-		ctx->model->sot_token_id = 105;
-		ctx->model->eot_token_id = 106;
-		ctx->model->eos_token_id = 106;
-		ctx->model->newline_token_id = 107;
-		ctx->model->role_user_token_id = 2364;
-		ctx->model->role_model_token_id = 4368;
-
-		ctx->interface.embedding_scale = embedding_scale_gemma3;
-		ctx->interface.activation = dispatch_geglu_activation;
-		break;
+	if ((def = find_model_def(ctx->model->arch)) == NULL) {
+		perror("Failed to find model");
+		return -1;
 	}
 
 	// Initialize SiLU lookup table
@@ -334,203 +480,196 @@ int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penal
 		return -1;
 	}
 
-	rope_cache_init(ctx, ctx->rope_cache_global, ctx->model->seq_length, ctx->model->head_dim,
-			ctx->model->rope_freq_base);
+	ctx->model->name = def->name;
+	ctx->model->yarn_scale_factor = yarn_scale_factor;
+	ctx->model->repetition_penalty = repetiton_penality;
+	ctx->model->interface = def->interface;
+	ctx->model->sot_token_id = def->params.sot_token_id;
+	ctx->model->eot_token_id = def->params.eot_token_id;
+	ctx->model->eos_token_id = def->params.eos_token_id;
+	ctx->model->newline_token_id = def->params.newline_token_id;
+	ctx->model->role_user_token_id = def->params.role_user_token_id;
+	ctx->model->role_model_token_id = def->params.role_model_token_id;
+	ctx->model->shared_kv_layers = def->params.shared_kv_layers;
+	ctx->model->final_logit_softcap = def->params.final_logit_softcap;
 
-	/* Gemma3 local rope cache */
-	if (ctx->model->arch == ARCH_GEMMA3) {
-	    rope_cache_init(ctx, ctx->rope_cache_local, ctx->model->seq_length, ctx->model->head_dim, 10000.0f);
+	switch (ctx->model->arch) {
+	case ARCH_QWEN3:
+		ctx->model->attn_scale = 1.0f / sqrtf((float)ctx->model->head_dim);
+
+		rope_cache_init(ctx, ctx->rope_cache_global, ctx->model->seq_length, ctx->model->head_dim,
+				ctx->model->rope_freq_base, ctx->model->yarn_scale_factor);
+		break;
+
+	case ARCH_GEMMA3:
+		ctx->model->attn_scale = 1.0f;
+
+		rope_cache_init(ctx, ctx->rope_cache_global, ctx->model->seq_length, ctx->model->head_dim,
+				ctx->model->rope_freq_base, ctx->model->rope_scale_factor);
+
+		rope_cache_init(ctx, ctx->rope_cache_local, ctx->model->seq_length, ctx->model->head_dim, 10000.0f, 1.0f);
+		break;
+
+	case ARCH_GEMMA3N:
+		ctx->model->attn_scale = 1.0f;
+
+		if (ctx->model->num_layers == 30) {
+			ctx->model->shared_kv_layers = 10;
+			ctx->model->ffn_dim = 8192;
+		} else if (ctx->model->num_layers == 35) {
+			ctx->model->shared_kv_layers = 15;
+			ctx->model->ffn_dim = 16384;
+		}
+
+		rope_cache_init(ctx, ctx->rope_cache_global, ctx->model->seq_length, ctx->model->head_dim,
+				ctx->model->rope_freq_base, 1.0f);
+
+		rope_cache_init(ctx, ctx->rope_cache_local, ctx->model->seq_length, ctx->model->head_dim, 10000.0f, 1.0f);
+		break;
 	}
 
-	printf("Initializing KV cache\n");
-	ctx->kv_cache = calloc(ctx->model->num_layers, sizeof(LayerKVCache));
-	if (!ctx->kv_cache) {
-		perror("Failed to allocate LayerKVCache array");
+	if (init_KV_cache(ctx) != 0) {
 		free(ctx->rope_cache_local);
 		free(ctx->rope_cache_global);
 		return -1;
 	}
 
-	long long k_elements_per_layer =
-		(long long)ctx->model->seq_length * ctx->model->num_kv_heads * ctx->model->head_dim;
-
-	printf("KV cache elements per layer: %lld\n", k_elements_per_layer);
-	for (int i = 0; i < ctx->model->num_layers; i++) {
-		create_internal_memory(&ctx->kv_cache[i].k, GGML_TYPE_BF16, k_elements_per_layer);
-		create_internal_memory(&ctx->kv_cache[i].v, GGML_TYPE_BF16, k_elements_per_layer);
-
-		if (!ctx->kv_cache[i].k.data || !ctx->kv_cache[i].v.data) {
-			perror("Failed to allocate K or V cache for a layer");
-			for (int j = 0; j < i; ++j) {
-				release_internal_memory(&ctx->kv_cache[j].k);
-				release_internal_memory(&ctx->kv_cache[j].v);
-			}
-			free(ctx->kv_cache);
-			free(ctx->rope_cache_local);
-			free(ctx->rope_cache_global);
-			return -1;
+	if (model_mem_init(ctx) != 0) {
+		for (int i = 0; i < ctx->model->num_layers; i++) {
+			free_memtype(&ctx->kv_cache[i].k);
+			free_memtype(&ctx->kv_cache[i].v);
 		}
-	}
-	printf("KV cache uses: %lld MB\n",
-	       (k_elements_per_layer * sizeof(uint16_t)) * 2 * ctx->model->num_layers / 1024 / 1024);
 
-	/* create internal memories */
-	if (ctx->model->arch == ARCH_GEMMA3)
-		create_internal_memory(&ctx->mem.residual_stratch, INTERNAL_MEMORY_TYPE,
-				       ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
+		free(ctx->kv_cache);
+		free(ctx->rope_cache_local);
+		free(ctx->rope_cache_global);
 
-	create_internal_memory(&ctx->mem.hidden_state, INTERNAL_MEMORY_TYPE,
-			       ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
-
-	create_internal_memory(&ctx->mem.normed_qkv_input, INTERNAL_MEMORY_TYPE,
-			       ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
-
-	create_internal_memory(&ctx->mem.Q, INTERNAL_MEMORY_TYPE, q_dim * MAX_PROMPT_BATCH_SIZE);
-	create_internal_memory(&ctx->mem.K, INTERNAL_MEMORY_TYPE, kv_dim * MAX_PROMPT_BATCH_SIZE);
-	create_internal_memory(&ctx->mem.V, INTERNAL_MEMORY_TYPE, kv_dim * MAX_PROMPT_BATCH_SIZE);
-
-	create_internal_memory(&ctx->mem.attn_output, INTERNAL_MEMORY_TYPE, q_dim * MAX_PROMPT_BATCH_SIZE);
-	create_internal_memory(&ctx->mem.attn_proj_output, INTERNAL_MEMORY_TYPE,
-			       ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
-	create_internal_memory(&ctx->mem.normed_ffn_input, INTERNAL_MEMORY_TYPE,
-			       ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
-
-	create_internal_memory(&ctx->mem.gate_proj_output, INTERNAL_MEMORY_TYPE,
-			       ctx->model->ffn_dim * MAX_PROMPT_BATCH_SIZE);
-	create_internal_memory(&ctx->mem.up_proj_output, INTERNAL_MEMORY_TYPE,
-			       ctx->model->ffn_dim * MAX_PROMPT_BATCH_SIZE);
-	create_internal_memory(&ctx->mem.ffn_down_output, INTERNAL_MEMORY_TYPE,
-			       ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE);
-
-	create_internal_memory(&ctx->mem.logits, GGML_TYPE_F32, ctx->model->vocab_size);
-
-	if (ctx->model->is_moe == 1) {
-		create_internal_memory(&ctx->mem.expert_scores, GGML_TYPE_F32, ctx->model->expert_count);
-		create_internal_memory(&ctx->mem.expert_out_fp32, GGML_TYPE_F32, ctx->model->embed_dim);
-
-		ctx->mem.ffn_hidden1_scratch = aligned_alloc(32, ctx->model->expert_count * sizeof(MemType));
-		ctx->mem.ffn_hidden2_scratch = aligned_alloc(32, ctx->model->expert_count * sizeof(MemType));
-		ctx->mem.expert_outputs = aligned_alloc(32, ctx->model->expert_count * sizeof(MemType));
-
-		for (int i = 0; i < ctx->model->expert_count; i++) {
-			create_internal_memory(&ctx->mem.ffn_hidden1_scratch[i], GGML_TYPE_BF16,
-					       ctx->model->expert_ffn_dim);
-			create_internal_memory(&ctx->mem.ffn_hidden2_scratch[i], GGML_TYPE_BF16,
-					       ctx->model->expert_ffn_dim);
-			create_internal_memory(&ctx->mem.expert_outputs[i], GGML_TYPE_F32, ctx->model->embed_dim);
-		}
+		return -1;
 	}
 
-	ctx->mem.q_head_fp32_scratch = malloc(thread_pool->num_threads * sizeof(MemType));
+	printf("Initialized %s %s model with the following configuration:\n", general_name,
+	       ctx->model->is_moe == 0 ? "dense" : "MoE");
+	printf("Embed Dim: %d, Layers: %d, Heads: %d, KV Heads: %d, Head Dim: %d, Shared KV layers: %u\n",
+	       ctx->model->embed_dim, ctx->model->num_layers, ctx->model->num_heads, ctx->model->num_kv_heads,
+	       ctx->model->head_dim, ctx->model->shared_kv_layers);
+	printf("FFN Dim: %d, Rope Base: %.1f, Seq Len: %d, Vocab: %llu\n", ctx->model->ffn_dim,
+	       ctx->model->rope_freq_base, ctx->model->seq_length, ctx->model->vocab_size);
+	printf("Yarn Scale: %.2f, eps: %f, rope_scale: %.1f, sliding_window: %u\n", ctx->model->yarn_scale_factor,
+	       ctx->model->norm_eps, ctx->model->rope_scale_factor, ctx->model->attn_sliding_window);
+	if (ctx->model->is_moe == 1)
+		printf("Expert Count: %d, Expert Used Count: %d, Expert FFN Dim: %d\n", ctx->model->expert_count,
+		       ctx->model->expert_used_count, ctx->model->expert_ffn_dim);
+	if (ctx->model->altup_num_inputs > 0)
+		printf("Altup Num Inputs: %i\n", ctx->model->altup_num_inputs);
 
-	for (int t = 0; t < thread_pool->num_threads; t++) {
-
-		create_internal_memory(&ctx->mem.q_head_fp32_scratch[t], GGML_TYPE_F32, ctx->model->head_dim);
-
-		if ((ctx->mem.attn_scores_buffer[t] =
-			     aligned_alloc(32, (long long)ctx->model->seq_length * sizeof(float)))
-		    == NULL)
-
-			goto _init_error_free_kv_cache;
-	}
-
-	ctx->kv_pos = 0;
 	return 0;
-
-_init_error_free_kv_cache:
-	for (int i = 0; i < ctx->model->num_layers; i++) {
-		release_internal_memory(&ctx->kv_cache[i].k);
-		release_internal_memory(&ctx->kv_cache[i].v);
-	}
-
-	free(ctx->kv_cache);
-	free(ctx->rope_cache_local);
-	free(ctx->rope_cache_global);
-
-	return -1;
 }
 
 void model_cleanup(struct ctx_t *ctx, int use_mmap)
 {
-	if (ctx->model->arch == ARCH_GEMMA3)
-		release_internal_memory(&ctx->mem.residual_stratch);
-
-	release_internal_memory(&ctx->mem.hidden_state);
-	release_internal_memory(&ctx->mem.normed_qkv_input);
-	release_internal_memory(&ctx->mem.Q);
-	release_internal_memory(&ctx->mem.K);
-	release_internal_memory(&ctx->mem.V);
-	release_internal_memory(&ctx->mem.attn_output);
-	release_internal_memory(&ctx->mem.attn_proj_output);
-	release_internal_memory(&ctx->mem.normed_ffn_input);
-	release_internal_memory(&ctx->mem.gate_proj_output);
-	release_internal_memory(&ctx->mem.up_proj_output);
-	release_internal_memory(&ctx->mem.ffn_down_output);
-	release_internal_memory(&ctx->mem.logits);
-
-	for (int t = 0; t < thread_pool->num_threads; t++) {
-		release_internal_memory(&ctx->mem.q_head_fp32_scratch[t]);
-		free(ctx->mem.attn_scores_buffer[t]);
+	const ModelDef *def = find_model_def(ctx->model->arch);
+	if (!def) {
+		fprintf(stderr, "Error: Could not find model definition for cleanup.\n");
+		return;
 	}
 
-	free(ctx->mem.q_head_fp32_scratch);
+	printf("cleanup...\n");
 
+	// Standard Buffers
+	for (size_t i = 0; i < def->num_buffer_defs; i++) {
+		const BufferDef *bdef = &def->buffer_defs[i];
+		if ((bdef->flags & FLAG_MOE_ONLY) && !ctx->model->is_moe)
+			continue;
+		MemType *dest_buffer = (MemType *)((uint8_t *)&ctx->mem + bdef->offset);
+		free_memtype(dest_buffer);
+	}
+
+	// MoE Buffers
 	if (ctx->model->is_moe == 1) {
-
-		for (int i = 0; i < thread_pool->num_threads; i++) {
-			release_internal_memory(&ctx->mem.ffn_hidden1_scratch[i]);
-			release_internal_memory(&ctx->mem.ffn_hidden2_scratch[i]);
-			release_internal_memory(&ctx->mem.expert_outputs[i]);
+		for (int i = 0; i < ctx->model->expert_count; i++) {
+			free_memtype(&ctx->mem.ffn_hidden1_scratch[i]);
+			free_memtype(&ctx->mem.ffn_hidden2_scratch[i]);
+			free_memtype(&ctx->mem.expert_outputs[i]);
 		}
-
 		free(ctx->mem.ffn_hidden1_scratch);
 		free(ctx->mem.ffn_hidden2_scratch);
 		free(ctx->mem.expert_outputs);
 
-		release_internal_memory(&ctx->mem.expert_out_fp32);
-		release_internal_memory(&ctx->mem.expert_scores);
+		free_memtype(&ctx->mem.expert_out_fp32);
+		free_memtype(&ctx->mem.expert_scores);
 	}
 
-	thread_pool_destroy(thread_pool);
-
-	for (uint32_t i = 0; i < ctx->model->num_layers; i++) {
-		release_internal_memory(&ctx->kv_cache[i].k);
-		release_internal_memory(&ctx->kv_cache[i].v);
+	// Per-Thread Buffers
+	for (int t = 0; t < thread_pool->num_threads; t++) {
+		free_memtype(&ctx->mem.q_head_fp32_scratch[t]);
+		free(ctx->mem.attn_scores_buffer[t]);
 	}
-	free(ctx->kv_cache);
+	free(ctx->mem.q_head_fp32_scratch);
 
+	// AltUp Buffers
+	if (ctx->model->altup_num_inputs > 0) {
+		for (int i = 0; i < ctx->model->altup_num_inputs; i++) {
+			free_memtype(&ctx->mem.altup_hidden_states[i]);
+			free_memtype(&ctx->mem.altup_predicted_states[i]);
+		}
+		free(ctx->mem.altup_hidden_states);
+		free(ctx->mem.altup_predicted_states);
+	}
+
+	// Loaded Weights
 	if (use_mmap == 0) {
+		// Global Tensors
+		for (size_t i = 0; i < def->num_global_tensors; i++) {
+			const TensorDef *tdef = &def->global_tensors[i];
+			Tensor *dest_tensor = (Tensor *)((uint8_t *)ctx->model + tdef->offset);
+			if (dest_tensor->mem.data) {
+				free(dest_tensor->mem.data);
+			}
+		}
 
-		free(ctx->model->token_embd.mem.data);
-		free(ctx->model->output_norm.mem.data);
-
-		if (ctx->model->output.mem.data)
-			free(ctx->model->output.mem.data);
-
+		// Layer Tensors
 		for (uint32_t block_idx = 0; block_idx < ctx->model->num_layers; block_idx++) {
-			free(ctx->model->layers[block_idx].attn_q.mem.data);
-			free(ctx->model->layers[block_idx].attn_k.mem.data);
-			free(ctx->model->layers[block_idx].attn_v.mem.data);
-			free(ctx->model->layers[block_idx].attn_norm.mem.data);
-			free(ctx->model->layers[block_idx].attn_q_norm.mem.data);
-			free(ctx->model->layers[block_idx].attn_k_norm.mem.data);
-			free(ctx->model->layers[block_idx].attn_out.mem.data);
-			free(ctx->model->layers[block_idx].ffn_gate.mem.data);
-			free(ctx->model->layers[block_idx].ffn_up.mem.data);
-			free(ctx->model->layers[block_idx].ffn_down.mem.data);
-			free(ctx->model->layers[block_idx].ffn_norm.mem.data);
+			for (size_t i = 0; i < def->num_layer_tensors; i++) {
+				const TensorDef *tdef = &def->layer_tensors[i];
+				if ((tdef->flags & FLAG_DENSE_ONLY) && ctx->model->is_moe)
+					continue;
+				if ((tdef->flags & FLAG_MOE_ONLY) && !ctx->model->is_moe)
+					continue;
 
-			if (ctx->model->arch == ARCH_GEMMA3) {
-				free(ctx->model->layers[block_idx].post_attn_norm.mem.data);
-				free(ctx->model->layers[block_idx].post_ffw_norm.mem.data);
+				layer_weights *layer = &ctx->model->layers[block_idx];
+				Tensor *dest_tensor = (Tensor *)((uint8_t *)layer + tdef->offset);
+				if (dest_tensor->mem.data) {
+					free(dest_tensor->mem.data);
+				}
 			}
 		}
 	}
-
 	free(ctx->model->layers);
+
+	for (int i = 0; i < ctx->tensor_count; i++) {
+		gguf_tensor *tensor = &ctx->tensors[i];
+		free(tensor->name);
+	}
+	free(ctx->tensors);
+
+	for (uint32_t i = 0; i < ctx->model->num_layers; i++) {
+		free_memtype(&ctx->kv_cache[i].k);
+		free_memtype(&ctx->kv_cache[i].v);
+	}
+	free(ctx->kv_cache);
+
+	thread_pool_destroy(thread_pool);
 	free(ctx->model);
+
+	free(ctx->rope_cache_local->sin);
+	free(ctx->rope_cache_local->cos);
 	free(ctx->rope_cache_local);
-	free(ctx->rope_cache_global);
+
+	if (ctx->rope_cache_global) {
+		free(ctx->rope_cache_global->sin);
+		free(ctx->rope_cache_global->cos);
+		free(ctx->rope_cache_global);
+	}
 
 	free(ctx->tokenizer.token_table);
 	free(ctx->tokenizer.token_lens);

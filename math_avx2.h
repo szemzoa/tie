@@ -33,16 +33,17 @@ extern void mat_vec_row_f32_bf16_f32_avx2(const void *__restrict X, const void *
 					  int in_dim, int start_row, int end_row);
 extern void mat_vec_row_f32_f32_f32_avx2(const void *X, const void *w_void, void *O, int in_dim, int start_row,
 					 int end_row);
-extern void mat_vec_row_bf16_q4k_bf16_avx2(const void *X, const void *w_void, void *O, int in_dim, int start_row, int end_row);
-extern void mat_vec_row_bf16_q4k_f32_avx2(const void *X, const void *w_void, void *O, int in_dim, int start_row, int end_row);
-extern void mat_vec_row_bf16_q6k_bf16_avx2(const void *X, const void *w_void, void *O,
-								    int in_dim, int start_row, int end_row);
-extern void mat_vec_row_bf16_q6k_f32_avx2(const void *X, const void *w_void, void *O,
-								    int in_dim, int start_row, int end_row);
+extern void mat_vec_row_bf16_q4k_bf16_avx2(const void *X, const void *w_void, void *O, int in_dim, int start_row,
+					   int end_row);
+extern void mat_vec_row_bf16_q4k_f32_avx2(const void *X, const void *w_void, void *O, int in_dim, int start_row,
+					  int end_row);
+extern void mat_vec_row_bf16_q6k_bf16_avx2(const void *X, const void *w_void, void *O, int in_dim, int start_row,
+					   int end_row);
+extern void mat_vec_row_bf16_q6k_f32_avx2(const void *X, const void *w_void, void *O, int in_dim, int start_row,
+					  int end_row);
 
 extern void accumulate_weighted_V_f32_bf16_avx2(void *__restrict O, float weight, const void *__restrict V, int size);
-extern void accumulate_weighted_V_bf16_bf16_avx2(void *__restrict O, float weight,
-                                          const void *__restrict V, int size);
+extern void accumulate_weighted_V_bf16_bf16_avx2(void *__restrict O, float weight, const void *__restrict V, int size);
 
 extern void store_KV_cache_f32_bf16_avx2(struct ctx_t *ctx, int layer_idx, int start_pos, int batch_len);
 extern void store_KV_cache_bf16_bf16_avx2(struct ctx_t *ctx, int layer_idx, int start_pos, int batch_len);

@@ -508,3 +508,63 @@ _tokenize_sp_error:
 	*num_tokens = 0;
 	return NULL;
 }
+
+unsigned int decode_utf8(unsigned int *state, unsigned int *codep, unsigned char byte)
+{
+	if (*state == 0) {
+		if (byte < 0x80) {
+			*codep = byte;
+			return *codep;
+		} else if ((byte & 0xE0) == 0xC0) {
+			*state = 1;
+			*codep = byte & 0x1F;
+		} else if ((byte & 0xF0) == 0xE0) {
+			*state = 2;
+			*codep = byte & 0x0F;
+		} else if ((byte & 0xF8) == 0xF0) {
+			*state = 3;
+			*codep = byte & 0x07;
+		} else {
+			return 0xFFFD;
+		}
+	} else {
+		if ((byte & 0xC0) == 0x80) {
+			*codep = (*codep << 6) | (byte & 0x3F);
+			(*state)--;
+			if (*state == 0) {
+				return *codep;
+			}
+		} else {
+			*state = 0;
+			*codep = 0;
+			return 0xFFFD;
+		}
+	}
+	return 0;
+}
+
+// UTF-8 streaming decode
+void token_out_utf8_stream(struct ctx_t *ctx, const char *p, int len)
+{
+	for (char *c = (char *)p; len > 0; c++, len--) {
+		unsigned int result = decode_utf8(&ctx->utf8_state, &ctx->utf8_codepoint, (unsigned char)*c);
+		if (result != 0 && result != 0xFFFD) {
+			printf("%c", result);
+		}
+	}
+}
+
+// SentencePiece detokenization
+void token_out_sp(struct ctx_t *ctx, const char *p, int len)
+{
+	for (int i = 0; i < len; i++) {
+		unsigned char ch = (unsigned char)p[i];
+		if (ch == 0xE2 && i + 2 < len && (unsigned char)p[i + 1] == 0x96 && (unsigned char)p[i + 2] == 0x81) {
+			// UTF-8 for "▁" (U+2581)
+			putchar(' ');
+			i += 2; // skip extra bytes
+		} else {
+			putchar(ch);
+		}
+	}
+}

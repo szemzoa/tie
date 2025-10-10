@@ -15,6 +15,7 @@
 #include "threadpool.h"
 #include "tokenize.h"
 
+
 int gguf_read_metadata_type_uint8(struct ctx_t *ctx, struct gguf_metadata_kv_t *metadata)
 {
 	if ((metadata->data = (uint8_t *)malloc(sizeof(uint8_t))) == NULL) {
@@ -197,15 +198,17 @@ int gguf_read_metadata_type_array(struct ctx_t *ctx, struct gguf_metadata_kv_t *
 		if (type == GGUF_METADATA_VALUE_TYPE_INT32) {
 			val = *(uint32_t *)ctx->fptr;
 			ctx->fptr += sizeof(uint32_t);
-
-//			if (strstr(metadata->name, "tokenizer.ggml.token_type")) {
-//			    printf("[%s] #%llu: type: %d\n", metadata->name, i, val);
-//			}
 		}
 
 		if (type == GGUF_METADATA_VALUE_TYPE_FLOAT32) {
 			val = *(float *)ctx->fptr;
 			ctx->fptr += sizeof(float);
+		}
+
+		if (type == GGUF_METADATA_VALUE_TYPE_BOOL) {
+
+			val = *(uint8_t *)ctx->fptr;
+			ctx->fptr += sizeof(uint8_t);
 		}
 	}
 
@@ -223,6 +226,22 @@ int gguf_get_metadata_value(struct ctx_t *ctx, char *key, void *value)
 		if (!strcmp(ctx->metadata[i].name, key)) {
 			memcpy((void *)value, metadata->data, metadata->size);
 			return 0;
+		}
+	}
+
+	return -1;
+}
+
+int gguf_get_metadata_type(struct ctx_t *ctx, char *key)
+{
+	struct gguf_metadata_kv_t *metadata;
+	uint64_t i = 0;
+
+	for (i = 0; i < ctx->metadata_kv_count; i++) {
+		metadata = &ctx->metadata[i];
+
+		if (!strcmp(ctx->metadata[i].name, key)) {
+			return ctx->metadata[i].type;
 		}
 	}
 
@@ -468,6 +487,7 @@ int gguf_read_metadata(struct ctx_t *ctx)
 			return -1;
 		}
 		memset(metadata->name, 0, key_len + 1);
+
 
 		memcpy(metadata->name, ctx->fptr, key_len);
 		ctx->fptr += key_len;
@@ -909,14 +929,14 @@ int gguf_metadata_read_token_embeds(struct ctx_t *ctx, char *key, int detect_spe
 
 		// Detect special tokens
 		if (detect_special == 1) {
-		    if (is_special_token_fast(token_ptr, len)) {
-			if (special_tokens.count >= MAX_SPECIAL_TOKENS) {
-				printf("Too many special tokens\n");
-				return -1;
+			if (is_special_token_fast(token_ptr, len)) {
+				if (special_tokens.count >= MAX_SPECIAL_TOKENS) {
+					printf("Too many special tokens\n");
+					return -1;
+				}
+				special_tokens.specials[special_tokens.count++] =
+					(SpecialToken){.text = token_ptr, .length = len, .token_id = (int)i};
 			}
-			special_tokens.specials[special_tokens.count++] =
-				(SpecialToken){.text = token_ptr, .length = len, .token_id = (int)i};
-		    }
 		}
 
 		ctx->fptr += len;
@@ -961,12 +981,10 @@ int gguf_metadata_read_token_types(struct ctx_t *ctx, char *key, int detect_spec
 
 		if (type == GGUF_TOKEN_TYPE_CONTROL) {
 
-			special_tokens.specials[special_tokens.count++] = (SpecialToken)
-			{
-				.text = ctx->tokenizer.token_table[i],
-				.length = ctx->tokenizer.token_lens[i],
-				.token_id = (int)i
-	    		};
+			special_tokens.specials[special_tokens.count++] =
+				(SpecialToken){.text = ctx->tokenizer.token_table[i],
+					       .length = ctx->tokenizer.token_lens[i],
+					       .token_id = (int)i};
 		}
 	}
 
@@ -1074,17 +1092,17 @@ int gguf_metadata_read_token_merges(struct ctx_t *ctx, char *key)
 
 size_t get_ggml_block_size(int type)
 {
-        switch (type) {
-        case GGML_TYPE_Q4_K:
-                return sizeof(block_q4_k);
-        case GGML_TYPE_Q6_K:
-                return sizeof(block_q6_k);
-        case GGML_TYPE_Q8_0:
-                return sizeof(block_q8_0);
-        default:
-                printf("FATAL: MoE operates on unsupported tensor type %d\n", type);
-                return 0;
-        }
+	switch (type) {
+	case GGML_TYPE_Q4_K:
+		return sizeof(block_q4_k);
+	case GGML_TYPE_Q6_K:
+		return sizeof(block_q6_k);
+	case GGML_TYPE_Q8_0:
+		return sizeof(block_q8_0);
+	default:
+		printf("FATAL: MoE operates on unsupported tensor type %d\n", type);
+		return 0;
+	}
 }
 
 size_t ggml_type_size(ggml_type type)
@@ -1095,9 +1113,9 @@ size_t ggml_type_size(ggml_type type)
 	case GGML_TYPE_BF16:
 		return sizeof(uint16_t);
 	case GGML_TYPE_Q8_0:
-                return sizeof(int8_t);
+		return sizeof(int8_t);
 	default:
-                printf("FATAL: Unknown size for type %d\n", type);
-                return 0;
+		printf("FATAL: Unknown size for type %d\n", type);
+		return 0;
 	}
 }

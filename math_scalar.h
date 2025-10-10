@@ -62,21 +62,19 @@ extern void mat_vec_row_f32_q6k_bf16_scalar(const void *X, const void *w_void, v
 					    int end_row);
 
 extern void accumulate_weighted_V_f32_bf16_scalar(void *O, float weight, const void *V, int size);
+extern void accumulate_weighted_V_f32_f32_scalar(void *O, float weight, const void *V, int size);
 extern void accumulate_weighted_V_bf16_bf16_scalar(void *O, float weight, const void *V, int size);
 
 extern void swiglu_activation_f32_f32_scalar(void *gate, const void *up, int size);
 extern void swiglu_activation_bf16_bf16_scalar(void *gate, const void *up, int size);
 
 extern void store_KV_cache_f32_bf16_scalar(struct ctx_t *ctx, int layer_idx, int start_pos, int batch_len);
+extern void store_KV_cache_f32_f32_scalar(struct ctx_t *ctx, int layer_idx, int start_pos, int batch_len);
 extern void store_KV_cache_bf16_bf16_scalar(struct ctx_t *ctx, int layer_idx, int start_pos, int batch_len);
 
 extern void apply_rope_cache_f32_scalar(struct ctx_t *ctx, rope_cache_t *rope_cache, void *X, int pos, int head_dim);
 extern void apply_rope_cache_bf16_scalar(struct ctx_t *ctx, rope_cache_t *rope_cache, void *X, int pos, int head_dim);
 
 extern void geglu_activation_f32_f32_scalar(void *gate, const void *up, int size);
-
-//extern void quantize_f32_to_q8_0_scalar(const float* src, block_q8_0* dst, int size);
-//extern void mat_vec_row_q8_0_q4k_f32_scalar(const void *X, const void *w_void, void *O,
-//                                      int in_dim, int start_row, int end_row);
 
 #endif

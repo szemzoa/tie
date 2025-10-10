@@ -65,6 +65,7 @@ accumulate_weighted_V_dispatch_t ACCUMULATE_WEIGHTED_V_DISPATCH_TABLE[] = {
 #endif
 	{GGML_TYPE_BF16, GGML_TYPE_BF16, accumulate_weighted_V_bf16_bf16_scalar, 0},
 	{GGML_TYPE_F32, GGML_TYPE_BF16, accumulate_weighted_V_f32_bf16_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_F32, accumulate_weighted_V_f32_f32_scalar, 0},
 };
 
 store_KV_cache_dispatch_t STORE_KV_CACHE_DISPATCH_TABLE[] = {
@@ -74,6 +75,7 @@ store_KV_cache_dispatch_t STORE_KV_CACHE_DISPATCH_TABLE[] = {
 #endif
 	{GGML_TYPE_BF16, GGML_TYPE_BF16, store_KV_cache_bf16_bf16_scalar, 0},
 	{GGML_TYPE_F32, GGML_TYPE_BF16, store_KV_cache_f32_bf16_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_F32, store_KV_cache_f32_f32_scalar, 0},
 };
 
 apply_residual_dispatch_t APPLY_RESIDUAL_DISPATCH_TABLE[] = {

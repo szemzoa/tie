@@ -4,7 +4,7 @@
 #include <inttypes.h>
 #include <unistd.h>
 
-typedef enum  {
+typedef enum {
 	GGML_TYPE_F32 = 0,
 	GGML_TYPE_F16 = 1,
 	GGML_TYPE_Q4_0 = 2,
@@ -76,7 +76,7 @@ enum gguf_metadata_value_type {
 enum {
 	GGUF_TOKEN_TYPE_NORMAL = 1,
 	GGUF_TOKEN_TYPE_CONTROL = 3,
-	GGUF_TOKEN_TYPE_SPECIAL = 5,		// ?
+	GGUF_TOKEN_TYPE_SPECIAL = 5, // ?
 };
 
 typedef struct gguf_tensor_t {
@@ -85,8 +85,8 @@ typedef struct gguf_tensor_t {
 	uint32_t n_dims;
 	uint32_t type;
 	void *data;
-	uint64_t offset;
-	uint64_t size;
+	off_t offset;
+	size_t size;
 } gguf_tensor;
 
 struct gguf_metadata_kv_t {
@@ -114,7 +114,7 @@ typedef struct {
 
 #define QK8_0 32
 typedef struct {
-	uint16_t d;       // delta
+	uint16_t d;	  // delta
 	int8_t qs[QK8_0]; // quants
 } block_q8_0;
 
@@ -126,6 +126,8 @@ extern void gguf_close(struct ctx_t *ctx);
 extern int gguf_read_metadata_type_string(struct ctx_t *ctx, struct gguf_metadata_kv_t *metadata);
 extern int gguf_get_metadata_value(struct ctx_t *ctx, char *key, void *value);
 extern char *gguf_get_metadata_string(struct ctx_t *ctx, char *key);
+extern int gguf_get_metadata_type(struct ctx_t *ctx, char *key);
+
 extern int gguf_get_metadata_size(struct ctx_t *ctx, char *key, uint64_t *size);
 
 extern int gguf_metadata_read_token_embeds(struct ctx_t *ctx, char *key, int detect_special);

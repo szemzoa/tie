@@ -56,9 +56,9 @@ typedef struct {
 } SpecialTokenList;
 
 typedef struct {
-    float score;      // The best score to reach this position
-    int token_id;   // The ID of the last token on the best path
-    int backpointer; // The starting index of that last token
+	float score;	 // The best score to reach this position
+	int token_id;	 // The ID of the last token on the best path
+	int backpointer; // The starting index of that last token
 } DP_Entry;
 
 typedef struct {
@@ -66,8 +66,8 @@ typedef struct {
 	StringPool *pool;
 	unsigned char **token_table; // Points to each token string in pool->data
 	int *token_lens;	     // Length of each token
-	int *token_types;	     	// Token type
-	float *token_scores;	     	// Token scores
+	int *token_types;	     // Token type
+	float *token_scores;	     // Token scores
 	int token_count;	     // Total number of tokens
 } Tokenizer;
 
@@ -94,5 +94,8 @@ extern int vocab_lookup_token_id(TrieNode *root, const char *token, size_t len);
 
 extern int *tokenize_bpe(struct ctx_t *ctx, const char *text, size_t *num_tokens);
 extern int *tokenize_sp(struct ctx_t *ctx, const char *text, size_t *num_tokens);
+
+extern void token_out_utf8_stream(struct ctx_t *ctx, const char *p, int len);
+extern void token_out_sp(struct ctx_t *ctx, const char *p, int len);
 
 #endif

@@ -1,14 +1,15 @@
 # Toy Inference Engine (TIE)
 
-A **minimal CPU-only** transformer inference engine designed to run Qwen3 and Gemma3 based models.  
+A **minimal CPU-only** transformer inference engine. Supports Qwen3, Gemma-3 and Gemma-3n based models.  
 It includes an interactive mode, tokenizer, rope, KV cache, attention, and tool-call support.
 
-Not breaking any speed records (~4.5 TPS for 4B model (Q4_K_M), ~10 for 1.7B) — but designed for simplicity and experimentation.
+Not breaking any speed records (~4.5 TPS for 4B model (Q4_K_M), ~10 for 1.7B Qwen3) — but designed for simplicity and experimentation.
 
 ## Features
 
 -  Runs Qwen3 GGUF models (Dense 0.6B/1.7B/4B/8B, MoE 30B-A3B tested)
 -  Runs Gemma3 GGUF model (Gemma-3 270m/1b/4b/12b-it tested)
+-  Runs Gemma-3n GGUF model (Gemma-3n-E2B/E4B-it tested)
 -  Implements tokenizer, RMS norm, RoPE, attention, FFN
 -  Interactive chat with multi-turn memory
 -  Minimal tool call support
@@ -95,7 +96,7 @@ Special tokens: 26
 ## Requirements
 
 - Clang or GCC (x86_64 with AVX2 + FMA)
-- 16GB RAM for 4B model
+- 8GB RAM for 4B model
 - macOS
 
 ---

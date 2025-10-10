@@ -278,7 +278,6 @@ void rms_norm_f32_f32_f32_scalar(void *__restrict O, const void *__restrict X, c
 	// Apply weight and scale
 	for (int i = 0; i < size; ++i) {
 		o[i] = x[i] * weight[i] * inv_rms;
-		//		o[i] = x[i] * (weight[i] + 1.0f) * inv_rms;
 	}
 }
 
@@ -313,6 +312,16 @@ void accumulate_weighted_V_f32_bf16_scalar(void *O, float weight, const void *V,
 
 	for (int i = 0; i < size; i++) {
 		out[i] = fmaf(weight, bf16_to_fp32(v[i]), out[i]);
+	}
+}
+
+void accumulate_weighted_V_f32_f32_scalar(void *O, float weight, const void *V, int size)
+{
+	float *out = (float *)O;
+	float *v = (float *)V;
+
+	for (int i = 0; i < size; i++) {
+		out[i] = fmaf(weight, v[i], out[i]);
 	}
 }
 
@@ -550,6 +559,25 @@ void store_KV_cache_f32_bf16_scalar(struct ctx_t *ctx, int layer_idx, int start_
 	for (long long i = 0; i < batch_size_elements; i++) {
 		k_cache_data[cache_offset + i] = fp32_to_bf16(K_mem_data[i]);
 		v_cache_data[cache_offset + i] = fp32_to_bf16(V_mem_data[i]);
+	}
+}
+
+void store_KV_cache_f32_f32_scalar(struct ctx_t *ctx, int layer_idx, int start_pos, int batch_len)
+{
+	LayerKVCache *cache = &ctx->kv_cache[layer_idx];
+	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
+	long long cache_offset = (long long)start_pos * kv_dim;
+	long long batch_size_elements = (long long)batch_len * kv_dim;
+
+	// Get the raw data pointers from the MemType structs
+	float *k_cache_data = (float *)cache->k.data;
+	float *v_cache_data = (float *)cache->v.data;
+	float *K_mem_data = (float *)ctx->mem.K.data;
+	float *V_mem_data = (float *)ctx->mem.V.data;
+
+	for (long long i = 0; i < batch_size_elements; i++) {
+		k_cache_data[cache_offset + i] = K_mem_data[i];
+		v_cache_data[cache_offset + i] = V_mem_data[i];
 	}
 }
 
@@ -1059,208 +1087,17 @@ void apply_rope_cache_bf16_scalar(struct ctx_t *ctx, rope_cache_t *rope_cache, v
 	}
 }
 
-inline float gelu_stable(float x)
+inline float gelu_fast(float x)
 {
-	return 0.5f * x * (1.0f + tanhf(sqrtf(2.0f / M_PI) * (x + 0.044715f * powf(x, 3.0f))));
+	return 0.5f * x * (1.0f + tanhf(0.79788456f * x * (1.0f + 0.044715f * x * x)));
 }
 
-// GeGLU activation FP32, FP32
 void geglu_activation_f32_f32_scalar(void *gate, const void *up, int size)
 {
 	float *gate_fp32 = (float *)gate;
 	float *up_fp32 = (float *)up;
 
 	for (int i = 0; i < size; i++) {
-		gate_fp32[i] = gelu_stable(gate_fp32[i]) * up_fp32[i];
+		gate_fp32[i] = gelu_fast(gate_fp32[i]) * up_fp32[i];
 	}
 }
-
-
-#if 0
-void vector_rms_norm_f32_f32_scalar(void *p_o, const void *p_x, int size, float eps)
-{
-    const float *x = (const float *)p_x;
-    float *o = (float *)p_o;
-
-    // Calculate sum of squares
-    float ss = 0.0f;
-    for (int i = 0; i < size; ++i) {
-        ss += x[i] * x[i];
-    }
-
-    float inv_rms = 1.0f / sqrtf(ss / size + eps);
-
-    // Normalize the vector
-    for (int i = 0; i < size; ++i) {
-        o[i] = x[i] * inv_rms;
-    }
-}
-
-void quantize_f32_to_q8_0_scalar(const float* src, block_q8_0* dst, int size)
-{
-    if (size % QK8_0 != 0) {
-	    /* handle error */
-	    printf("%s size error\n", __FUNCTION__);
-	    return;
-    }
-
-    const int num_blocks = size / QK8_0;
-    for (int i = 0; i < num_blocks; ++i) {
-        const float* x = src + i * QK8_0;
-        block_q8_0* y = dst + i;
-
-        float amax = 0.0f;
-        for (int j = 0; j < QK8_0; ++j) {
-            amax = fmaxf(amax, fabsf(x[j]));
-        }
-
-        const float d_float = amax / 127.0f;
-
-        y->d = fp32_to_fp16(d_float); // Store scale as FP16
-
-	if (isnan(y->d)) {
-	    printf("%s d is nan\n", y->d);
-	}
-
-        if (d_float != 0.0f) {
-            for (int j = 0; j < QK8_0; ++j) {
-                y->qs[j] = (int8_t)roundf(x[j] / d_float);
-            }
-        } else {
-            memset(y->qs, 0, sizeof(y->qs));
-        }
-    }
-}
-
-void dequantize_q8_0_to_f32_scalar(const block_q8_0* src, float* dst, int size)
-{
-    if (size % QK8_0 != 0) { /* handle error */ return; }
-    const int num_blocks = size / QK8_0;
-
-    for (int i = 0; i < num_blocks; ++i) {
-        const float d = fp16_to_fp32(src[i].d);
-        for (int j = 0; j < QK8_0; ++j) {
-            dst[i * QK8_0 + j] = src[i].qs[j] * d;
-        }
-    }
-}
-
-void debug_q8_0_blocks(const block_q8_0* blocks, int num_blocks) {
-    for (int i = 0; i < num_blocks; i++) {
-        printf("Q8_0 Block %d: d=0x%04X (as float: %f)\n", 
-               i, blocks[i].d, fp16_to_fp32(blocks[i].d));
-        printf("  Quantized values: ");
-        for (int j = 0; j < 8; j++) { // Just print first 8 values
-            printf("%d ", blocks[i].qs[j]);
-        }
-        printf("...\n");
-    }
-}
-
-float dot_product_q8_0_q4k_scalar(const block_q8_0* x_q8, const block_q4_k* w_q4, int size)
-{
-    if (size % QK_K != 0) { 
-        printf("Error: Size %d is not a multiple of QK_K %d\n", size, QK_K);
-        return 0.0f; 
-    }
-
-    const int num_weight_blocks = size / QK_K;
-    float total_sum_f = 0.0f;
-
-    for (int i_block = 0; i_block < num_weight_blocks; i_block++) {
-        const block_q4_k* w_block = &w_q4[i_block];
-        const float d_w = fp16_to_fp32(w_block->d);
-        const float dmin_w = fp16_to_fp32(w_block->dmin);
-
-        // Check for zero or invalid deltas
-        if (d_w == 0.0f || isnan(d_w) || isinf(d_w)) {
-            printf("Invalid d_w at block %d: %f\n", i_block, d_w);
-            return NAN;
-        }
-        if (isnan(dmin_w) || isinf(dmin_w)) {
-            printf("Invalid dmin_w at block %d: %f\n", i_block, dmin_w);
-            return NAN;
-        }
-
-        for (int i_sub_block = 0; i_sub_block < 8; i_sub_block++) {
-            uint8_t d_q4, m_q4;
-            get_scale_min_k4(i_sub_block, w_block->scales, &d_q4, &m_q4);
-
-            const float scale_w = d_w * d_q4;
-            const float min_w = dmin_w * m_q4;
-
-            // Check for NaN/Inf in scale/min
-            if (isnan(scale_w) || isinf(scale_w) || isnan(min_w) || isinf(min_w)) {
-                printf("NaN/Inf detected in scale/min at block %d, sub-block %d\n", 
-                       i_block, i_sub_block);
-                return NAN;
-            }
-
-            for (int j = 0; j < 32; j++) {
-                const int abs_x_idx = (i_block * QK_K) + (i_sub_block * 32) + j;
-
-                // Check if we're within bounds
-                if (abs_x_idx >= size) {
-                    printf("Index out of bounds: %d >= %d\n", abs_x_idx, size);
-                    return NAN;
-                }
-                
-                const int x_block_idx = abs_x_idx / QK8_0;
-                const int x_element_idx = abs_x_idx % QK8_0;
-                
-                const int8_t x_q = x_q8[x_block_idx].qs[x_element_idx];
-                const float d_x = fp16_to_fp32(x_q8[x_block_idx].d);
-                
-                // Check for invalid delta in Q8_0 block
-                if (d_x == 0.0f || isnan(d_x) || isinf(d_x)) {
-                    printf("Invalid d_x at i_block: %d, i_sub_block: %d, j: %d, abs_x_idx: %d, block %d, element %d: %f\n", i_block, i_sub_block, j, abs_x_idx,
-                           x_block_idx, x_element_idx, d_x);
-
-		    debug_q8_0_blocks(&x_q8[x_block_idx], 1);
-		    exit(1);
-                    return NAN;
-                }
-                
-                const float x_f = x_q * d_x;
-                
-                // Dequantize the weight value
-                const int byte_idx = i_sub_block * 16 + (j / 2);
-                const uint8_t w_q_nibble = (j % 2 == 0) ? 
-                    (w_block->qs[byte_idx] & 0x0F) : 
-                    (w_block->qs[byte_idx] >> 4);
-                
-                const float w_f = w_q_nibble * scale_w + min_w;
-                
-                total_sum_f += x_f * w_f;
-            }
-        }
-    }
-    return total_sum_f;
-}
-
-void mat_vec_row_q8_0_q4k_f32_scalar(const void *X, const void *w_void, void *O,
-                                      int in_dim, int start_row, int end_row)
-{
-
-    // Cast void pointers to their concrete types
-    const block_q8_0* x = (const block_q8_0*)X;
-    const block_q4_k* w = (const block_q4_k*)w_void;
-    float* o = (float*)O;
-
-    // Calculate how many Q4_K blocks make up a single row of the weight matrix
-    const int nb = in_dim / QK_K;
-
-    // Loop over the rows assigned to this thread
-    for (int i = start_row; i < end_row; i++) {
-        // Calculate the pointer to the start of the current weight row.
-        // Use a 64-bit intermediate to prevent overflow on very large models.
-        const block_q4_k* w_row = w + (long long)i * nb;
-
-        // Compute the dot product for the entire row
-        const float sum = dot_product_q8_0_q4k_scalar(x, w_row, in_dim);
-
-        // Store the final float result in the output vector
-        o[i] = sum;
-    }
-}
-#endif

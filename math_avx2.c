@@ -44,6 +44,7 @@ __attribute__((target("avx2"))) static inline void store_f32_as_bf16_avx2(uint16
 	_mm_storeu_si128((__m128i *)dst, final_result);
 }
 
+
 __attribute__((target("avx2"))) void rms_norm_f32_f32_f32_avx2(void *__restrict O, const void *__restrict X,
 							       const Tensor *__restrict W, int size, float eps)
 {
@@ -146,41 +147,16 @@ __attribute__((target("avx2"))) void rms_norm_bf16_f32_f32_avx2(void *__restrict
 	}
 }
 
-__attribute__((target("avx2"))) void mat_vec_row_f32_bf16_f32_avx2(const void *__restrict X,
-								   const void *__restrict w_void, void *__restrict O,
-								   int in_dim, int start_row, int end_row)
+void mat_vec_row_f32_bf16_f32_avx2(const void *__restrict X, const void *__restrict w_void, void *__restrict O,
+				   int in_dim, int start_row, int end_row)
 {
-	float *x = (float *)X;
-	uint16_t *w_bf16 = (uint16_t *)w_void;
+	const float *x = (const float *)X;
+	const uint16_t *w_bf16 = (const uint16_t *)w_void;
 	float *o = (float *)O;
 
 	for (int i = start_row; i < end_row; i++) {
 		const uint16_t *w_row = &w_bf16[i * in_dim];
-
-		__m256 acc = _mm256_setzero_ps();
-		int j = 0;
-		for (; j <= in_dim - 8; j += 8) {
-			__m256 w = load_bf16_as_f32(&w_row[j]);
-			__m256 x_vec = _mm256_loadu_ps(&x[j]);
-			acc = _mm256_fmadd_ps(x_vec, w, acc);
-		}
-
-		// Horizontally add 8 floats
-		__m128 low = _mm256_castps256_ps128(acc);
-		__m128 high = _mm256_extractf128_ps(acc, 1);
-		__m128 sum128 = _mm_add_ps(low, high);
-		sum128 = _mm_hadd_ps(sum128, sum128);
-		sum128 = _mm_hadd_ps(sum128, sum128);
-		float sum = _mm_cvtss_f32(sum128);
-
-		// Tail
-		for (; j < in_dim; j++) {
-			uint32_t w_bits = ((uint32_t)w_row[j]) << 16;
-			float w = *((float *)&w_bits);
-			sum = fmaf(x[j], w, sum);
-		}
-
-		o[i] = sum;
+		o[i] = dot_product_f32_bf16_avx2(x, w_row, in_dim);
 	}
 }
 
@@ -641,6 +617,7 @@ __attribute__((target("avx2"))) float dot_product_f32_q4k_avx2(const float *x, c
 
 	return _mm_cvtss_f32(sum_1);
 }
+
 
 __attribute__((target("avx2"))) void apply_rope_cache_f32_avx2(struct ctx_t *ctx, rope_cache_t *rope_cache, void *X,
 							       int pos, int head_dim)
@@ -1586,10 +1563,9 @@ __attribute__((target("avx2"))) void get_embedding_row_q6k_bf16_avx2(const Tenso
 	}
 }
 
-
-inline float gelu_stable(float x)
+inline float gelu_fast(float x)
 {
-	return 0.5f * x * (1.0f + tanhf(sqrtf(2.0f / M_PI) * (x + 0.044715f * powf(x, 3.0f))));
+	return 0.5f * x * (1.0f + tanhf(0.79788456f * x * (1.0f + 0.044715f * x * x)));
 }
 
 void geglu_activation_f32_f32_avx2(void *gate, const void *up, int size)
@@ -1658,7 +1634,8 @@ void geglu_activation_f32_f32_avx2(void *gate, const void *up, int size)
 
 	// tail: process remaining elements with scalar fallback
 	for (; i < size; ++i) {
-		gate_fp32[i] = gelu_stable(gate_fp32[i]) * up_fp32[i];
+		//		gate_fp32[i] = gelu_stable(gate_fp32[i]) * up_fp32[i];
+		gate_fp32[i] = gelu_fast(gate_fp32[i]) * up_fp32[i];
 	}
 }
 

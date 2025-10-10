@@ -28,16 +28,6 @@
 #endif
 
 
-#if 0
-#include <poll.h>
-#include <termios.h>
-
-static struct termios orig_termios;
-
-#define DEBOUNCE_MS 200
-#endif
-
-
 const char *system_prompt_with_tools =
 	"<|im_start|>system\n"
 	"You may call one or more functions to assist with the user query.\n"
@@ -179,73 +169,13 @@ int64_t elapsed_time_us(const struct timespec after, const struct timespec befor
 	       + ((int64_t)after.tv_nsec - (int64_t)before.tv_nsec) / 1000;
 }
 
-unsigned int decode_utf8(unsigned int *state, unsigned int *codep, unsigned char byte)
-{
-	if (*state == 0) {
-		if (byte < 0x80) {
-			*codep = byte;
-			return *codep;
-		} else if ((byte & 0xE0) == 0xC0) {
-			*state = 1;
-			*codep = byte & 0x1F;
-		} else if ((byte & 0xF0) == 0xE0) {
-			*state = 2;
-			*codep = byte & 0x0F;
-		} else if ((byte & 0xF8) == 0xF0) {
-			*state = 3;
-			*codep = byte & 0x07;
-		} else {
-			return 0xFFFD;
-		}
-	} else {
-		if ((byte & 0xC0) == 0x80) {
-			*codep = (*codep << 6) | (byte & 0x3F);
-			(*state)--;
-			if (*state == 0) {
-				return *codep;
-			}
-		} else {
-			*state = 0;
-			*codep = 0;
-			return 0xFFFD;
-		}
-	}
-	return 0;
-}
-
-// Qwen3: needs UTF-8 streaming decode
-void token_out_qwen3(struct ctx_t *ctx, const char *p, int len)
-{
-	for (char *c = (char *)p; len > 0; c++, len--) {
-		unsigned int result = decode_utf8(&ctx->utf8_state, &ctx->utf8_codepoint, (unsigned char)*c);
-		if (result != 0 && result != 0xFFFD) {
-			printf("%c", result);
-		}
-	}
-}
-
-// Gemma3: SentencePiece detokenization
-void token_out_gemma3(struct ctx_t *ctx, const char *p, int len)
-{
-	for (int i = 0; i < len; i++) {
-		unsigned char ch = (unsigned char)p[i];
-		if (ch == 0xE2 && i + 2 < len && (unsigned char)p[i + 1] == 0x96 && (unsigned char)p[i + 2] == 0x81) {
-			// UTF-8 for "▁" (U+2581)
-			putchar(' ');
-			i += 2; // skip extra bytes
-		} else {
-			putchar(ch);
-		}
-	}
-}
-
 void generate_output(struct ctx_t *ctx, int current_token)
 {
 	const char *p = get_token_string(ctx, current_token);
 	int len = get_token_string_length(ctx, current_token);
 
 	if (current_token != ctx->model->eos_token_id)
-		ctx->interface.token_out(ctx, p, len);
+		ctx->model->interface.token_out(ctx, p, len);
 
 	fflush(stdout);
 }
@@ -259,54 +189,12 @@ void read_user_input(char *input_buf, size_t buf_size)
 	input_buf[strcspn(input_buf, "\n")] = 0;
 }
 
-// Process prompt tokens
-void process_prompt(struct ctx_t *ctx, int *prompt_tokens, size_t prompt_len)
-{
-	MemType hidden_state_slice;
-
-	for (int i = 0; i < prompt_len; i++) {
-		// Create a slice for this token's position in the hidden_state buffer
-		hidden_state_slice = mem_slice(&ctx->mem.hidden_state, i * ctx->model->embed_dim);
-		dispatch_embedding_row(&ctx->model->token_embd, prompt_tokens[i], &hidden_state_slice,
-				       ctx->model->embed_dim);
-
-		if (ctx->interface.embedding_scale != NULL)
-			ctx->interface.embedding_scale(ctx, &hidden_state_slice);
-
-	}
-
-	for (int l = 0; l < ctx->model->num_layers; l++) {
-		transformer_layer(ctx, l, prompt_len);
-	}
-
-	MemType hidden_state_first_slice = mem_slice(&ctx->mem.hidden_state, 0);
-	memcpy(hidden_state_first_slice.data, hidden_state_slice.data,
-	       ctx->model->embed_dim * ggml_type_size(ctx->mem.hidden_state.type));
-
-	ctx->kv_pos += prompt_len;
-}
-
-#if 0
-static void disable_raw_mode(void)
-{
-	tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
-}
-
-static void enable_raw_mode(void)
-{
-	tcgetattr(STDIN_FILENO, &orig_termios);
-	atexit(disable_raw_mode);
-	struct termios raw = orig_termios;
-	raw.c_lflag &= ~(ECHO | ICANON);
-	tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
-}
-#endif
 
 int *process_user_request(struct ctx_t *ctx, const char *input_buf, size_t *num_tokens)
 {
 	size_t user_text_token_count = 0;
 
-	int *user_text_tokens = ctx->interface.tokenize_prompt(ctx, input_buf, &user_text_token_count);
+	int *user_text_tokens = ctx->model->interface.tokenize_prompt(ctx, input_buf, &user_text_token_count);
 	if (!user_text_tokens)
 		return NULL;
 
@@ -339,24 +227,9 @@ int *process_user_request(struct ctx_t *ctx, const char *input_buf, size_t *num_
 
 	free(user_text_tokens);
 	*num_tokens = prompt_len;
-#if 0
-	char buf[256];
-	printf("Tokens: \n");
 
-	for (int i = 0; i < prompt_len; i++) {
-		memset(buf, 0, 256);
-
-		int token_length = get_token_string_length(ctx, prompt_tokens[i]);
-		const unsigned char *token_str = get_token_string(ctx, prompt_tokens[i]);
-
-		memcpy(buf, token_str, token_length < 256 ? token_length : 0);
-
-		printf("#%u - %u, [%s]\n", i, prompt_tokens[i], buf);
-	}
-#endif
 	return prompt_tokens;
 }
-
 
 void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 {
@@ -382,7 +255,7 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 	    printf("--- Processing System Prompt: %zu tokens ---\n", system_prompt_len);
 	    clock_gettime(CLOCK_REALTIME, &start);
 
-	    process_prompt(ctx, system_prompt_tokens, system_prompt_len);
+	    ctx->model->interface.process_prompt(ctx, system_prompt_tokens, system_prompt_len);
 
 	    clock_gettime(CLOCK_REALTIME, &end);
 	    printf("--- System Prompt Processed, time: %llu msec ---\n", elapsed_time_us(end, start) / 1000);
@@ -421,15 +294,14 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 		clock_gettime(CLOCK_REALTIME, &start);
 
 		/* prompt processing */
-		process_prompt(ctx, prompt_tokens, prompt_len);
+		ctx->model->interface.process_prompt(ctx, prompt_tokens, prompt_len);
 
 		clock_gettime(CLOCK_REALTIME, &end);
 		printf("--- Prompt Processing Complete %zu tokens, time: %llu msec ---\n", prompt_len,
 		       elapsed_time_us(end, start) / 1000);
 
 
-		printf("\n--- Generation Start (Max %d new tokens) ---\n%s: ", max_new_tokens,
-		       ctx->model->arch == ARCH_QWEN3 ? "Qwen3" : "Gemma3");
+		printf("\n--- Generation Start (Max %d new tokens) ---\n%s: ", max_new_tokens, ctx->model->name);
 		clock_gettime(CLOCK_REALTIME, &start);
 		gen_len = 0;
 
@@ -440,15 +312,33 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 				break;
 			}
 
+			if (ctx->model->arch == ARCH_GEMMA3N) {
+				// For the first generation step (step == 0), the altup_hidden_states buffer
+				// contains `prompt_len` tokens. We need to process the LAST one.
+				// For all subsequent steps, the buffer only contains 1 token.
+				size_t n_tokens_in_buffer = (step == 0) ? prompt_len : 1;
+
+				post_process_altup_states(ctx, &ctx->mem.hidden_state, ctx->mem.altup_hidden_states,
+							  n_tokens_in_buffer);
+			}
+
 			dispatch_rms_norm(&ctx->mem.hidden_state, &ctx->model->output_norm, &ctx->mem.normed_ffn_input,
 					  ctx->model->embed_dim, ctx->model->norm_eps);
 
 			dispatch_mat_vec(ctx, &ctx->mem.normed_ffn_input, output_tensor, &ctx->mem.logits,
 					 ctx->model->embed_dim, ctx->model->vocab_size, true);
 
-			int next_token = predict_next_token((float *)ctx->mem.logits.data, ctx->model->vocab_size,
-							    "temperature", 0.7f, 64, 0.95f, prompt_tokens, prompt_len,
-							    generated_tokens, gen_len, ctx->model->repetition_penalty);
+			if (ctx->model->final_logit_softcap > 0.0f) {
+				dispatch_softcap_logits(&ctx->mem.logits, ctx->model->vocab_size,
+							ctx->model->final_logit_softcap);
+			}
+
+			int next_token = predict_next_token(
+				(float *)ctx->mem.logits.data, ctx->model->vocab_size,
+				//							    "temperature",
+				// 0.7f, 64, 0.95f, prompt_tokens, prompt_len,
+				"temperature", 0.7f, 20, 0.95f, prompt_tokens, prompt_len, generated_tokens, gen_len,
+				ctx->model->repetition_penalty);
 
 			generate_output(ctx, next_token);
 
@@ -463,16 +353,10 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 				break;
 			}
 
-			// Create a slice for this token's position in the hidden_state buffer
-			MemType hidden_state_slice = mem_slice(&ctx->mem.hidden_state, 0);
-			dispatch_embedding_row(&ctx->model->token_embd, next_token, &hidden_state_slice,
-					       ctx->model->embed_dim);
-
-			if (ctx->interface.embedding_scale != NULL)
-				ctx->interface.embedding_scale(ctx, &hidden_state_slice);
+			ctx->model->interface.prepare_next_token(ctx, next_token);
 
 			for (int l = 0; l < ctx->model->num_layers; l++) {
-				transformer_layer(ctx, l, 1);
+				ctx->model->interface.transformer_layer(ctx, l, 1);
 			}
 
 			ctx->kv_pos++;
@@ -575,14 +459,13 @@ int main(int argc, char *argv[])
 		goto _cleanup;
 
 	printf("Welcome to interactive chat. Type 'exit' to quit.\n");
-
-	//	kv_cache_reset(ctx);
 	generate_interactive(ctx, 8192);
 
 _cleanup:
 	model_cleanup(ctx, use_mmap);
 	gguf_close(ctx);
 	free(ctx);
+
 	printf("Done.\n");
 	return 0;
 }
