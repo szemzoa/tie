@@ -4,7 +4,7 @@
 #include <inttypes.h>
 #include <stdbool.h>
 
-#define BPE_MAP_CAPACITY (256 * 1024)
+#define BPE_MAP_CAPACITY (512 * 1024)
 #define MAX_SPECIAL_TOKENS 8192
 #define MAX_CHUNKS 512
 #define MAX_SPANS 2048
@@ -38,11 +38,11 @@ typedef struct {
 	uint64_t key;
 	uint32_t rank;
 	bool occupied;
-} bpe_entry_t;
+} BpeEntry;
 
 typedef struct {
-	bpe_entry_t table[BPE_MAP_CAPACITY];
-} bpe_merge_map_t;
+	BpeEntry table[BPE_MAP_CAPACITY];
+} BpeMergeMap;
 
 typedef struct {
 	const char *text; // Pointer into string pool
@@ -71,10 +71,10 @@ typedef struct {
 	int token_count;	     // Total number of tokens
 } Tokenizer;
 
-extern struct ctx_t *ctx;
+struct TIEContext;
 
 extern char merge_pool[MAX_SPANS][128];
-extern bpe_merge_map_t bpe_merges_map;
+extern BpeMergeMap bpe_merges_map;
 extern SpecialTokenList special_tokens;
 
 extern TrieNode *create_node(void);
@@ -84,18 +84,20 @@ extern void insert_token(TrieNode *root, const char *token, size_t len, int toke
 extern void free_trie(TrieNode *node);
 extern void free_string_pool(StringPool *pool);
 
-extern void bpe_map_insert(bpe_merge_map_t *map, uint64_t key, uint32_t rank);
+extern void bpe_map_insert(BpeMergeMap *map, uint64_t key, uint32_t rank);
 extern void replace_g_spaces(char *s);
 
-extern const unsigned char *get_token_string(const struct ctx_t *ctx, int token_id);
-extern int get_token_string_length(const struct ctx_t *ctx, int token_id);
+extern const unsigned char *get_token_string(const struct TIEContext *ctx, int token_id);
+extern int get_token_string_length(const struct TIEContext *ctx, int token_id);
 
 extern int vocab_lookup_token_id(TrieNode *root, const char *token, size_t len);
 
-extern int *tokenize_bpe(struct ctx_t *ctx, const char *text, size_t *num_tokens);
-extern int *tokenize_sp(struct ctx_t *ctx, const char *text, size_t *num_tokens);
+extern int *tokenize_bpe(struct TIEContext *ctx, const char *text, size_t *num_tokens);
+extern int *tokenize_sp(struct TIEContext *ctx, const char *text, size_t *num_tokens);
 
-extern void token_out_utf8_stream(struct ctx_t *ctx, const char *p, int len);
-extern void token_out_sp(struct ctx_t *ctx, const char *p, int len);
+extern void token_out_utf8_stream(struct TIEContext *ctx, const char *p, int len);
+extern void token_out_sp(struct TIEContext *ctx, const char *p, int len);
+
+extern int init_token_table(struct TIEContext *ctx, int num_tokens);
 
 #endif

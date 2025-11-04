@@ -15,147 +15,176 @@
 #include "threadpool.h"
 #include "tokenize.h"
 
+size_t ggml_block_size(GGMLType type)
+{
+	switch (type) {
+	case GGML_TYPE_Q4_K:
+		return sizeof(block_q4_k);
+	case GGML_TYPE_Q6_K:
+		return sizeof(block_q6_k);
+	case GGML_TYPE_Q8_0:
+		return sizeof(block_q8_0);
+	default:
+		printf("FATAL: Unknown block size for type %d\n", type);
+		return 0;
+	}
+}
 
-int gguf_read_metadata_type_uint8(struct ctx_t *ctx, struct gguf_metadata_kv_t *metadata)
+size_t ggml_type_size(GGMLType type)
+{
+	switch (type) {
+	case GGML_TYPE_F32:
+		return sizeof(float);
+	case GGML_TYPE_BF16:
+		return sizeof(uint16_t);
+	case GGML_TYPE_Q8_0:
+		return sizeof(int8_t);
+	default:
+		printf("FATAL: Unknown size for type %d\n", type);
+		return 0;
+	}
+}
+
+int gguf_metadata_read_uint8(struct GGUFModel *gguf, GGUFMetadata *metadata)
 {
 	if ((metadata->data = (uint8_t *)malloc(sizeof(uint8_t))) == NULL) {
 		return -1;
 	}
 
-	memcpy(metadata->data, ctx->fptr, sizeof(uint8_t));
+	memcpy(metadata->data, gguf->fptr, sizeof(uint8_t));
 
-	ctx->fptr += sizeof(uint8_t);
+	gguf->fptr += sizeof(uint8_t);
 	metadata->size = sizeof(uint8_t);
 
 	return 0;
 }
 
-int gguf_read_metadata_type_int8(struct ctx_t *ctx, struct gguf_metadata_kv_t *metadata)
+int gguf_metadata_read_int8(struct GGUFModel *gguf, GGUFMetadata *metadata)
 {
 	if ((metadata->data = (int8_t *)malloc(sizeof(int8_t))) == NULL) {
 		return -1;
 	}
 
-	memcpy(metadata->data, ctx->fptr, sizeof(int8_t));
+	memcpy(metadata->data, gguf->fptr, sizeof(int8_t));
 
-	ctx->fptr += sizeof(int8_t);
+	gguf->fptr += sizeof(int8_t);
 	metadata->size = sizeof(int8_t);
 
 	return 0;
 }
 
-int gguf_read_metadata_type_uint16(struct ctx_t *ctx, struct gguf_metadata_kv_t *metadata)
+int gguf_metadata_read_uint16(struct GGUFModel *gguf, GGUFMetadata *metadata)
 {
 	if ((metadata->data = (uint16_t *)malloc(sizeof(uint16_t))) == NULL) {
 		return -1;
 	}
 
-	memcpy(metadata->data, ctx->fptr, sizeof(uint16_t));
+	memcpy(metadata->data, gguf->fptr, sizeof(uint16_t));
 
-	ctx->fptr += sizeof(uint16_t);
+	gguf->fptr += sizeof(uint16_t);
 	metadata->size = sizeof(uint16_t);
 
 	return 0;
 }
 
-int gguf_read_metadata_type_int16(struct ctx_t *ctx, struct gguf_metadata_kv_t *metadata)
+int gguf_metadata_read_int16(struct GGUFModel *gguf, GGUFMetadata *metadata)
 {
 	if ((metadata->data = (int16_t *)malloc(sizeof(int16_t))) == NULL) {
 		return -1;
 	}
 
-	memcpy(metadata->data, ctx->fptr, sizeof(int16_t));
-	ctx->fptr += sizeof(int16_t);
+	memcpy(metadata->data, gguf->fptr, sizeof(int16_t));
+	gguf->fptr += sizeof(int16_t);
 	metadata->size = sizeof(int16_t);
 
 	return 0;
 }
 
-int gguf_read_metadata_type_uint32(struct ctx_t *ctx, struct gguf_metadata_kv_t *metadata)
+int gguf_metadata_read_uint32(struct GGUFModel *gguf, GGUFMetadata *metadata)
 {
 	if ((metadata->data = (uint32_t *)malloc(sizeof(uint32_t))) == NULL) {
 		return -1;
 	}
 
-	memcpy(metadata->data, ctx->fptr, sizeof(uint32_t));
-	ctx->fptr += sizeof(uint32_t);
+	memcpy(metadata->data, gguf->fptr, sizeof(uint32_t));
+	gguf->fptr += sizeof(uint32_t);
 	metadata->size = sizeof(uint32_t);
 
 	return 0;
 }
 
-int gguf_read_metadata_type_int32(struct ctx_t *ctx, struct gguf_metadata_kv_t *metadata)
+int gguf_metadata_read_int32(struct GGUFModel *gguf, GGUFMetadata *metadata)
 {
 	if ((metadata->data = (int32_t *)malloc(sizeof(int32_t))) == NULL) {
 		return -1;
 	}
 
-	memcpy(metadata->data, ctx->fptr, sizeof(int32_t));
-	ctx->fptr += sizeof(int32_t);
+	memcpy(metadata->data, gguf->fptr, sizeof(int32_t));
+	gguf->fptr += sizeof(int32_t);
 	metadata->size = sizeof(int32_t);
 
 	return 0;
 }
 
-int gguf_read_metadata_type_uint64(struct ctx_t *ctx, struct gguf_metadata_kv_t *metadata)
+int gguf_metadata_read_uint64(struct GGUFModel *gguf, GGUFMetadata *metadata)
 {
 	if ((metadata->data = (uint64_t *)malloc(sizeof(uint64_t))) == NULL) {
 		return -1;
 	}
 
-	memcpy(metadata->data, ctx->fptr, sizeof(uint64_t));
-	ctx->fptr += sizeof(uint64_t);
+	memcpy(metadata->data, gguf->fptr, sizeof(uint64_t));
+	gguf->fptr += sizeof(uint64_t);
 	metadata->size = sizeof(uint64_t);
 
 	return 0;
 }
 
-int gguf_read_metadata_type_int64(struct ctx_t *ctx, struct gguf_metadata_kv_t *metadata)
+int gguf_metadata_read_int64(struct GGUFModel *gguf, GGUFMetadata *metadata)
 {
 	if ((metadata->data = (int64_t *)malloc(sizeof(int64_t))) == NULL) {
 		return -1;
 	}
 
-	memcpy(metadata->data, ctx->fptr, sizeof(int64_t));
-	ctx->fptr += sizeof(int64_t);
+	memcpy(metadata->data, gguf->fptr, sizeof(int64_t));
+	gguf->fptr += sizeof(int64_t);
 	metadata->size = sizeof(int64_t);
 
 	return 0;
 }
 
-int gguf_read_metadata_type_fp32(struct ctx_t *ctx, struct gguf_metadata_kv_t *metadata)
+int gguf_metadata_read_fp32(struct GGUFModel *gguf, GGUFMetadata *metadata)
 {
 	if ((metadata->data = (float *)malloc(sizeof(float))) == NULL) {
 		return -1;
 	}
 
-	memcpy(metadata->data, ctx->fptr, sizeof(float));
-	ctx->fptr += sizeof(float);
+	memcpy(metadata->data, gguf->fptr, sizeof(float));
+	gguf->fptr += sizeof(float);
 	metadata->size = sizeof(float);
 
 	return 0;
 }
 
-int gguf_read_metadata_type_fp64(struct ctx_t *ctx, struct gguf_metadata_kv_t *metadata)
+int gguf_metadata_read_fp64(struct GGUFModel *gguf, GGUFMetadata *metadata)
 {
 	if ((metadata->data = (double *)malloc(sizeof(double))) == NULL) {
 		return -1;
 	}
 
-	memcpy(metadata->data, ctx->fptr, sizeof(double));
-	ctx->fptr += sizeof(double);
+	memcpy(metadata->data, gguf->fptr, sizeof(double));
+	gguf->fptr += sizeof(double);
 	metadata->size = sizeof(double);
 
 	return 0;
 }
 
-int gguf_read_metadata_type_string(struct ctx_t *ctx, struct gguf_metadata_kv_t *metadata)
+int gguf_metadata_read_string(struct GGUFModel *gguf, GGUFMetadata *metadata)
 {
 	uint64_t size;
 	char *str;
 
-	size = *(uint64_t *)ctx->fptr;
-	ctx->fptr += sizeof(uint64_t);
+	size = *(uint64_t *)gguf->fptr;
+	gguf->fptr += sizeof(uint64_t);
 
 	if ((str = (char *)malloc(size + 1)) == NULL) {
 		return -1;
@@ -163,15 +192,15 @@ int gguf_read_metadata_type_string(struct ctx_t *ctx, struct gguf_metadata_kv_t 
 
 	memset(str, 0, size + 1);
 
-	memcpy(str, ctx->fptr, size);
-	ctx->fptr += size;
+	memcpy(str, gguf->fptr, size);
+	gguf->fptr += size;
 	metadata->size = size;
 
 	metadata->data = (char *)str;
 	return 0;
 }
 
-int gguf_read_metadata_type_array(struct ctx_t *ctx, struct gguf_metadata_kv_t *metadata)
+int gguf_metadata_read_array(struct GGUFModel *gguf, GGUFMetadata *metadata)
 {
 	uint64_t i;
 	uint64_t str_len;
@@ -179,51 +208,51 @@ int gguf_read_metadata_type_array(struct ctx_t *ctx, struct gguf_metadata_kv_t *
 	uint64_t size;
 	uint32_t val;
 
-	type = *(uint32_t *)ctx->fptr;
-	ctx->fptr += sizeof(uint32_t);
+	type = *(uint32_t *)gguf->fptr;
+	gguf->fptr += sizeof(uint32_t);
 
-	size = *(uint64_t *)ctx->fptr;
-	ctx->fptr += sizeof(uint64_t);
+	size = *(uint64_t *)gguf->fptr;
+	gguf->fptr += sizeof(uint64_t);
 	metadata->size = size;
-	metadata->arr_offset = ctx->fptr;
+	metadata->arr_offset = gguf->fptr;
 
 	for (i = 0; i < size; i++) {
 		if (type == GGUF_METADATA_VALUE_TYPE_STRING) {
-			str_len = *(uint64_t *)ctx->fptr;
-			ctx->fptr += sizeof(uint64_t);
+			str_len = *(uint64_t *)gguf->fptr;
+			gguf->fptr += sizeof(uint64_t);
 
-			ctx->fptr += str_len;
+			gguf->fptr += str_len;
 		}
 
 		if (type == GGUF_METADATA_VALUE_TYPE_INT32) {
-			val = *(uint32_t *)ctx->fptr;
-			ctx->fptr += sizeof(uint32_t);
+			val = *(uint32_t *)gguf->fptr;
+			gguf->fptr += sizeof(uint32_t);
 		}
 
 		if (type == GGUF_METADATA_VALUE_TYPE_FLOAT32) {
-			val = *(float *)ctx->fptr;
-			ctx->fptr += sizeof(float);
+			val = *(float *)gguf->fptr;
+			gguf->fptr += sizeof(float);
 		}
 
 		if (type == GGUF_METADATA_VALUE_TYPE_BOOL) {
 
-			val = *(uint8_t *)ctx->fptr;
-			ctx->fptr += sizeof(uint8_t);
+			val = *(uint8_t *)gguf->fptr;
+			gguf->fptr += sizeof(uint8_t);
 		}
 	}
 
 	return 0;
 }
 
-int gguf_get_metadata_value(struct ctx_t *ctx, char *key, void *value)
+int gguf_metadata_get_value(struct GGUFModel *gguf, char *key, void *value)
 {
-	struct gguf_metadata_kv_t *metadata;
+	GGUFMetadata *metadata;
 	uint64_t i = 0;
 
-	for (i = 0; i < ctx->metadata_kv_count; i++) {
-		metadata = &ctx->metadata[i];
+	for (i = 0; i < gguf->metadata_num; i++) {
+		metadata = &gguf->metadata[i];
 
-		if (!strcmp(ctx->metadata[i].name, key)) {
+		if (!strcmp(gguf->metadata[i].name, key)) {
 			memcpy((void *)value, metadata->data, metadata->size);
 			return 0;
 		}
@@ -232,46 +261,46 @@ int gguf_get_metadata_value(struct ctx_t *ctx, char *key, void *value)
 	return -1;
 }
 
-int gguf_get_metadata_type(struct ctx_t *ctx, char *key)
+int gguf_metadata_get_type(struct GGUFModel *gguf, char *key)
 {
-	struct gguf_metadata_kv_t *metadata;
+	GGUFMetadata *metadata;
 	uint64_t i = 0;
 
-	for (i = 0; i < ctx->metadata_kv_count; i++) {
-		metadata = &ctx->metadata[i];
+	for (i = 0; i < gguf->metadata_num; i++) {
+		metadata = &gguf->metadata[i];
 
-		if (!strcmp(ctx->metadata[i].name, key)) {
-			return ctx->metadata[i].type;
+		if (!strcmp(gguf->metadata[i].name, key)) {
+			return gguf->metadata[i].type;
 		}
 	}
 
 	return -1;
 }
 
-char *gguf_get_metadata_string(struct ctx_t *ctx, char *key)
+char *gguf_metadata_get_string(struct GGUFModel *gguf, char *key)
 {
-	struct gguf_metadata_kv_t *metadata;
+	GGUFMetadata *metadata;
 	uint64_t i = 0;
 
-	for (i = 0; i < ctx->metadata_kv_count; i++) {
-		metadata = &ctx->metadata[i];
+	for (i = 0; i < gguf->metadata_num; i++) {
+		metadata = &gguf->metadata[i];
 
-		if (!strcmp(ctx->metadata[i].name, key))
+		if (!strcmp(gguf->metadata[i].name, key))
 			return metadata->data;
 	}
 
 	return NULL;
 }
 
-int gguf_get_metadata_size(struct ctx_t *ctx, char *key, uint64_t *size)
+int gguf_metadata_get_size(struct GGUFModel *gguf, char *key, uint64_t *size)
 {
-	struct gguf_metadata_kv_t *metadata;
+	GGUFMetadata *metadata;
 	uint64_t i = 0;
 
-	for (i = 0; i < ctx->metadata_kv_count; i++) {
-		metadata = &ctx->metadata[i];
+	for (i = 0; i < gguf->metadata_num; i++) {
+		metadata = &gguf->metadata[i];
 
-		if (!strcmp(ctx->metadata[i].name, key)) {
+		if (!strcmp(gguf->metadata[i].name, key)) {
 			*size = metadata->size;
 			return 0;
 		}
@@ -375,202 +404,15 @@ char *gguf_get_type_name(uint32_t type)
 	return NULL;
 }
 
-void gguf_dump_metadata(struct ctx_t *ctx)
-{
-	uint64_t i = 0;
-	struct gguf_metadata_kv_t *metadata;
-	struct gguf_mdata_array_t *array;
-
-	printf("gguf: metadata:\n");
-	for (i = 0; i < ctx->metadata_kv_count; i++) {
-		metadata = &ctx->metadata[i];
-
-		printf("kv - #%3llu %-45s ", i, metadata->name);
-
-		switch (metadata->type) {
-		case GGUF_METADATA_VALUE_TYPE_UINT8:
-			printf("u8\t = %u\n", *(uint8_t *)metadata->data);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_INT8:
-			printf("i8\t = %i\n", *(int8_t *)metadata->data);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_UINT16:
-			printf("u16\t = %u\n", *(uint16_t *)metadata->data);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_INT16:
-			printf("i16\t = %i\n", *(int16_t *)metadata->data);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_UINT32:
-			printf("u32\t = %u\n", *(uint32_t *)metadata->data);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_INT32:
-			printf("i32\t = %i\n", *(int32_t *)metadata->data);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_FLOAT32:
-			printf("fp32\t = %lf\n", *(float *)metadata->data);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_BOOL:
-			printf("bool\t = %s\n", *(uint8_t *)metadata->data == 0 ? "false" : "true");
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_STRING:
-			printf("str\t = %.*s\n", 64, (char *)metadata->data);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_ARRAY:
-			array = (struct gguf_mdata_array_t *)metadata->data;
-			printf("arr\t = \n");
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_UINT64:
-			printf("u64\t = %llu\n", *(uint64_t *)metadata->data);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_INT64:
-			printf("i64\t = %lli\n", *(int64_t *)metadata->data);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_FLOAT64:
-			printf("fp64\t = %lf\n", *(double *)metadata->data);
-			break;
-		}
-	}
-}
-
-void gguf_free_metadata(struct ctx_t *ctx)
-{
-	struct gguf_metadata_kv_t *metadata;
-	uint64_t i;
-
-	for (i = 0; i < ctx->metadata_kv_count; i++) {
-		metadata = &ctx->metadata[i];
-
-		if (metadata->name)
-			free(metadata->name);
-
-		if (metadata->data)
-			free(metadata->data);
-	}
-
-	free(ctx->metadata);
-}
-
-int gguf_read_metadata(struct ctx_t *ctx)
-{
-	uint64_t i;
-	struct gguf_metadata_kv_t *metadata;
-	uint64_t key_len;
-	int rc;
-
-	if ((ctx->metadata =
-		     (struct gguf_metadata_kv_t *)calloc(ctx->metadata_kv_count, sizeof(struct gguf_metadata_kv_t)))
-	    == NULL) {
-		perror("error alloc metadata info, OOM\n");
-		return -1;
-	}
-
-	for (i = 0; i < ctx->metadata_kv_count; i++) {
-		metadata = &ctx->metadata[i];
-
-		key_len = *(uint64_t *)ctx->fptr;
-		ctx->fptr += sizeof(uint64_t);
-
-		if ((metadata->name = (char *)malloc(key_len + 1)) == NULL) {
-			printf("error reading metadata name, OOM, key_len: %llu\n", key_len);
-			return -1;
-		}
-		memset(metadata->name, 0, key_len + 1);
-
-
-		memcpy(metadata->name, ctx->fptr, key_len);
-		ctx->fptr += key_len;
-
-		metadata->type = *(uint32_t *)ctx->fptr;
-		ctx->fptr += sizeof(uint32_t);
-
-		switch (metadata->type) {
-		case GGUF_METADATA_VALUE_TYPE_UINT8:
-			rc = gguf_read_metadata_type_uint8(ctx, metadata);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_INT8:
-			rc = gguf_read_metadata_type_int8(ctx, metadata);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_UINT16:
-			rc = gguf_read_metadata_type_uint16(ctx, metadata);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_INT16:
-			rc = gguf_read_metadata_type_int16(ctx, metadata);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_UINT32:
-			rc = gguf_read_metadata_type_uint32(ctx, metadata);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_INT32:
-			rc = gguf_read_metadata_type_int32(ctx, metadata);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_FLOAT32:
-			rc = gguf_read_metadata_type_fp32(ctx, metadata);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_BOOL:
-			rc = gguf_read_metadata_type_uint8(ctx, metadata);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_STRING:
-			rc = gguf_read_metadata_type_string(ctx, metadata);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_ARRAY:
-			rc = gguf_read_metadata_type_array(ctx, metadata);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_UINT64:
-			rc = gguf_read_metadata_type_uint64(ctx, metadata);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_INT64:
-			rc = gguf_read_metadata_type_int64(ctx, metadata);
-			break;
-
-		case GGUF_METADATA_VALUE_TYPE_FLOAT64:
-			rc = gguf_read_metadata_type_fp64(ctx, metadata);
-			break;
-		default:
-			rc = -1;
-		}
-	}
-
-	if (rc == -1) {
-		perror("error alloc metadata info, OOM\n");
-		return -1;
-	}
-
-	gguf_dump_metadata(ctx);
-
-	return 0;
-}
-
 #ifdef DEBUG_TENSORS
-void dump_tensors(struct ctx_t *ctx)
+void gguf_model_tensors_dump(struct GGUFModel *gguf)
 {
 	uint64_t i;
 
-	for (i = 0; i < ctx->tensor_count; i++) {
-		gguf_tensor *tensor = &ctx->tensors[i];
+	for (i = 0; i < gguf->tensor_count; i++) {
+		GGUFTensor *tensor = &gguf->tensors[i];
 
-		printf("tensor #%4llu name: %32s, ", i, ctx->tensors[i].name);
+		printf("tensor #%4llu name: %32s, ", i, gguf->tensors[i].name);
 		printf("type: %6s, ", gguf_get_type_name(tensor->type));
 		printf("shape: [ %llu,\t%llu,\t%llu,\t%llu ],", tensor->dimensions[0], tensor->dimensions[1],
 		       tensor->dimensions[2], tensor->dimensions[3]);
@@ -581,30 +423,31 @@ void dump_tensors(struct ctx_t *ctx)
 }
 #endif
 
-void *get_tensor_data_ptr(struct ctx_t *ctx_ptr, const char *name, uint64_t *size_bytes)
+void *gguf_get_tensor_data_ptr(struct GGUFModel *gguf, const char *name, uint64_t *size_bytes)
 {
-	for (uint64_t i = 0; i < ctx_ptr->tensor_count; i++) {
-		gguf_tensor *t = &ctx_ptr->tensors[i];
+	for (uint64_t i = 0; i < gguf->tensor_count; i++) {
+		GGUFTensor *t = &gguf->tensors[i];
 		if (strcmp(t->name, name) == 0) {
 			*size_bytes = t->size;
 			return t->data;
 		}
 	}
-	fprintf(stderr, "Warning: Tensor '%s' not found in gguf file.\n", name);
+
+	//	fprintf(stderr, "Warning: Tensor '%s' not found in gguf file.\n", name);
 	*size_bytes = 0;
 	return NULL;
 }
 
-gguf_tensor *get_tensor(struct ctx_t *ctx_ptr, const char *name)
+GGUFTensor *gguf_get_tensor(struct GGUFModel *gguf, const char *name)
 {
-	for (uint64_t i = 0; i < ctx_ptr->tensor_count; i++) {
-		gguf_tensor *t = &ctx_ptr->tensors[i];
+	for (uint64_t i = 0; i < gguf->tensor_count; i++) {
+		GGUFTensor *t = &gguf->tensors[i];
 		if (strcmp(t->name, name) == 0) {
 			return t;
 		}
 	}
 
-	fprintf(stderr, "Warning: Tensor '%s' not found in gguf file.\n", name);
+	//	fprintf(stderr, "Warning: Tensor '%s' not found in gguf file.\n", name);
 	return NULL;
 }
 
@@ -718,26 +561,210 @@ uint64_t calculate_tensor_size(uint32_t type, uint64_t *dims, uint32_t n_dims)
 	}
 }
 
-int gguf_map_weights(struct ctx_t *ctx)
+void gguf_model_metadata_dump(struct GGUFModel *gguf)
+{
+	uint64_t i = 0;
+	GGUFMetadata *metadata;
+	struct gguf_mdata_array_t *array;
+
+	printf("gguf: metadata(%llu):\n", gguf->metadata_num);
+	for (i = 0; i < gguf->metadata_num; i++) {
+		metadata = &gguf->metadata[i];
+
+		printf("kv - #%3llu %-45s ", i, metadata->name);
+
+		switch (metadata->type) {
+		case GGUF_METADATA_VALUE_TYPE_UINT8:
+			printf("u8\t = %u\n", *(uint8_t *)metadata->data);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_INT8:
+			printf("i8\t = %i\n", *(int8_t *)metadata->data);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_UINT16:
+			printf("u16\t = %u\n", *(uint16_t *)metadata->data);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_INT16:
+			printf("i16\t = %i\n", *(int16_t *)metadata->data);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_UINT32:
+			printf("u32\t = %u\n", *(uint32_t *)metadata->data);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_INT32:
+			printf("i32\t = %i\n", *(int32_t *)metadata->data);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_FLOAT32:
+			printf("fp32\t = %lf\n", *(float *)metadata->data);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_BOOL:
+			printf("bool\t = %s\n", *(uint8_t *)metadata->data == 0 ? "false" : "true");
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_STRING:
+			printf("str\t = %.*s\n", 64, (char *)metadata->data);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_ARRAY:
+			array = (struct gguf_mdata_array_t *)metadata->data;
+			printf("arr\t = \n");
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_UINT64:
+			printf("u64\t = %llu\n", *(uint64_t *)metadata->data);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_INT64:
+			printf("i64\t = %lli\n", *(int64_t *)metadata->data);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_FLOAT64:
+			printf("fp64\t = %lf\n", *(double *)metadata->data);
+			break;
+		}
+	}
+}
+
+void gguf_model_metadata_free(struct GGUFModel *gguf)
+{
+	GGUFMetadata *metadata;
+	uint64_t i;
+
+	for (i = 0; i < gguf->metadata_num; i++) {
+		metadata = &gguf->metadata[i];
+
+		if (metadata->name)
+			free(metadata->name);
+
+		if (metadata->data)
+			free(metadata->data);
+	}
+
+	free(gguf->metadata);
+}
+
+int gguf_model_metadata_read(struct GGUFModel *gguf)
+{
+	uint64_t i;
+	GGUFMetadata *metadata;
+	uint64_t key_len;
+	int rc;
+
+	if ((gguf->metadata = (GGUFMetadata *)calloc(gguf->metadata_num, sizeof(GGUFMetadata))) == NULL) {
+		perror("Failed to alloc metadata info, OOM\n");
+		return -1;
+	}
+
+	for (i = 0; i < gguf->metadata_num; i++) {
+		metadata = &gguf->metadata[i];
+
+		key_len = *(uint64_t *)gguf->fptr;
+		gguf->fptr += sizeof(uint64_t);
+
+		if ((metadata->name = (char *)malloc(key_len + 1)) == NULL) {
+			printf("Falied to read metadata name, OOM, key_len: %llu\n", key_len);
+			return -1;
+		}
+		memset(metadata->name, 0, key_len + 1);
+
+		memcpy(metadata->name, gguf->fptr, key_len);
+		gguf->fptr += key_len;
+
+		metadata->type = *(uint32_t *)gguf->fptr;
+		gguf->fptr += sizeof(uint32_t);
+
+		switch (metadata->type) {
+		case GGUF_METADATA_VALUE_TYPE_UINT8:
+			rc = gguf_metadata_read_uint8(gguf, metadata);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_INT8:
+			rc = gguf_metadata_read_int8(gguf, metadata);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_UINT16:
+			rc = gguf_metadata_read_uint16(gguf, metadata);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_INT16:
+			rc = gguf_metadata_read_int16(gguf, metadata);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_UINT32:
+			rc = gguf_metadata_read_uint32(gguf, metadata);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_INT32:
+			rc = gguf_metadata_read_int32(gguf, metadata);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_FLOAT32:
+			rc = gguf_metadata_read_fp32(gguf, metadata);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_BOOL:
+			rc = gguf_metadata_read_uint8(gguf, metadata);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_STRING:
+			rc = gguf_metadata_read_string(gguf, metadata);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_ARRAY:
+			rc = gguf_metadata_read_array(gguf, metadata);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_UINT64:
+			rc = gguf_metadata_read_uint64(gguf, metadata);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_INT64:
+			rc = gguf_metadata_read_int64(gguf, metadata);
+			break;
+
+		case GGUF_METADATA_VALUE_TYPE_FLOAT64:
+			rc = gguf_metadata_read_fp64(gguf, metadata);
+			break;
+		default:
+			rc = -1;
+		}
+	}
+
+	if (rc == -1) {
+		perror("Failed to alloc metadata info, OOM\n");
+		return -1;
+	}
+
+	gguf_model_metadata_dump(gguf);
+
+	return 0;
+}
+
+int gguf_model_map_weights(struct GGUFModel *gguf)
 {
 	// Read tensor metadata
-	ctx->tensors = (gguf_tensor *)calloc(ctx->tensor_count, sizeof(gguf_tensor));
+	gguf->tensors = (GGUFTensor *)calloc(gguf->tensor_count, sizeof(GGUFTensor));
 	uint64_t data_offset = 0; // Will be set after alignment
 
-	for (uint64_t i = 0; i < ctx->tensor_count; i++) {
-		gguf_tensor *tensor = &ctx->tensors[i];
+	for (uint64_t i = 0; i < gguf->tensor_count; i++) {
+		GGUFTensor *tensor = &gguf->tensors[i];
 
-		uint64_t name_len = *(uint64_t *)ctx->fptr;
-		ctx->fptr += sizeof(uint64_t);
+		uint64_t name_len = *(uint64_t *)gguf->fptr;
+		gguf->fptr += sizeof(uint64_t);
 
 		tensor->name = (char *)malloc(name_len + 1);
-		memcpy(tensor->name, ctx->fptr, name_len);
+		memcpy(tensor->name, gguf->fptr, name_len);
 		tensor->name[name_len] = '\0';
-		ctx->fptr += name_len;
+		gguf->fptr += name_len;
 
 		// Read dimensions
-		tensor->n_dims = *(uint32_t *)ctx->fptr;
-		ctx->fptr += 4;
+		tensor->n_dims = *(uint32_t *)gguf->fptr;
+		gguf->fptr += 4;
 
 		if (tensor->n_dims > 4) {
 			fprintf(stderr, "Invalid number of dimensions: %u\n", tensor->n_dims);
@@ -748,16 +775,16 @@ int gguf_map_weights(struct ctx_t *ctx)
 			tensor->dimensions[j] = 1;
 
 		for (uint32_t j = 0; j < tensor->n_dims; j++) {
-			tensor->dimensions[j] = *(uint64_t *)ctx->fptr;
-			ctx->fptr += 8;
+			tensor->dimensions[j] = *(uint64_t *)gguf->fptr;
+			gguf->fptr += 8;
 		}
 
 		// Read type
-		tensor->type = *(uint32_t *)ctx->fptr;
-		ctx->fptr += 4;
+		tensor->type = *(uint32_t *)gguf->fptr;
+		gguf->fptr += 4;
 
-		tensor->offset = *(uint64_t *)ctx->fptr;
-		ctx->fptr += sizeof(uint64_t);
+		tensor->offset = *(uint64_t *)gguf->fptr;
+		gguf->fptr += sizeof(uint64_t);
 
 		// Calculate size
 		tensor->size = calculate_tensor_size(tensor->type, tensor->dimensions, tensor->n_dims);
@@ -768,23 +795,23 @@ int gguf_map_weights(struct ctx_t *ctx)
 	}
 
 	// Align to 32-byte boundary
-	ctx->fptr = (uint8_t *)(((uintptr_t)ctx->fptr + 31) & ~31);
-	data_offset = ctx->fptr - (uint8_t *)ctx->mapped_data;
-	ctx->tensor_data_offset = data_offset;
+	gguf->fptr = (uint8_t *)(((uintptr_t)gguf->fptr + 31) & ~31);
+	data_offset = gguf->fptr - (uint8_t *)gguf->mapped_data;
+	gguf->tensor_data_offset = data_offset;
 
 	// After reading all tensor metadata (name, n_dims, dimensions, type, offset)
-	// and after calculating ctx->tensor_data_offset (the aligned start of the tensor data block)
-	for (uint64_t i = 0; i < ctx->tensor_count; i++) {
-		gguf_tensor *tensor = &ctx->tensors[i];
+	// and after calculating gguf->tensor_data_offset (the aligned start of the tensor data block)
+	for (uint64_t i = 0; i < gguf->tensor_count; i++) {
+		GGUFTensor *tensor = &gguf->tensors[i];
 		// tensor->offset IS THE OFFSET FROM THE START OF THE TENSOR DATA BLOCK
-		tensor->data = (uint8_t *)ctx->mapped_data + ctx->tensor_data_offset + tensor->offset;
+		tensor->data = (uint8_t *)gguf->mapped_data + gguf->tensor_data_offset + tensor->offset;
 	}
 
 	// Check if the last tensor is within bounds
-	if (ctx->tensor_count > 0) {
-		gguf_tensor *last_tensor = &ctx->tensors[ctx->tensor_count - 1];
+	if (gguf->tensor_count > 0) {
+		GGUFTensor *last_tensor = &gguf->tensors[gguf->tensor_count - 1];
 
-		if (ctx->tensor_data_offset + last_tensor->offset + last_tensor->size > ctx->file_size) {
+		if (gguf->tensor_data_offset + last_tensor->offset + last_tensor->size > gguf->file_size) {
 			fprintf(stderr, "Error: End of last tensor exceeds file size.\n");
 			return -1; // Or handle error appropriately
 		} else {
@@ -795,83 +822,90 @@ int gguf_map_weights(struct ctx_t *ctx)
 	return 0;
 }
 
-int gguf_parse(struct ctx_t *ctx, char *path)
+struct GGUFModel *gguf_model_parse(char *path)
 {
+	struct GGUFModel *gguf;
 	struct stat st;
 	uint32_t magic;
 	uint32_t version;
 
-	ctx->fd = open(path, O_RDONLY);
 
-	if (ctx->fd == -1) {
-		perror("error open model file\n");
-		return -1;
+	if ((gguf = malloc(sizeof(struct GGUFModel))) == NULL) {
+		perror("Failed to allocate gguf");
+		return NULL;
 	}
 
-	if (fstat(ctx->fd, &st) == -1) {
-		close(ctx->fd);
-		return -1;
+	gguf->fd = open(path, O_RDONLY);
+
+	if (gguf->fd == -1) {
+		printf("Failed to open gguf file\n");
+		free(gguf);
+		return NULL;
 	}
 
-	ctx->file_size = st.st_size;
+	if (fstat(gguf->fd, &st) == -1)
+		goto _gguf_model_open_error;
 
-	ctx->mapped_data = mmap(NULL, ctx->file_size, PROT_READ, MAP_PRIVATE, ctx->fd, 0);
-	if (ctx->mapped_data == MAP_FAILED) {
-		printf("Failed to mmap file\n");
-		close(ctx->fd);
-		return -1;
+	gguf->file_size = st.st_size;
+
+	gguf->mapped_data = mmap(NULL, gguf->file_size, PROT_READ, MAP_PRIVATE, gguf->fd, 0);
+	if (gguf->mapped_data == MAP_FAILED) {
+		printf("Failed to mmap gguf file\n");
+		goto _gguf_model_open_error;
 	}
 
-	ctx->fptr = (uint8_t *)ctx->mapped_data;
+	gguf->fptr = (uint8_t *)gguf->mapped_data;
 
-	magic = *(uint32_t *)ctx->fptr;
-	ctx->fptr += sizeof(uint32_t);
+	magic = *(uint32_t *)gguf->fptr;
+	gguf->fptr += sizeof(uint32_t);
 	if (magic != 0x46554747) {
-		perror("invalid gguf file\n");
-		return -1;
+		perror("Unsupported GGUF file\n");
+		goto _gguf_model_open_error_unmap;
 	}
 
-	version = *(uint32_t *)ctx->fptr;
-	ctx->fptr += sizeof(uint32_t);
+	version = *(uint32_t *)gguf->fptr;
+	gguf->fptr += sizeof(uint32_t);
 
-	ctx->tensor_count = *(uint64_t *)ctx->fptr;
-	ctx->fptr += sizeof(uint64_t);
+	gguf->tensor_count = *(uint64_t *)gguf->fptr;
+	gguf->fptr += sizeof(uint64_t);
 
-	ctx->metadata_kv_count = *(uint64_t *)ctx->fptr;
-	ctx->fptr += sizeof(uint64_t);
+	gguf->metadata_num = *(uint64_t *)gguf->fptr;
+	gguf->fptr += sizeof(uint64_t);
 
-	gguf_read_metadata(ctx);
+	if (gguf_model_metadata_read(gguf) != 0)
+		goto _gguf_model_open_error_free;
 
-	if (gguf_map_weights(ctx) != 0)
-		return -1;
+	if (gguf_model_map_weights(gguf) != 0)
+		goto _gguf_model_open_error_free;
 
-	return 0;
+	if ((gguf->arch = detect_architecture(gguf_metadata_get_string(gguf, "general.architecture"))) == -1)
+		goto _gguf_model_open_error_free;
+
+#ifdef DEBUG_TENSORS
+	gguf_model_tensors_dump(gguf);
+#endif
+
+	return gguf;
+
+_gguf_model_open_error_free:
+	gguf_model_metadata_free(gguf);
+
+_gguf_model_open_error_unmap:
+	munmap(gguf->mapped_data, gguf->file_size);
+
+_gguf_model_open_error:
+	close(gguf->fd);
+
+	return NULL;
 }
 
-void gguf_close(struct ctx_t *ctx)
+void gguf_model_close(struct GGUFModel *gguf)
 {
-	gguf_free_metadata(ctx);
+	gguf_model_metadata_free(gguf);
 
-	munmap(ctx->mapped_data, ctx->file_size);
-	close(ctx->fd);
-}
+	munmap(gguf->mapped_data, gguf->file_size);
 
-int init_token_table(struct ctx_t *ctx, int num_tokens)
-{
-	ctx->tokenizer.token_table = calloc(num_tokens, sizeof(unsigned char *));
-
-	ctx->tokenizer.token_lens = calloc(num_tokens, sizeof(int));
-	ctx->tokenizer.token_types = calloc(num_tokens, sizeof(int));
-	ctx->tokenizer.token_scores = calloc(num_tokens, sizeof(float));
-
-	ctx->tokenizer.token_count = num_tokens;
-
-	if (!ctx->tokenizer.token_table || !ctx->tokenizer.token_lens || !ctx->tokenizer.token_types) {
-		fprintf(stderr, "Failed to allocate token table\n");
-		return -1;
-	}
-
-	return 0;
+	close(gguf->fd);
 }
 
 static inline bool is_special_token_fast(const char *s, size_t len)
@@ -879,14 +913,14 @@ static inline bool is_special_token_fast(const char *s, size_t len)
 	return len >= 6 && s[0] == '<' && s[len - 1] == '>';
 }
 
-int gguf_metadata_read_token_embeds(struct ctx_t *ctx, char *key, int detect_special)
+int gguf_model_read_token_embeds(struct TIEContext *ctx, struct GGUFModel *gguf, char *key, int detect_special)
 {
-	struct gguf_metadata_kv_t *metadata = NULL;
+	GGUFMetadata *metadata = NULL;
 	uint64_t i, len;
 
-	for (i = 0; i < ctx->metadata_kv_count; i++) {
-		if (!strcmp(ctx->metadata[i].name, key)) {
-			metadata = &ctx->metadata[i];
+	for (i = 0; i < gguf->metadata_num; i++) {
+		if (!strcmp(gguf->metadata[i].name, key)) {
+			metadata = &gguf->metadata[i];
 			break;
 		}
 	}
@@ -901,7 +935,7 @@ int gguf_metadata_read_token_embeds(struct ctx_t *ctx, char *key, int detect_spe
 		return -1;
 	}
 
-	ctx->fptr = metadata->arr_offset;
+	gguf->fptr = metadata->arr_offset;
 	ctx->model->vocab_size = metadata->size;
 
 	if (init_token_table(ctx, ctx->model->vocab_size) != 0) {
@@ -910,11 +944,11 @@ int gguf_metadata_read_token_embeds(struct ctx_t *ctx, char *key, int detect_spe
 	}
 
 	for (i = 0; i < metadata->size; i++) {
-		memcpy(&len, ctx->fptr, sizeof(uint64_t));
+		memcpy(&len, gguf->fptr, sizeof(uint64_t));
 
-		ctx->fptr += sizeof(uint64_t);
+		gguf->fptr += sizeof(uint64_t);
 
-		const unsigned char *raw_token = (const unsigned char *)ctx->fptr;
+		const unsigned char *raw_token = (const unsigned char *)gguf->fptr;
 
 		unsigned char *token_ptr = ctx->tokenizer.pool->data + ctx->tokenizer.pool->size;
 		if (!append_to_pool(ctx->tokenizer.pool, raw_token, len)) {
@@ -936,24 +970,30 @@ int gguf_metadata_read_token_embeds(struct ctx_t *ctx, char *key, int detect_spe
 				}
 				special_tokens.specials[special_tokens.count++] =
 					(SpecialToken){.text = token_ptr, .length = len, .token_id = (int)i};
+
+				/*				char buf[256];
+								memset(buf, 0, sizeof(buf));
+								memcpy(buf, token_ptr, len);
+								printf("special_token#%llu [%s]\n", i, token_ptr);
+				*/
 			}
 		}
 
-		ctx->fptr += len;
+		gguf->fptr += len;
 	}
 
 	return 0;
 }
 
-int gguf_metadata_read_token_types(struct ctx_t *ctx, char *key, int detect_special)
+int gguf_model_read_token_types(struct TIEContext *ctx, struct GGUFModel *gguf, char *key, int detect_special)
 {
-	struct gguf_metadata_kv_t *metadata = NULL;
+	GGUFMetadata *metadata = NULL;
 	uint64_t i;
 	uint32_t type;
 
-	for (i = 0; i < ctx->metadata_kv_count; i++) {
-		if (!strcmp(ctx->metadata[i].name, key)) {
-			metadata = &ctx->metadata[i];
+	for (i = 0; i < gguf->metadata_num; i++) {
+		if (!strcmp(gguf->metadata[i].name, key)) {
+			metadata = &gguf->metadata[i];
 			break;
 		}
 	}
@@ -968,11 +1008,11 @@ int gguf_metadata_read_token_types(struct ctx_t *ctx, char *key, int detect_spec
 		return -1;
 	}
 
-	ctx->fptr = metadata->arr_offset;
+	gguf->fptr = metadata->arr_offset;
 
 	for (i = 0; i < metadata->size; i++) {
-		memcpy(&type, ctx->fptr, sizeof(int32_t));
-		ctx->fptr += sizeof(int32_t);
+		memcpy(&type, gguf->fptr, sizeof(int32_t));
+		gguf->fptr += sizeof(int32_t);
 
 		ctx->tokenizer.token_types[i] = type;
 
@@ -991,15 +1031,15 @@ int gguf_metadata_read_token_types(struct ctx_t *ctx, char *key, int detect_spec
 	return 0;
 }
 
-int gguf_metadata_read_token_scores(struct ctx_t *ctx, char *key)
+int gguf_model_read_token_scores(struct TIEContext *ctx, struct GGUFModel *gguf, char *key)
 {
-	struct gguf_metadata_kv_t *metadata = NULL;
+	GGUFMetadata *metadata = NULL;
 	uint64_t i;
 	float score;
 
-	for (i = 0; i < ctx->metadata_kv_count; i++) {
-		if (!strcmp(ctx->metadata[i].name, key)) {
-			metadata = &ctx->metadata[i];
+	for (i = 0; i < gguf->metadata_num; i++) {
+		if (!strcmp(gguf->metadata[i].name, key)) {
+			metadata = &gguf->metadata[i];
 			break;
 		}
 	}
@@ -1014,11 +1054,11 @@ int gguf_metadata_read_token_scores(struct ctx_t *ctx, char *key)
 		return -1;
 	}
 
-	ctx->fptr = metadata->arr_offset;
+	gguf->fptr = metadata->arr_offset;
 
 	for (i = 0; i < metadata->size; i++) {
-		memcpy(&score, ctx->fptr, sizeof(float));
-		ctx->fptr += sizeof(float);
+		memcpy(&score, gguf->fptr, sizeof(float));
+		gguf->fptr += sizeof(float);
 
 		ctx->tokenizer.token_scores[i] = score;
 	}
@@ -1026,16 +1066,16 @@ int gguf_metadata_read_token_scores(struct ctx_t *ctx, char *key)
 	return 0;
 }
 
-int gguf_metadata_read_token_merges(struct ctx_t *ctx, char *key)
+int gguf_model_read_token_merges(struct TIEContext *ctx, struct GGUFModel *gguf, char *key)
 {
-	struct gguf_metadata_kv_t *metadata = NULL;
+	GGUFMetadata *metadata = NULL;
 	char merge_str[512];
 	uint64_t i, str_len;
 
 	// 1. Find metadata entry
-	for (i = 0; i < ctx->metadata_kv_count; i++) {
-		if (!strcmp(ctx->metadata[i].name, key)) {
-			metadata = &ctx->metadata[i];
+	for (i = 0; i < gguf->metadata_num; i++) {
+		if (!strcmp(gguf->metadata[i].name, key)) {
+			metadata = &gguf->metadata[i];
 			break;
 		}
 	}
@@ -1050,23 +1090,24 @@ int gguf_metadata_read_token_merges(struct ctx_t *ctx, char *key)
 		return -1;
 	}
 
-	memset((void *)&bpe_merges_map, 0, sizeof(bpe_merge_map_t));
+	memset((void *)&bpe_merges_map, 0, sizeof(BpeMergeMap));
 
-	ctx->fptr = metadata->arr_offset;
+	gguf->fptr = metadata->arr_offset;
 	ctx->model->merges_size = metadata->size;
+	printf("model merges_size: %llu\n", ctx->model->merges_size);
 
 	for (i = 0; i < metadata->size; i++) {
-		str_len = *(uint64_t *)ctx->fptr;
-		ctx->fptr += sizeof(uint64_t);
+		str_len = *(uint64_t *)gguf->fptr;
+		gguf->fptr += sizeof(uint64_t);
 
 		if (str_len >= sizeof(merge_str)) {
 			printf("Merge string too long\n");
 			return -1;
 		}
 
-		memcpy(merge_str, ctx->fptr, str_len);
+		memcpy(merge_str, gguf->fptr, str_len);
 		merge_str[str_len] = '\0';
-		ctx->fptr += str_len;
+		gguf->fptr += str_len;
 
 		// 2. Split into two tokens
 		char *space = strchr(merge_str, ' ');
@@ -1088,34 +1129,4 @@ int gguf_metadata_read_token_merges(struct ctx_t *ctx, char *key)
 	}
 
 	return 0;
-}
-
-size_t get_ggml_block_size(int type)
-{
-	switch (type) {
-	case GGML_TYPE_Q4_K:
-		return sizeof(block_q4_k);
-	case GGML_TYPE_Q6_K:
-		return sizeof(block_q6_k);
-	case GGML_TYPE_Q8_0:
-		return sizeof(block_q8_0);
-	default:
-		printf("FATAL: MoE operates on unsupported tensor type %d\n", type);
-		return 0;
-	}
-}
-
-size_t ggml_type_size(ggml_type type)
-{
-	switch (type) {
-	case GGML_TYPE_F32:
-		return sizeof(float);
-	case GGML_TYPE_BF16:
-		return sizeof(uint16_t);
-	case GGML_TYPE_Q8_0:
-		return sizeof(int8_t);
-	default:
-		printf("FATAL: Unknown size for type %d\n", type);
-		return 0;
-	}
 }

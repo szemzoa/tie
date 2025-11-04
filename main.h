@@ -8,6 +8,11 @@
 #include "engine.h"
 #include "model.h"
 
+typedef enum {
+	MODEL_TYPE_TEXT,
+	MODEL_TYPE_VISION,
+} ModelType;
+
 enum {
 	TOOL_CALL_STATE_UNINITIALIZED = 0,
 	TOOL_CALL_STATE_IDLE,
@@ -31,28 +36,38 @@ struct tool_entry_t {
 	tool_func_t func;
 };
 
-struct ctx_t {
+struct GGUFModel {
 	int fd;
 	size_t file_size;
 	void *mapped_data;
 	uint8_t *fptr;
 
-	uint64_t metadata_kv_count;
-	struct gguf_metadata_kv_t *metadata;
-
+	uint64_t metadata_num;
 	uint64_t tensor_count;
 	uint64_t tensor_loaded;
 	uint64_t tensor_data_offset;
-	gguf_tensor *tensors;
+
+	GGUFMetadata *metadata;
+	GGUFTensor *tensors;
+
+	int arch;
+};
+
+struct TIEContext {
+	struct GGUFModel *gguf_text;   // Container for the main text model GGUF
+	struct GGUFModel *gguf_vision; // Container for the mmproj GGUF (can be NULL)
 
 	Model *model;
+	VisionModel *model_vision;
+
 	MemLayout mem;
+	MemLayoutVision vision_mem;
 
 	uint32_t kv_pos;
 	LayerKVCache *kv_cache;
 
-	rope_cache_t *rope_cache_local;
-	rope_cache_t *rope_cache_global;
+	RopeCacheType *rope_cache_local;
+	RopeCacheType *rope_cache_global;
 
 	unsigned int utf8_state;
 	unsigned int utf8_codepoint;

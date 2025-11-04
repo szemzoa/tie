@@ -9,18 +9,16 @@
 #include "math_dispatch.h"
 #include "threadpool.h"
 
-
 float silu_table[SILU_TABLE_SIZE];
 
-#if 0
 #define DEBUG_MEMTYPE_NUM 10
 void debug_memtype_f32(MemType *mem, char *name, int layer_idx)
 {
 	float *p = mem->data;
 
-	return;
+	//	return;
 
-	printf("--- layer%u_%s --- [", layer_idx, name);
+	printf("--- layer%d_%s --- [", layer_idx, name);
 	for (int i = 0; i < DEBUG_MEMTYPE_NUM; i++) {
 		if (i < DEBUG_MEMTYPE_NUM - 1) {
 			printf("%.10f, ", p[i]);
@@ -31,6 +29,7 @@ void debug_memtype_f32(MemType *mem, char *name, int layer_idx)
 	printf("]\n");
 }
 
+#if 0
 static void debug_check_tensor(const char *name, MemType *mem, int len, int layer, int batch_idx)
 {
 	float *ptr = mem->data;
@@ -64,7 +63,83 @@ static void debug_check_tensor(const char *name, MemType *mem, int len, int laye
 		abort();
 	}
 }
+
+int compare_tensor_with_file(const char *ref_filename, const float *your_c_tensor, long num_elements, float tolerance)
+{
+	FILE *file = fopen(ref_filename, "rb");
+	if (file == NULL) {
+		fprintf(stderr, "ERROR: Could not open reference file %s\n", ref_filename);
+		return 1; // Return error
+	}
+
+	// Allocate memory to hold the reference data
+	float *ref_tensor = (float *)malloc(num_elements * sizeof(float));
+	if (ref_tensor == NULL) {
+		fprintf(stderr, "ERROR: Could not allocate memory for reference tensor\n");
+		fclose(file);
+		return 1;
+	}
+
+	// Read the data from the file
+	long elements_read = fread(ref_tensor, sizeof(float), num_elements, file);
+	fclose(file);
+
+	if (elements_read != num_elements) {
+		fprintf(stderr, "ERROR: Read mismatch. Expected %ld elements, got %ld\n", num_elements, elements_read);
+		free(ref_tensor);
+		return 1;
+	}
+
+	// --- The Comparison ---
+	int mismatch_found = 0;
+	for (long i = 0; i < num_elements; i++) {
+		float diff = fabsf(your_c_tensor[i] - ref_tensor[i]);
+
+		if (diff > tolerance) {
+			fprintf(stderr, "\n--- MISMATCH DETECTED ---\n");
+			fprintf(stderr, "File: %s\n", ref_filename);
+			fprintf(stderr, "Index: %ld (elements: %ld)\n", i, num_elements);
+			fprintf(stderr, "  C Value:   %f\n", your_c_tensor[i]);
+			fprintf(stderr, "  Ref Value: %f\n", ref_tensor[i]);
+			fprintf(stderr, "  Difference: %f\n", diff);
+
+			mismatch_found = 1;
+			break; // Stop at the first error
+		}
+	}
+
+	free(ref_tensor); // Clean up
+
+	if (!mismatch_found) {
+		printf("SUCCESS: %s matches the reference.\n", ref_filename);
+	} else {
+		exit(EXIT_FAILURE);
+	}
+
+	return mismatch_found;
+}
+
+int load_tensor_from_file(const char *ref_filename, float *dest_tensor, long num_elements)
+{
+	FILE *file = fopen(ref_filename, "rb");
+	if (file == NULL) {
+		fprintf(stderr, "ERROR: Could not open file %s for loading.\n", ref_filename);
+		return 1;
+	}
+
+	long elements_read = fread(dest_tensor, sizeof(float), num_elements, file);
+	fclose(file);
+
+	if (elements_read != num_elements) {
+		fprintf(stderr, "ERROR: Read mismatch. Expected %ld elements, got %ld\n", num_elements, elements_read);
+		return 1;
+	}
+
+	printf("SUCCESS: Loaded %ld elements from %s.\n", elements_read, ref_filename);
+	return 0;
+}
 #endif
+
 
 // A fast, high-precision expf approximation by Nicol N. Schraudolph.
 inline float expf_fast(float x)
@@ -102,7 +177,7 @@ static inline void *xaligned_alloc(size_t alignment, size_t size_bytes)
 	return p;
 }
 
-void alloc_memtype(MemType *m, ggml_type t, size_t nelems)
+void alloc_memtype(MemType *m, GGMLType t, size_t nelems)
 {
 	m->type = t;
 	size_t total = nelems * ggml_type_size(t);
@@ -119,7 +194,7 @@ void free_memtype(MemType *m)
 	free(m->data);
 }
 
-void kv_cache_reset(struct ctx_t *ctx)
+void kv_cache_reset(struct TIEContext *ctx)
 {
 	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
 
@@ -139,7 +214,8 @@ void silu_table_init()
 	}
 }
 
-void rope_cache_init(struct ctx_t *ctx, rope_cache_t *rope_cache, int max_pos, int head_dim, float base, float scale)
+void rope_cache_init(struct TIEContext *ctx, RopeCacheType *rope_cache, int max_pos, int head_dim, float base,
+		     float scale)
 {
 	float scaled_pos;
 
@@ -201,7 +277,7 @@ MemType mem_slice(MemType *buffer, size_t offset_elements)
 	return slice;
 }
 
-void embedding_scale_gemma3(struct ctx_t *ctx, MemType *hidden_state_slice)
+void embedding_scale_gemma3(struct TIEContext *ctx, MemType *hidden_state_slice)
 {
 	float *hidden_data_fp32;
 
@@ -225,7 +301,7 @@ static inline void *get_kv_head(const MemType *cache, int t, int kv_head_idx, in
 void attention_worker(void *arg)
 {
 	attention_worker_task_t *task = (attention_worker_task_t *)arg;
-	struct ctx_t *ctx = task->ctx;
+	struct TIEContext *ctx = task->ctx;
 	AttentionType attn_type = task->attn_type;
 
 	// Get model dimensions and memory type info
@@ -252,7 +328,7 @@ void attention_worker(void *arg)
 			dispatch_convert(&q_head_slice, q_head_fp32_scratch, ctx->model->head_dim);
 
 			// PRE-SCALE THE QUERY
-			if (ctx->model->arch == ARCH_GEMMA3) {
+			if (ctx->gguf_text->arch == ARCH_GEMMA3) {
 
 				float q_scale = 1.0f / sqrtf((float)ctx->model->head_dim);
 				float *q_fp32_data = (float *)q_head_fp32_scratch->data;
@@ -355,7 +431,7 @@ void attention_worker(void *arg)
 void attention_worker_gemma3n(void *arg)
 {
 	attention_worker_task_t *task = (attention_worker_task_t *)arg;
-	struct ctx_t *ctx = task->ctx;
+	struct TIEContext *ctx = task->ctx;
 	AttentionType attn_type = task->attn_type;
 
 	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
@@ -454,7 +530,7 @@ void attention_worker_gemma3n(void *arg)
 	free(task);
 }
 
-void attention(struct ctx_t *ctx, int batch_len, int layer_idx, int kv_source_layer_idx, int start_pos,
+void attention(struct TIEContext *ctx, int batch_len, int layer_idx, int kv_source_layer_idx, int start_pos,
 	       AttentionType attn_type, attention_fn worker)
 {
 	int num_threads = thread_pool->num_threads;
@@ -575,9 +651,9 @@ void find_top_k(const float *router_logits, int expert_count, int k, ExpertChoic
 void process_expert_task(void *arg)
 {
 	expert_task_t *task = (expert_task_t *)arg;
-	struct ctx_t *ctx = task->ctx;
+	struct TIEContext *ctx = task->ctx;
 	int expert_idx = task->expert_idx;
-	layer_weights *l = &ctx->model->layers[task->layer_idx];
+	LayerWeights *l = &ctx->model->layers[task->layer_idx];
 
 	// Use thread-specific scratch buffers
 	MemType *ffn_hidden1 = &ctx->mem.ffn_hidden1_scratch[task->thread_id];
@@ -585,13 +661,13 @@ void process_expert_task(void *arg)
 	MemType *expert_out = &ctx->mem.expert_outputs[task->thread_id];
 	MemType *normed_input = &task->normed_input;
 
-	size_t up_gate_block_size_bytes = get_ggml_block_size(l->ffn_up_exps.mem.type);
+	size_t up_gate_block_size_bytes = ggml_block_size(l->ffn_up_exps.mem.type);
 	size_t up_gate_blocks_per_row = ctx->model->embed_dim / QK_K;
 	size_t up_gate_blocks_per_matrix = ctx->model->expert_ffn_dim * up_gate_blocks_per_row;
 	size_t up_gate_matrix_size_bytes = up_gate_blocks_per_matrix * up_gate_block_size_bytes;
 
 	// Pre-calculate sizes for the DOWN expert matrices
-	size_t down_block_size_bytes = get_ggml_block_size(l->ffn_down_exps.mem.type);
+	size_t down_block_size_bytes = ggml_block_size(l->ffn_down_exps.mem.type);
 	size_t down_blocks_per_row = ctx->model->expert_ffn_dim / QK_K;
 	size_t down_blocks_per_matrix = ctx->model->embed_dim * down_blocks_per_row;
 	size_t down_matrix_size_bytes = down_blocks_per_matrix * down_block_size_bytes;
@@ -624,14 +700,13 @@ void process_expert_task(void *arg)
 	free(task);
 }
 
-int transformer_layer_qwen3(struct ctx_t *ctx, int layer_idx, int batch_len)
+int transformer_layer_qwen3(struct TIEContext *ctx, int layer_idx, int batch_len)
 {
-	layer_weights *l = &ctx->model->layers[layer_idx];
+	LayerWeights *l = &ctx->model->layers[layer_idx];
 	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
 	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
 	AttentionType attn_type = ATTN_TYPE_GLOBAL;
-	rope_cache_t *active_rope_cache = ctx->rope_cache_global;
-
+	RopeCacheType *active_rope_cache = ctx->rope_cache_global;
 
 	// The absolute starting position for this batch
 	int start_pos = ctx->kv_pos;
@@ -673,7 +748,7 @@ int transformer_layer_qwen3(struct ctx_t *ctx, int layer_idx, int batch_len)
 			}
 
 			// Use the absolute position for RoPE
-			dispatch_apply_rope_cache(ctx, active_rope_cache, &Q_slice, absolute_pos, ctx->model->head_dim);
+			dispatch_apply_rope_cache(active_rope_cache, &Q_slice, absolute_pos, ctx->model->head_dim);
 		}
 
 		for (int h = 0; h < ctx->model->num_kv_heads; h++) {
@@ -685,7 +760,7 @@ int transformer_layer_qwen3(struct ctx_t *ctx, int layer_idx, int batch_len)
 			}
 
 			// Use the absolute position for RoPE
-			dispatch_apply_rope_cache(ctx, active_rope_cache, &K_slice, absolute_pos, ctx->model->head_dim);
+			dispatch_apply_rope_cache(active_rope_cache, &K_slice, absolute_pos, ctx->model->head_dim);
 		}
 	}
 
@@ -719,7 +794,7 @@ int transformer_layer_qwen3(struct ctx_t *ctx, int layer_idx, int batch_len)
 	if (ctx->model->is_moe) {
 
 		// Get the size of a single quantization block for the expert tensors
-		size_t block_size_bytes = get_ggml_block_size(l->ffn_up_exps.mem.type);
+		size_t block_size_bytes = ggml_block_size(l->ffn_up_exps.mem.type);
 		if (block_size_bytes == 0) {
 			return -1;
 		}
@@ -792,9 +867,6 @@ int transformer_layer_qwen3(struct ctx_t *ctx, int layer_idx, int batch_len)
 				 ctx->model->embed_dim, ctx->model->ffn_dim, true);
 
 		/* Call the interface activation function */
-		//		ctx->interface.activation(&ctx->mem.gate_proj_output, &ctx->mem.up_proj_output,
-		//					  batch_len * ctx->model->ffn_dim);
-
 		dispatch_swiglu_activation(&ctx->mem.gate_proj_output, &ctx->mem.up_proj_output,
 					   batch_len * ctx->model->ffn_dim);
 
@@ -810,13 +882,13 @@ int transformer_layer_qwen3(struct ctx_t *ctx, int layer_idx, int batch_len)
 	return 0;
 }
 
-int transformer_layer_gemma3(struct ctx_t *ctx, int layer_idx, int batch_len)
+int transformer_layer_gemma3(struct TIEContext *ctx, int layer_idx, int batch_len)
 {
-	layer_weights *l = &ctx->model->layers[layer_idx];
+	LayerWeights *l = &ctx->model->layers[layer_idx];
 	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
 	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
 	AttentionType attn_type;
-	rope_cache_t *active_rope_cache;
+	RopeCacheType *active_rope_cache;
 
 	// The absolute starting position for this batch
 	int start_pos = ctx->kv_pos;
@@ -872,7 +944,7 @@ int transformer_layer_gemma3(struct ctx_t *ctx, int layer_idx, int batch_len)
 			}
 
 			// Use the absolute position for RoPE
-			dispatch_apply_rope_cache(ctx, active_rope_cache, &Q_slice, absolute_pos, ctx->model->head_dim);
+			dispatch_apply_rope_cache(active_rope_cache, &Q_slice, absolute_pos, ctx->model->head_dim);
 		}
 
 		for (int h = 0; h < ctx->model->num_kv_heads; h++) {
@@ -884,7 +956,7 @@ int transformer_layer_gemma3(struct ctx_t *ctx, int layer_idx, int batch_len)
 			}
 
 			// Use the absolute position for RoPE
-			dispatch_apply_rope_cache(ctx, active_rope_cache, &K_slice, absolute_pos, ctx->model->head_dim);
+			dispatch_apply_rope_cache(active_rope_cache, &K_slice, absolute_pos, ctx->model->head_dim);
 		}
 	}
 
@@ -971,7 +1043,7 @@ int transformer_layer_gemma3(struct ctx_t *ctx, int layer_idx, int batch_len)
 }
 
 // Implements the full LAUREL block logic for a given input.
-void dispatch_laurel(struct ctx_t *ctx, MemType *output, const MemType *input, layer_weights *l, int batch_len)
+void dispatch_laurel(struct TIEContext *ctx, MemType *output, const MemType *input, LayerWeights *l, int batch_len)
 {
 	const int embed_dim = ctx->model->embed_dim;
 	const int laurel_rank = 64; // From the config
@@ -1001,7 +1073,145 @@ void dispatch_laurel(struct ctx_t *ctx, MemType *output, const MemType *input, l
 	free_memtype(&laurel_right);
 }
 
-void dispatch_altup_predict(struct ctx_t *ctx, MemType *predicted_states, MemType *input_states, layer_weights *l,
+// This can be optimized with AVX2.
+void dispatch_subtract_to_buffer(const MemType *src1, const MemType *src2, MemType *dest, int size)
+{
+	const float *src1_data = (const float *)src1->data;
+	const float *src2_data = (const float *)src2->data;
+	float *dest_data = (float *)dest->data;
+
+	// A simple loop for element-wise addition.
+	for (int i = 0; i < size; i++) {
+		dest_data[i] = src1_data[i] - src2_data[i];
+	}
+}
+
+// This can be optimized with AVX2.
+void dispatch_elementwise_mul(MemType *dest, const MemType *src1, const MemType *src2, int size)
+{
+	float *dest_data = (float *)dest->data;
+	const float *src1_data = (const float *)src1->data;
+	const float *src2_data = (const float *)src2->data;
+
+	for (int i = 0; i < size; i++) {
+		dest_data[i] = src1_data[i] * src2_data[i];
+	}
+}
+
+// This can be optimized with AVX2.
+void dispatch_elementwise_mul_tensor(MemType *dest, const MemType *src1, const Tensor *src2, int batch_len,
+				     int embed_dim)
+{
+	float *dest_data = (float *)dest->data;
+	const float *src1_data = (const float *)src1->data;
+	const float *src2_data = (const float *)src2->mem.data;
+
+	int size = batch_len * embed_dim;
+
+	for (int i = 0; i < size; i++) {
+		// Use the modulo operator to repeat/broadcast the smaller src2 vector
+		// for each token in the batch.
+		dest_data[i] = src1_data[i] * src2_data[i % embed_dim];
+	}
+}
+
+void dispatch_rms_norm_weightless(MemType *tensor, int size, float eps)
+{
+	float *x = (float *)tensor->data;
+
+	// Unrolled accumulation for faster reduction
+	float ss0 = 0.0f, ss1 = 0.0f, ss2 = 0.0f, ss3 = 0.0f;
+	int i = 0;
+	for (; i <= size - 4; i += 4) {
+		ss0 = fmaf(x[i + 0], x[i + 0], ss0);
+		ss1 = fmaf(x[i + 1], x[i + 1], ss1);
+		ss2 = fmaf(x[i + 2], x[i + 2], ss2);
+		ss3 = fmaf(x[i + 3], x[i + 3], ss3);
+	}
+	float ss = ss0 + ss1 + ss2 + ss3;
+	for (; i < size; i++) {
+		ss = fmaf(x[i], x[i], ss);
+	}
+
+	float inv_rms = 1.0f / sqrtf(ss / size + eps);
+
+	// Apply scale
+	for (int i = 0; i < size; ++i) {
+		x[i] *= inv_rms;
+	}
+}
+
+void dispatch_gaussian_topk(MemType *gate_tensor, int size)
+{
+	float *data = (float *)gate_tensor->data;
+	const float f_sparsity_std_mul = 1.6448533535f; // Corresponds to the 95th percentile
+
+	if (size == 0)
+		return;
+
+	// Numerically Stable Single-Pass Algorithm (Welford's)
+	float mean = 0.0;
+	float m2 = 0.0;
+	float delta;
+
+	for (int i = 0; i < size; i++) {
+		delta = data[i] - mean;
+		mean += delta / (i + 1);
+		m2 += delta * (data[i] - mean);
+	}
+
+	float variance = m2 / size; // Population variance
+	float std_dev = sqrt(variance);
+
+	// Determine the cutoff value
+	float cutoff = mean + std_dev * f_sparsity_std_mul;
+
+	// Apply the ReLU-like sparsity: output = max(0, input - cutoff)
+	for (int i = 0; i < size; i++) {
+		data[i] = (data[i] > cutoff) ? (data[i] - cutoff) : 0.0f;
+	}
+}
+
+inline float gelu_fast(float x)
+{
+	return 0.5f * x * (1.0f + tanhf(0.79788456f * x * (1.0f + 0.044715f * x * x)));
+}
+
+// GELU activation function to a tensor in-place.
+// This can be optimized with AVX2.
+void dispatch_gelu_inplace(MemType *tensor, int size)
+{
+	float *data = (float *)tensor->data;
+	for (int i = 0; i < size; i++) {
+		data[i] = gelu_fast(data[i]);
+	}
+}
+
+void dispatch_softcap_logits(MemType *logits, int size, float cap)
+{
+	if (cap <= 0.0f)
+		return;
+
+	float *data = (float *)logits->data;
+	float inv_cap = 1.0f / cap;
+
+	for (int i = 0; i < size; i++) {
+		data[i] = tanhf(data[i] * inv_cap) * cap;
+	}
+}
+
+void dispatch_apply_residual_to_buffer(const MemType *src1, const MemType *src2, MemType *dest, int size)
+{
+	const float *src1_data = (const float *)src1->data;
+	const float *src2_data = (const float *)src2->data;
+	float *dest_data = (float *)dest->data;
+
+	for (int i = 0; i < size; i++) {
+		dest_data[i] = src1_data[i] + src2_data[i];
+	}
+}
+
+void dispatch_altup_predict(struct TIEContext *ctx, MemType *predicted_states, MemType *input_states, LayerWeights *l,
 			    int batch_len, int active_idx)
 {
 	const int embed_dim = ctx->model->embed_dim;
@@ -1075,81 +1285,11 @@ void dispatch_altup_predict(struct ctx_t *ctx, MemType *predicted_states, MemTyp
 	free_memtype(&mixed_states);
 }
 
-void dispatch_rms_norm_weightless(MemType *tensor, int size, float eps)
-{
-	float *x = (float *)tensor->data;
-
-	// Unrolled accumulation for faster reduction
-	float ss0 = 0.0f, ss1 = 0.0f, ss2 = 0.0f, ss3 = 0.0f;
-	int i = 0;
-	for (; i <= size - 4; i += 4) {
-		ss0 = fmaf(x[i + 0], x[i + 0], ss0);
-		ss1 = fmaf(x[i + 1], x[i + 1], ss1);
-		ss2 = fmaf(x[i + 2], x[i + 2], ss2);
-		ss3 = fmaf(x[i + 3], x[i + 3], ss3);
-	}
-	float ss = ss0 + ss1 + ss2 + ss3;
-	for (; i < size; i++) {
-		ss = fmaf(x[i], x[i], ss);
-	}
-
-	float inv_rms = 1.0f / sqrtf(ss / size + eps);
-
-	// Apply scale
-	for (int i = 0; i < size; ++i) {
-		x[i] *= inv_rms;
-	}
-}
-
-void dispatch_gaussian_topk(MemType *gate_tensor, int size)
-{
-	float *data = (float *)gate_tensor->data;
-	const float f_sparsity_std_mul = 1.6448533535f; // Corresponds to the 95th percentile
-
-	if (size == 0)
-		return;
-
-	// Numerically Stable Single-Pass Algorithm (Welford's)
-	float mean = 0.0;
-	float m2 = 0.0;
-	float delta;
-
-	for (int i = 0; i < size; i++) {
-		delta = data[i] - mean;
-		mean += delta / (i + 1);
-		m2 += delta * (data[i] - mean);
-	}
-
-	float variance = m2 / size; // Population variance
-	float std_dev = sqrt(variance);
-
-	// Determine the cutoff value
-	float cutoff = mean + std_dev * f_sparsity_std_mul;
-
-	// Apply the ReLU-like sparsity: output = max(0, input - cutoff)
-	for (int i = 0; i < size; i++) {
-		data[i] = (data[i] > cutoff) ? (data[i] - cutoff) : 0.0f;
-	}
-}
-
-// This can be optimized with AVX2.
-void dispatch_subtract_to_buffer(const MemType *src1, const MemType *src2, MemType *dest, int size)
-{
-	const float *src1_data = (const float *)src1->data;
-	const float *src2_data = (const float *)src2->data;
-	float *dest_data = (float *)dest->data;
-
-	// A simple loop for element-wise addition.
-	for (int i = 0; i < size; i++) {
-		dest_data[i] = src1_data[i] - src2_data[i];
-	}
-}
-
 // corrected_states: Output: The final 4 corrected states for this layer
 // predictions: Input: The 4 states from the 'P' step
 // final_active_output: Input: The result of the 'A' step
-void dispatch_altup_correct(struct ctx_t *ctx, MemType *corrected_states, const MemType *predictions,
-			    MemType *final_active_output, layer_weights *l, int batch_len, int active_idx)
+void dispatch_altup_correct(struct TIEContext *ctx, MemType *corrected_states, const MemType *predictions,
+			    MemType *final_active_output, LayerWeights *l, int batch_len, int active_idx)
 {
 	const int embed_dim = ctx->model->embed_dim;
 	const int num_altup = ctx->model->altup_num_inputs;
@@ -1223,56 +1363,12 @@ void dispatch_altup_correct(struct ctx_t *ctx, MemType *corrected_states, const 
 	free_memtype(&innovation);
 }
 
-// This can be optimized with AVX2.
-void dispatch_elementwise_mul(MemType *dest, const MemType *src1, const MemType *src2, int size)
-{
-	float *dest_data = (float *)dest->data;
-	const float *src1_data = (const float *)src1->data;
-	const float *src2_data = (const float *)src2->data;
-
-	for (int i = 0; i < size; i++) {
-		dest_data[i] = src1_data[i] * src2_data[i];
-	}
-}
-
-// This can be optimized with AVX2.
-void dispatch_elementwise_mul_tensor(MemType *dest, const MemType *src1, const Tensor *src2, int batch_len,
-				     int embed_dim)
-{
-	float *dest_data = (float *)dest->data;
-	const float *src1_data = (const float *)src1->data;
-	const float *src2_data = (const float *)src2->mem.data;
-
-	int size = batch_len * embed_dim;
-
-	for (int i = 0; i < size; i++) {
-		// Use the modulo operator to repeat/broadcast the smaller src2 vector
-		// for each token in the batch.
-		dest_data[i] = src1_data[i] * src2_data[i % embed_dim];
-	}
-}
-
-inline float gelu_fast(float x)
-{
-	return 0.5f * x * (1.0f + tanhf(0.79788456f * x * (1.0f + 0.044715f * x * x)));
-}
-
-// GELU activation function to a tensor in-place.
-// This can be optimized with AVX2.
-void dispatch_gelu_inplace(MemType *tensor, int size)
-{
-	float *data = (float *)tensor->data;
-	for (int i = 0; i < size; i++) {
-		data[i] = gelu_fast(data[i]);
-	}
-}
-
 // This function calculates the final refinement_residual
-void dispatch_pli_gating(struct ctx_t *ctx,
+void dispatch_pli_gating(struct TIEContext *ctx,
 			 MemType *refinement_residual,	 // The final output buffer
 			 const MemType *active_state,	 // Input: The active state from the 'Corrected' array
 			 const MemType *per_layer_input, // Input: The 256-dim PLI vector for this layer
-			 layer_weights *l, int batch_len)
+			 LayerWeights *l, int batch_len)
 {
 	const int embed_dim = ctx->model->embed_dim;
 	const int pli_dim = ctx->model->pli_dim;
@@ -1322,7 +1418,6 @@ void dispatch_pli_gating(struct ctx_t *ctx,
 	free_memtype(&projected_state);
 }
 
-
 /* Extracts all per-layer inputs for a specific layer from the main PLI buffer.
  * The source buffer has a layout of [batch_len][num_layers][pli_dim].
  * The destination buffer will have a contiguous layout of [batch_len][pli_dim].
@@ -1346,20 +1441,7 @@ void get_per_layer_input_for_layer(MemType *dest_buffer,    // Pre-allocated des
 	}
 }
 
-void dispatch_softcap_logits(MemType *logits, int size, float cap)
-{
-	if (cap <= 0.0f)
-		return;
-
-	float *data = (float *)logits->data;
-	float inv_cap = 1.0f / cap;
-
-	for (int i = 0; i < size; i++) {
-		data[i] = tanhf(data[i] * inv_cap) * cap;
-	}
-}
-
-void prepare_next_token_standard(struct ctx_t *ctx, int next_token)
+void prepare_next_token_standard(struct TIEContext *ctx, int next_token)
 {
 	// Create a slice for this token's position in the hidden_state buffer
 	MemType hidden_state_slice = mem_slice(&ctx->mem.hidden_state, 0);
@@ -1370,7 +1452,7 @@ void prepare_next_token_standard(struct ctx_t *ctx, int next_token)
 		ctx->model->interface.embedding_scale(ctx, &hidden_state_slice);
 }
 
-void prepare_next_token_gemma3n(struct ctx_t *ctx, int next_token)
+void prepare_next_token_gemma3n(struct TIEContext *ctx, int next_token)
 {
 	const int embed_dim = ctx->model->embed_dim;
 	const int pli_dim = ctx->model->pli_dim;
@@ -1432,8 +1514,28 @@ void prepare_next_token_gemma3n(struct ctx_t *ctx, int next_token)
 	free_memtype(&pli_from_proj);
 }
 
+void process_embeddings(struct TIEContext *ctx, MemType *embeddings, size_t n_tokens)
+{
+	if (n_tokens == 0)
+		return;
+
+	MemType hidden_state_slice = mem_slice(&ctx->mem.hidden_state, (n_tokens - 1) * ctx->model->embed_dim);
+
+	// Run the transformer layers.
+	for (int l = 0; l < ctx->model->num_layers; l++) {
+		ctx->model->interface.transformer_layer(ctx, l, n_tokens);
+	}
+
+	MemType hidden_state_first_slice = mem_slice(&ctx->mem.hidden_state, 0);
+	memcpy(hidden_state_first_slice.data, hidden_state_slice.data,
+	       ctx->model->embed_dim * ggml_type_size(ctx->mem.hidden_state.type));
+
+	// Update the KV cache position.
+	ctx->kv_pos += n_tokens;
+}
+
 // Process prompt tokens (Qwen3, Gemma3)
-void process_prompt_standard(struct ctx_t *ctx, int *prompt_tokens, size_t prompt_len)
+void process_prompt_standard(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len)
 {
 	MemType hidden_state_slice;
 
@@ -1447,19 +1549,12 @@ void process_prompt_standard(struct ctx_t *ctx, int *prompt_tokens, size_t promp
 			ctx->model->interface.embedding_scale(ctx, &hidden_state_slice);
 	}
 
-	for (int l = 0; l < ctx->model->num_layers; l++) {
-		ctx->model->interface.transformer_layer(ctx, l, prompt_len);
-	}
-
-	MemType hidden_state_first_slice = mem_slice(&ctx->mem.hidden_state, 0);
-	memcpy(hidden_state_first_slice.data, hidden_state_slice.data,
-	       ctx->model->embed_dim * ggml_type_size(ctx->mem.hidden_state.type));
-
-	ctx->kv_pos += prompt_len;
+	process_embeddings(ctx, &ctx->mem.hidden_state, prompt_len);
 }
 
+
 // Process prompt tokens (Gemma-3n)
-void process_prompt_gemma3n(struct ctx_t *ctx, int *prompt_tokens, size_t prompt_len)
+void process_prompt_gemma3n(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len)
 {
 	const int embed_dim = ctx->model->embed_dim;
 	const int pli_dim = ctx->model->pli_dim;
@@ -1569,10 +1664,9 @@ void calculate_per_token_magnitude(float *magnitudes, const MemType *state, size
 	}
 }
 
-
 // Function to create the parallel states
-void create_altup_parallel_states(struct ctx_t *ctx, MemType *base_state, size_t prompt_len, Tensor *altup_proj_tensor,
-				  MemType *destination)
+void create_altup_parallel_states(struct TIEContext *ctx, MemType *base_state, size_t prompt_len,
+				  Tensor *altup_proj_tensor, MemType *destination)
 {
 	const int embed_dim = ctx->model->embed_dim;
 
@@ -1615,18 +1709,8 @@ void create_altup_parallel_states(struct ctx_t *ctx, MemType *base_state, size_t
 	}
 }
 
-void dispatch_apply_residual_to_buffer(const MemType *src1, const MemType *src2, MemType *dest, int size)
-{
-	const float *src1_data = (const float *)src1->data;
-	const float *src2_data = (const float *)src2->data;
-	float *dest_data = (float *)dest->data;
-
-	for (int i = 0; i < size; i++) {
-		dest_data[i] = src1_data[i] + src2_data[i];
-	}
-}
-
-void calculate_and_deinterleave_pli_raw(struct ctx_t *ctx, int *prompt_tokens, size_t prompt_len, MemType *dest_buffer)
+void calculate_and_deinterleave_pli_raw(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len,
+					MemType *dest_buffer)
 {
 	const int pli_dim = ctx->model->pli_dim;
 	const int num_layers = ctx->model->num_layers;
@@ -1668,7 +1752,7 @@ void calculate_and_deinterleave_pli_raw(struct ctx_t *ctx, int *prompt_tokens, s
 	free_memtype(&temp_pli_vector);
 }
 
-void post_process_altup_states(struct ctx_t *ctx,
+void post_process_altup_states(struct TIEContext *ctx,
 			       MemType *final_hidden_state, // Output: The single, final vector
 			       MemType *final_altup_states, // Input: The array of 4 states
 			       size_t n_tokens)
@@ -1743,13 +1827,13 @@ void post_process_altup_states(struct ctx_t *ctx,
 	}
 }
 
-int transformer_layer_gemma3n(struct ctx_t *ctx, int layer_idx, int batch_len)
+int transformer_layer_gemma3n(struct TIEContext *ctx, int layer_idx, int batch_len)
 {
-	layer_weights *l = &ctx->model->layers[layer_idx];
+	LayerWeights *l = &ctx->model->layers[layer_idx];
 	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
 	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
 	AttentionType attn_type = ATTN_TYPE_LOCAL;
-	rope_cache_t *active_rope_cache = ctx->rope_cache_local;
+	RopeCacheType *active_rope_cache = ctx->rope_cache_local;
 	const int pli_dim = ctx->model->pli_dim;
 	const int embed_dim = ctx->model->embed_dim;
 	const int DATA_ACTIVE_IDX = 0; // The first state is used for the main computation path
@@ -1852,7 +1936,7 @@ int transformer_layer_gemma3n(struct ctx_t *ctx, int layer_idx, int batch_len)
 			}
 
 			// Use the absolute position for RoPE
-			dispatch_apply_rope_cache(ctx, active_rope_cache, &Q_slice, absolute_pos, ctx->model->head_dim);
+			dispatch_apply_rope_cache(active_rope_cache, &Q_slice, absolute_pos, ctx->model->head_dim);
 		}
 
 		if (!is_kv_shared_layer) {
@@ -1866,7 +1950,7 @@ int transformer_layer_gemma3n(struct ctx_t *ctx, int layer_idx, int batch_len)
 				}
 
 				// Use the absolute position for RoPE
-				dispatch_apply_rope_cache(ctx, active_rope_cache, &K_slice, absolute_pos,
+				dispatch_apply_rope_cache(active_rope_cache, &K_slice, absolute_pos,
 							  ctx->model->head_dim);
 			}
 
@@ -1987,7 +2071,6 @@ int transformer_layer_gemma3n(struct ctx_t *ctx, int layer_idx, int batch_len)
 	// ctx->mem.residual_stratch is the final active output.
 	dispatch_altup_correct(ctx, final_layer_output, ctx->mem.altup_predicted_states, &ctx->mem.residual_stratch, l,
 			       batch_len, DATA_ACTIVE_IDX);
-
 
 	// The Final Gating and Refinement
 	MemType refinement_residual;

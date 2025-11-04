@@ -60,6 +60,8 @@ extern void mat_vec_row_f32_q4k_bf16_scalar(const void *X, const void *w_void, v
 					    int end_row);
 extern void mat_vec_row_f32_q6k_bf16_scalar(const void *X, const void *w_void, void *O, int in_dim, int start_row,
 					    int end_row);
+extern void mat_vec_row_f32_f16_f32_scalar(const void *X, const void *w_void, void *O, int in_dim, int start_row,
+					   int end_row);
 
 extern void accumulate_weighted_V_f32_bf16_scalar(void *O, float weight, const void *V, int size);
 extern void accumulate_weighted_V_f32_f32_scalar(void *O, float weight, const void *V, int size);
@@ -68,13 +70,16 @@ extern void accumulate_weighted_V_bf16_bf16_scalar(void *O, float weight, const 
 extern void swiglu_activation_f32_f32_scalar(void *gate, const void *up, int size);
 extern void swiglu_activation_bf16_bf16_scalar(void *gate, const void *up, int size);
 
-extern void store_KV_cache_f32_bf16_scalar(struct ctx_t *ctx, int layer_idx, int start_pos, int batch_len);
-extern void store_KV_cache_f32_f32_scalar(struct ctx_t *ctx, int layer_idx, int start_pos, int batch_len);
-extern void store_KV_cache_bf16_bf16_scalar(struct ctx_t *ctx, int layer_idx, int start_pos, int batch_len);
+extern void store_KV_cache_f32_bf16_scalar(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len);
+extern void store_KV_cache_f32_f32_scalar(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len);
+extern void store_KV_cache_bf16_bf16_scalar(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len);
 
-extern void apply_rope_cache_f32_scalar(struct ctx_t *ctx, rope_cache_t *rope_cache, void *X, int pos, int head_dim);
-extern void apply_rope_cache_bf16_scalar(struct ctx_t *ctx, rope_cache_t *rope_cache, void *X, int pos, int head_dim);
+extern void apply_rope_cache_f32_scalar(RopeCacheType *rope_cache, void *X, int pos, int head_dim);
+extern void apply_rope_cache_bf16_scalar(RopeCacheType *rope_cache, void *X, int pos, int head_dim);
 
 extern void geglu_activation_f32_f32_scalar(void *gate, const void *up, int size);
+
+extern void dispatch_conv_2d_scalar(MemType *dest, const MemType *src_image, const Tensor *kernel_tensor,
+				    const Tensor *bias_tensor, int H_in, int W_in, int stride, int padding);
 
 #endif

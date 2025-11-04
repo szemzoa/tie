@@ -139,7 +139,7 @@ void apply_residual_f32_f32_scalar(void *acc_void, const void *residual_void, in
 	}
 }
 
-void apply_rope_cache_f32_scalar(struct ctx_t *ctx, rope_cache_t *rope_cache, void *X, int pos, int head_dim)
+void apply_rope_cache_f32_scalar(RopeCacheType *rope_cache, void *X, int pos, int head_dim)
 {
 	float *x = (float *)X;
 	int h_dim_half = head_dim / 2;
@@ -435,6 +435,7 @@ void mat_vec_row_f32_q6k_f32_scalar(const void *X, const void *w_void, void *O, 
 	}
 }
 
+
 void mat_vec_row_f32_bf16_f32_scalar(const void *X, const void *w_void, void *O, int in_dim, int start_row, int end_row)
 {
 	float *x = (float *)X;
@@ -472,6 +473,27 @@ void mat_vec_row_f32_bf16_f32_scalar(const void *X, const void *w_void, void *O,
 			sum = fmaf(x[j], w, sum);
 		}
 
+		o[i] = sum;
+	}
+}
+
+// COLUMN VISE !!//
+void mat_vec_row_f32_f16_f32_scalar(const void *X, const void *w_void, void *O, int in_dim, int start_row, int end_row)
+{
+	const float *x = (const float *)X;
+	float *o = (float *)O;
+	const uint16_t *w_f16 = (const uint16_t *)w_void;
+
+	// 'end_row' is effectively the output dimension (out_dim)
+	const int out_dim = end_row;
+
+	for (int i = start_row; i < end_row; i++) {
+		float sum = 0.0f;
+
+		for (int j = 0; j < in_dim; j++) {
+			float w = fp16_to_fp32(w_f16[j * out_dim + i]);
+			sum = fmaf(x[j], w, sum);
+		}
 		o[i] = sum;
 	}
 }
@@ -543,7 +565,7 @@ void get_embedding_row_bf16_f32_scalar(const Tensor *W, int row_index, void *des
 	}
 }
 
-void store_KV_cache_f32_bf16_scalar(struct ctx_t *ctx, int layer_idx, int start_pos, int batch_len)
+void store_KV_cache_f32_bf16_scalar(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len)
 {
 	LayerKVCache *cache = &ctx->kv_cache[layer_idx];
 	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
@@ -562,7 +584,7 @@ void store_KV_cache_f32_bf16_scalar(struct ctx_t *ctx, int layer_idx, int start_
 	}
 }
 
-void store_KV_cache_f32_f32_scalar(struct ctx_t *ctx, int layer_idx, int start_pos, int batch_len)
+void store_KV_cache_f32_f32_scalar(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len)
 {
 	LayerKVCache *cache = &ctx->kv_cache[layer_idx];
 	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
@@ -1046,7 +1068,7 @@ void swiglu_activation_bf16_bf16_scalar(void *gate_void, const void *up_void, in
 	}
 }
 
-void store_KV_cache_bf16_bf16_scalar(struct ctx_t *ctx, int layer_idx, int start_pos, int batch_len)
+void store_KV_cache_bf16_bf16_scalar(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len)
 {
 	LayerKVCache *cache = &ctx->kv_cache[layer_idx];
 	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
@@ -1065,7 +1087,7 @@ void store_KV_cache_bf16_bf16_scalar(struct ctx_t *ctx, int layer_idx, int start
 	}
 }
 
-void apply_rope_cache_bf16_scalar(struct ctx_t *ctx, rope_cache_t *rope_cache, void *X, int pos, int head_dim)
+void apply_rope_cache_bf16_scalar(RopeCacheType *rope_cache, void *X, int pos, int head_dim)
 {
 	int h_dim_half = head_dim / 2;
 	uint16_t *x = (uint16_t *)X;
@@ -1100,4 +1122,99 @@ void geglu_activation_f32_f32_scalar(void *gate, const void *up, int size)
 	for (int i = 0; i < size; i++) {
 		gate_fp32[i] = gelu_fast(gate_fp32[i]) * up_fp32[i];
 	}
+}
+
+void dispatch_conv_2d_scalar(MemType *dest, const MemType *src_image, const Tensor *kernel_tensor,
+			     const Tensor *bias_tensor, int H_in, int W_in, int stride, int padding)
+{
+	// --- 1. Get pointers and dimensions ---
+	float *dest_data = (float *)dest->data;
+	const float *src_data = (const float *)src_image->data;
+	const float *kernel_data = (const float *)kernel_tensor->mem.data;
+	const float *bias_data = (const float *)bias_tensor->mem.data;
+
+	// KERNEL DIMENSIONS (from GGUF metadata [K_H, K_W, C_in, C_out])
+	const int K_H = kernel_tensor->dimensions[0];	// 14
+	const int K_W = kernel_tensor->dimensions[1];	// 14
+	const int C_in = kernel_tensor->dimensions[2];	// 3
+	const int C_out = kernel_tensor->dimensions[3]; // 1152
+
+	// INPUT DIMENSIONS (planar [C, H, W])
+	const size_t src_plane_size = (size_t)H_in * W_in;
+
+	// OUTPUT DIMENSIONS
+	const int H_out = (H_in + 2 * padding - K_H) / stride + 1; // 64
+	const int W_out = (W_in + 2 * padding - K_W) / stride + 1; // 64
+	const size_t dest_plane_size = (size_t)H_out * W_out;	   // 4096
+
+	// --- KERNEL MEMORY LAYOUT (Actual layout in memory is [C_out, C_in, K_H, K_W]) ---
+	// We must use this layout for calculating offsets
+	const size_t kernel_stride_K_W = 1;
+	const size_t kernel_stride_K_H = (size_t)K_W * kernel_stride_K_W;
+	const size_t kernel_stride_C_in = (size_t)K_H * kernel_stride_K_H;
+	const size_t kernel_stride_C_out = (size_t)C_in * kernel_stride_C_in;
+
+	// --- 2. Perform Convolution ---
+	for (int c_out = 0; c_out < C_out; ++c_out) {
+
+		const float bias = bias_data[c_out];
+		float *dest_plane_ptr = dest_data + (c_out * dest_plane_size);
+
+		// Get the pointer to the start of this filter's weights
+		// [c_out, 0, 0, 0]
+		const float *kernel_filter_ptr = kernel_data + (c_out * kernel_stride_C_out);
+
+		for (int y_out = 0; y_out < H_out; ++y_out) {
+			for (int x_out = 0; x_out < W_out; ++x_out) {
+
+				float sum = bias;
+
+				// --- 3. Apply the 3D kernel [C_in, K_H, K_W] ---
+				for (int c_in = 0; c_in < C_in; ++c_in) {
+
+					const float *src_plane_ptr = src_data + (c_in * src_plane_size);
+
+					// Get pointer to kernel[c_out][c_in][0][0]
+					const float *kernel_plane_ptr = kernel_filter_ptr + (c_in * kernel_stride_C_in);
+
+					for (int ky = 0; ky < K_H; ++ky) {
+						const int y_in = y_out * stride + ky - padding;
+
+						// Boundary check for Y
+						if (y_in < 0 || y_in >= H_in) {
+							continue;
+						}
+
+						// Get pointer to kernel[c_out][c_in][ky][0]
+						const float *kernel_row_ptr =
+							kernel_plane_ptr + (ky * kernel_stride_K_H);
+
+						for (int kx = 0; kx < K_W; ++kx) {
+							const int x_in = x_out * stride + kx - padding;
+
+							// Boundary check for X
+							if (x_in < 0 || x_in >= W_in) {
+								continue;
+							}
+
+							// KERNEL INDEX CALCULATION (THE FIX)
+							// This is just kernel_row_ptr[kx]
+							const float kernel_val = kernel_row_ptr[kx * kernel_stride_K_W];
+
+							// Input index
+							size_t src_idx = (size_t)y_in * W_in + x_in;
+
+							// Accumulate: sum += input * weight
+							sum = fmaf(src_plane_ptr[src_idx], kernel_val, sum);
+
+						} // kx
+					} // ky
+				} // c_in
+
+				// Store the final convoluted pixel value
+				dest_plane_ptr[y_out * W_out + x_out] = sum;
+
+			} // x_out
+		} // y_out
+	} // c_out
 }

@@ -37,7 +37,7 @@ typedef enum {
 	GGML_TYPE_TQ1_0 = 34,
 	GGML_TYPE_TQ2_0 = 35,
 	GGML_TYPE_COUNT = 39,
-} ggml_type;
+} GGMLType;
 
 enum gguf_metadata_value_type {
 	// The value is a 8-bit unsigned integer.
@@ -79,7 +79,7 @@ enum {
 	GGUF_TOKEN_TYPE_SPECIAL = 5, // ?
 };
 
-typedef struct gguf_tensor_t {
+typedef struct {
 	char *name;
 	uint64_t dimensions[4];
 	uint32_t n_dims;
@@ -87,15 +87,15 @@ typedef struct gguf_tensor_t {
 	void *data;
 	off_t offset;
 	size_t size;
-} gguf_tensor;
+} GGUFTensor;
 
-struct gguf_metadata_kv_t {
+typedef struct {
 	char *name;
 	uint32_t type;
 	uint64_t size;
 	void *arr_offset;
 	void *data;
-};
+} GGUFMetadata;
 
 #define QK_K 256
 typedef struct {
@@ -118,31 +118,26 @@ typedef struct {
 	int8_t qs[QK8_0]; // quants
 } block_q8_0;
 
-struct ctx_t;
+struct TIEContext;
+struct GGUFModel;
 
-extern int gguf_parse(struct ctx_t *ctx, char *path);
-extern void gguf_close(struct ctx_t *ctx);
-
-extern int gguf_read_metadata_type_string(struct ctx_t *ctx, struct gguf_metadata_kv_t *metadata);
-extern int gguf_get_metadata_value(struct ctx_t *ctx, char *key, void *value);
-extern char *gguf_get_metadata_string(struct ctx_t *ctx, char *key);
-extern int gguf_get_metadata_type(struct ctx_t *ctx, char *key);
-
-extern int gguf_get_metadata_size(struct ctx_t *ctx, char *key, uint64_t *size);
-
-extern int gguf_metadata_read_token_embeds(struct ctx_t *ctx, char *key, int detect_special);
-extern int gguf_metadata_read_token_merges(struct ctx_t *ctx, char *key);
-extern int gguf_metadata_read_token_types(struct ctx_t *ctx, char *key, int detect_special);
-extern int gguf_metadata_read_token_scores(struct ctx_t *ctx, char *key);
-
-extern int gguf_map_weights(struct ctx_t *ctx);
-extern void *get_tensor_data_ptr(struct ctx_t *ctx_ptr, const char *name, uint64_t *size_bytes);
-extern gguf_tensor *get_tensor(struct ctx_t *ctx_ptr, const char *name);
-
-extern void dump_tensors(struct ctx_t *ctx);
-extern size_t get_ggml_block_size(int type);
-extern size_t ggml_type_size(ggml_type type);
-
+extern size_t ggml_block_size(GGMLType type);
+extern size_t ggml_type_size(GGMLType type);
 extern char *gguf_get_type_name(uint32_t type);
+
+extern int gguf_metadata_get_value(struct GGUFModel *gguf, char *key, void *value);
+extern int gguf_metadata_get_type(struct GGUFModel *gguf, char *key);
+extern char *gguf_metadata_get_string(struct GGUFModel *gguf, char *key);
+
+extern void *gguf_get_tensor_data_ptr(struct GGUFModel *gguf, const char *name, uint64_t *size_bytes);
+extern GGUFTensor *gguf_get_tensor(struct GGUFModel *gguf, const char *name);
+
+extern int gguf_model_read_token_embeds(struct TIEContext *ctx, struct GGUFModel *gguf, char *key, int detect_special);
+extern int gguf_model_read_token_types(struct TIEContext *ctx, struct GGUFModel *gguf, char *key, int detect_special);
+extern int gguf_model_read_token_scores(struct TIEContext *ctx, struct GGUFModel *gguf, char *key);
+extern int gguf_model_read_token_merges(struct TIEContext *ctx, struct GGUFModel *gguf, char *key);
+
+extern struct GGUFModel *gguf_model_parse(char *path);
+extern void gguf_model_close(struct GGUFModel *gguf);
 
 #endif

@@ -99,7 +99,6 @@ mat_vec_dispatch_t MAT_VEC_DISPATCH_TABLE[] = {
 	{GGML_TYPE_F32, GGML_TYPE_BF16, GGML_TYPE_F32, mat_vec_row_f32_bf16_f32_avx2, 1},
 	{GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, mat_vec_row_f32_f32_f32_avx2, 1},
 #endif
-	//	{GGML_TYPE_Q8_0, GGML_TYPE_Q4_K, GGML_TYPE_F32, mat_vec_row_q8_0_q4k_f32_scalar, 0},
 	{GGML_TYPE_BF16, GGML_TYPE_Q4_K, GGML_TYPE_BF16, mat_vec_row_bf16_q4k_bf16_scalar, 0},
 	{GGML_TYPE_BF16, GGML_TYPE_Q6_K, GGML_TYPE_BF16, mat_vec_row_bf16_q6k_bf16_scalar, 0},
 	{GGML_TYPE_BF16, GGML_TYPE_BF16, GGML_TYPE_BF16, mat_vec_row_bf16_bf16_bf16_scalar, 0},
@@ -108,11 +107,14 @@ mat_vec_dispatch_t MAT_VEC_DISPATCH_TABLE[] = {
 	{GGML_TYPE_F32, GGML_TYPE_Q4_K, GGML_TYPE_F32, mat_vec_row_f32_q4k_f32_scalar, 0},
 	{GGML_TYPE_F32, GGML_TYPE_Q6_K, GGML_TYPE_F32, mat_vec_row_f32_q6k_f32_scalar, 0},
 	{GGML_TYPE_F32, GGML_TYPE_BF16, GGML_TYPE_F32, mat_vec_row_f32_bf16_f32_scalar, 0},
+
 	{GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, mat_vec_row_f32_f32_f32_scalar, 0},
+
 	{GGML_TYPE_BF16, GGML_TYPE_Q6_K, GGML_TYPE_F32, mat_vec_row_bf16_q6k_f32_scalar, 0},
 	{GGML_TYPE_BF16, GGML_TYPE_Q4_K, GGML_TYPE_F32, mat_vec_row_bf16_q4k_f32_scalar, 0},
 	{GGML_TYPE_BF16, GGML_TYPE_BF16, GGML_TYPE_F32, mat_vec_row_bf16_bf16_f32_scalar, 0},
 	{GGML_TYPE_BF16, GGML_TYPE_F32, GGML_TYPE_F32, mat_vec_row_bf16_f32_f32_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_F32, mat_vec_row_f32_f16_f32_scalar, 0},
 };
 
 swiglu_activation_dispatch_t SWIGLU_ACTIVATION_DISPATCH_TABLE[] = {
@@ -207,7 +209,7 @@ static void mat_vec_task(void *arg)
 	free(task); // The worker is responsible for freeing its arguments.
 }
 
-void dispatch_mat_vec(struct ctx_t *ctx, const MemType *X, const Tensor *W, MemType *O, int in_dim, int out_dim,
+void dispatch_mat_vec(struct TIEContext *ctx, const MemType *X, const Tensor *W, MemType *O, int in_dim, int out_dim,
 		      int use_threads)
 {
 	int effective_in_dim = in_dim;
@@ -280,7 +282,7 @@ void dispatch_mat_vec(struct ctx_t *ctx, const MemType *X, const Tensor *W, MemT
 static void mat_mat_task(void *arg)
 {
 	mat_mat_task_t *task = (mat_mat_task_t *)arg;
-	struct ctx_t *ctx = task->ctx;
+	struct TIEContext *ctx = task->ctx;
 
 	size_t x_element_size = ggml_type_size(task->X_type);
 	size_t o_element_size = ggml_type_size(task->O_type);
@@ -297,7 +299,7 @@ static void mat_mat_task(void *arg)
 	free(task);
 }
 
-void dispatch_mat_mat(struct ctx_t *ctx, const MemType *X, const Tensor *W, MemType *O, int batch_len, int in_dim,
+void dispatch_mat_mat(struct TIEContext *ctx, const MemType *X, const Tensor *W, MemType *O, int batch_len, int in_dim,
 		      int out_dim, int use_threads)
 {
 	if (batch_len == 1) {
@@ -332,7 +334,7 @@ void dispatch_mat_mat(struct ctx_t *ctx, const MemType *X, const Tensor *W, MemT
 }
 
 
-void dispatch_apply_rope_cache(struct ctx_t *ctx, rope_cache_t *rope_cache, MemType *X_slice, int pos, int head_dim)
+void dispatch_apply_rope_cache(RopeCacheType *rope_cache, MemType *X_slice, int pos, int head_dim)
 {
 	for (int i = 0; i < ARRAY_SIZE(APPLY_ROPE_CACHE_DISPATCH_TABLE); ++i) {
 		apply_rope_cache_dispatch_t *entry = &APPLY_ROPE_CACHE_DISPATCH_TABLE[i];
@@ -342,7 +344,7 @@ void dispatch_apply_rope_cache(struct ctx_t *ctx, rope_cache_t *rope_cache, MemT
 				debug_accel("-- WARN: %s uses scalar function ---\n", __FUNCTION__);
 			}
 #endif
-			entry->func(ctx, rope_cache, X_slice->data, pos, head_dim);
+			entry->func(rope_cache, X_slice->data, pos, head_dim);
 			return;
 		}
 	}
@@ -372,7 +374,7 @@ void dispatch_accumulate_weighted_V(const MemType *V_slice, MemType *O_slice, fl
 	exit(1);
 }
 
-void dispatch_store_KV_cache(struct ctx_t *ctx, int layer_idx, int start_pos, int batch_len)
+void dispatch_store_KV_cache(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len)
 {
 	if (ctx->mem.K.type != ctx->mem.V.type) {
 		fprintf(stderr, "FATAL: StoreKVCache K and V memories type mismatch\n");

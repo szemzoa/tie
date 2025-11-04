@@ -11,7 +11,7 @@
 #include "main.h"
 
 char merge_pool[MAX_SPANS][128];
-bpe_merge_map_t bpe_merges_map;
+BpeMergeMap bpe_merges_map;
 SpecialTokenList special_tokens;
 
 TrieNode *create_node()
@@ -53,7 +53,7 @@ int append_to_pool(StringPool *pool, const char *str, size_t len)
 	return 1;
 }
 
-const unsigned char *get_token_string(const struct ctx_t *ctx, int token_id)
+const unsigned char *get_token_string(const struct TIEContext *ctx, int token_id)
 {
 	if (token_id < 0 || token_id >= ctx->tokenizer.token_count)
 		return NULL;
@@ -61,7 +61,7 @@ const unsigned char *get_token_string(const struct ctx_t *ctx, int token_id)
 	return ctx->tokenizer.token_table[token_id];
 }
 
-int get_token_string_length(const struct ctx_t *ctx, int token_id)
+int get_token_string_length(const struct TIEContext *ctx, int token_id)
 {
 	if (token_id < 0 || token_id >= ctx->tokenizer.token_count)
 		return 0;
@@ -138,7 +138,7 @@ static inline uint64_t hash64(uint64_t x)
 	return x;
 }
 
-void bpe_map_insert(bpe_merge_map_t *map, uint64_t key, uint32_t rank)
+void bpe_map_insert(BpeMergeMap *map, uint64_t key, uint32_t rank)
 {
 	uint64_t h = hash64(key);
 	size_t idx = h & (BPE_MAP_CAPACITY - 1);
@@ -154,7 +154,7 @@ void bpe_map_insert(bpe_merge_map_t *map, uint64_t key, uint32_t rank)
 	map->table[idx].occupied = true;
 }
 
-bool bpe_map_lookup(const bpe_merge_map_t *map, uint64_t key, uint32_t *out_rank)
+bool bpe_map_lookup(const BpeMergeMap *map, uint64_t key, uint32_t *out_rank)
 {
 	uint64_t h = hash64(key);
 	size_t idx = h & (BPE_MAP_CAPACITY - 1);
@@ -225,7 +225,7 @@ char *preprocess_input(const char *text, size_t len, size_t *out_len)
 	return out;
 }
 
-int *tokenize_bpe(struct ctx_t *ctx, const char *text, size_t *num_tokens)
+int *tokenize_bpe(struct TIEContext *ctx, const char *text, size_t *num_tokens)
 {
 	TokenChunk chunks[MAX_CHUNKS];
 	BpeTokenSpan spans[MAX_SPANS];
@@ -401,7 +401,7 @@ char *sp_preprocess_input(const char *text, size_t *out_len)
 	return out;
 }
 
-int *tokenize_sp(struct ctx_t *ctx, const char *text, size_t *num_tokens)
+int *tokenize_sp(struct TIEContext *ctx, const char *text, size_t *num_tokens)
 {
 	size_t processed_text_len;
 	DP_Entry *dp;
@@ -544,7 +544,7 @@ unsigned int decode_utf8(unsigned int *state, unsigned int *codep, unsigned char
 }
 
 // UTF-8 streaming decode
-void token_out_utf8_stream(struct ctx_t *ctx, const char *p, int len)
+void token_out_utf8_stream(struct TIEContext *ctx, const char *p, int len)
 {
 	for (char *c = (char *)p; len > 0; c++, len--) {
 		unsigned int result = decode_utf8(&ctx->utf8_state, &ctx->utf8_codepoint, (unsigned char)*c);
@@ -555,7 +555,7 @@ void token_out_utf8_stream(struct ctx_t *ctx, const char *p, int len)
 }
 
 // SentencePiece detokenization
-void token_out_sp(struct ctx_t *ctx, const char *p, int len)
+void token_out_sp(struct TIEContext *ctx, const char *p, int len)
 {
 	for (int i = 0; i < len; i++) {
 		unsigned char ch = (unsigned char)p[i];
@@ -567,4 +567,22 @@ void token_out_sp(struct ctx_t *ctx, const char *p, int len)
 			putchar(ch);
 		}
 	}
+}
+
+int init_token_table(struct TIEContext *ctx, int num_tokens)
+{
+	ctx->tokenizer.token_table = calloc(num_tokens, sizeof(unsigned char *));
+
+	ctx->tokenizer.token_lens = calloc(num_tokens, sizeof(int));
+	ctx->tokenizer.token_types = calloc(num_tokens, sizeof(int));
+	ctx->tokenizer.token_scores = calloc(num_tokens, sizeof(float));
+
+	ctx->tokenizer.token_count = num_tokens;
+
+	if (!ctx->tokenizer.token_table || !ctx->tokenizer.token_lens || !ctx->tokenizer.token_types) {
+		fprintf(stderr, "Failed to allocate token table\n");
+		return -1;
+	}
+
+	return 0;
 }

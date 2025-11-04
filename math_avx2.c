@@ -619,8 +619,8 @@ __attribute__((target("avx2"))) float dot_product_f32_q4k_avx2(const float *x, c
 }
 
 
-__attribute__((target("avx2"))) void apply_rope_cache_f32_avx2(struct ctx_t *ctx, rope_cache_t *rope_cache, void *X,
-							       int pos, int head_dim)
+__attribute__((target("avx2"))) void apply_rope_cache_f32_avx2(RopeCacheType *rope_cache, void *X, int pos,
+							       int head_dim)
 {
 	int h_dim_half = head_dim / 2;
 	float *x = (float *)X;
@@ -948,7 +948,7 @@ __attribute__((target("avx2"))) void swiglu_activation_f32_f32_avx2(void *gate_v
 	}
 }
 
-__attribute__((target("avx2"))) void store_KV_cache_f32_bf16_avx2(struct ctx_t *ctx, int layer_idx, int start_pos,
+__attribute__((target("avx2"))) void store_KV_cache_f32_bf16_avx2(struct TIEContext *ctx, int layer_idx, int start_pos,
 								  int batch_len)
 {
 	LayerKVCache *cache = &ctx->kv_cache[layer_idx];
@@ -1061,8 +1061,8 @@ __attribute__((target("avx2"))) void apply_residual_bf16_bf16_avx2(void *acc, co
 	}
 }
 
-__attribute__((target("avx2"))) void apply_rope_cache_bf16_avx2(struct ctx_t *ctx, rope_cache_t *rope_cache, void *X,
-								int pos, int head_dim)
+__attribute__((target("avx2"))) void apply_rope_cache_bf16_avx2(RopeCacheType *rope_cache, void *X, int pos,
+								int head_dim)
 {
 	int h_dim_half = head_dim / 2;
 	uint16_t *x = (uint16_t *)X;
@@ -1144,7 +1144,7 @@ __attribute__((target("avx2"))) void swiglu_activation_bf16_bf16_avx2(void *gate
 	}
 }
 
-__attribute__((target("avx2"))) void store_KV_cache_bf16_bf16_avx2(struct ctx_t *ctx, int layer_idx, int start_pos,
+__attribute__((target("avx2"))) void store_KV_cache_bf16_bf16_avx2(struct TIEContext *ctx, int layer_idx, int start_pos,
 								   int batch_len)
 {
 	LayerKVCache *cache = &ctx->kv_cache[layer_idx];

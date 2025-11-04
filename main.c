@@ -2,6 +2,7 @@
 #include <fcntl.h>
 #include <float.h>
 #include <math.h>
+#include <getopt.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -22,11 +23,11 @@
 #include "predict.h"
 #include "tokenize.h"
 #include "version.h"
+#include "vision.h"
 
 #ifdef CONFIG_ENABLE_AVX2
 #include <immintrin.h>
 #endif
-
 
 const char *system_prompt_with_tools =
 	"<|im_start|>system\n"
@@ -72,7 +73,7 @@ static char *set_lamp_state(const char *state)
 	return tool_result;
 }
 
-int tool_call_init(struct ctx_t *ctx, struct tool_call_t *tool_call)
+int tool_call_init(struct TIEContext *ctx, struct tool_call_t *tool_call)
 {
 	tool_call->token_start = vocab_lookup_token_id(ctx->tokenizer.root, "<tool_call>", 11);
 	tool_call->token_end = vocab_lookup_token_id(ctx->tokenizer.root, "</tool_call>", 12);
@@ -122,7 +123,7 @@ _tool_call_found:
 	return tool_result;
 }
 
-int tool_call_handler(struct ctx_t *ctx, struct tool_call_t *tool_call, int token)
+int tool_call_handler(struct TIEContext *ctx, struct tool_call_t *tool_call, int token)
 {
 	switch (tool_call->state) {
 	case TOOL_CALL_STATE_UNINITIALIZED:
@@ -169,7 +170,7 @@ int64_t elapsed_time_us(const struct timespec after, const struct timespec befor
 	       + ((int64_t)after.tv_nsec - (int64_t)before.tv_nsec) / 1000;
 }
 
-void generate_output(struct ctx_t *ctx, int current_token)
+void generate_output(struct TIEContext *ctx, int current_token)
 {
 	const char *p = get_token_string(ctx, current_token);
 	int len = get_token_string_length(ctx, current_token);
@@ -189,49 +190,105 @@ void read_user_input(char *input_buf, size_t buf_size)
 	input_buf[strcspn(input_buf, "\n")] = 0;
 }
 
+#define IMAGE_EMBED_PLACEHOLDER_ID 262144
 
-int *process_user_request(struct ctx_t *ctx, const char *input_buf, size_t *num_tokens)
+int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf, bool has_image, size_t *num_tokens)
 {
 	size_t user_text_token_count = 0;
 
+	// Tokenize the actual user input text
 	int *user_text_tokens = ctx->model->interface.tokenize_prompt(ctx, input_buf, &user_text_token_count);
 	if (!user_text_tokens)
 		return NULL;
 
 	int *prompt_tokens = malloc(MAX_PROMPT_BATCH_SIZE * sizeof(int));
+	if (!prompt_tokens) {
+		perror("Failed to allocate prompt tokens buffer");
+		free(user_text_tokens);
+		return NULL;
+	}
 	size_t prompt_len = 0;
 
-	// --- BOS ---
+	// BOS (only for the very first turn)
 	if (ctx->model->add_bos_token == 1 && ctx->model->bos_token_sent == 0) {
 		prompt_tokens[prompt_len++] = ctx->model->bos_token_id;
 		ctx->model->bos_token_sent = 1;
 	}
 
-	// --- Start of Turn: User ---
+	// Start of User Turn
 	prompt_tokens[prompt_len++] = ctx->model->sot_token_id;
-	memcpy(&prompt_tokens[prompt_len], &ctx->model->role_user_token_id, sizeof(int));
-	prompt_len++;
+	prompt_tokens[prompt_len++] = ctx->model->role_user_token_id;
 	prompt_tokens[prompt_len++] = ctx->model->newline_token_id;
 
-	// --- User's actual message ---
+	// User's Text Message
 	memcpy(&prompt_tokens[prompt_len], user_text_tokens, user_text_token_count * sizeof(int));
 	prompt_len += user_text_token_count;
 
-	// --- Start of Turn: Model ---
+	// Image Block (if present)
+	if (has_image) {
+		prompt_tokens[prompt_len++] = 108;    // DOUBLE NEWLINE
+		prompt_tokens[prompt_len++] = 255999; // <start_of_image>
+
+		for (int i = 0; i < 256; ++i) {
+			prompt_tokens[prompt_len++] = IMAGE_EMBED_PLACEHOLDER_ID;
+		}
+
+		prompt_tokens[prompt_len++] = 256000; // <end_of_image>
+		prompt_tokens[prompt_len++] = 108;    // DOUBLE NEWLINE
+	}
+
+	// End of User Turn & Start of Model Turn
 	prompt_tokens[prompt_len++] = ctx->model->eot_token_id;
 	prompt_tokens[prompt_len++] = ctx->model->newline_token_id;
 	prompt_tokens[prompt_len++] = ctx->model->sot_token_id;
-	memcpy(&prompt_tokens[prompt_len], &ctx->model->role_model_token_id, sizeof(int));
-	prompt_len++;
+	prompt_tokens[prompt_len++] = ctx->model->role_model_token_id;
 	prompt_tokens[prompt_len++] = ctx->model->newline_token_id;
 
 	free(user_text_tokens);
 	*num_tokens = prompt_len;
-
 	return prompt_tokens;
 }
 
-void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
+void run_multimodal_prompt(struct TIEContext *ctx, int *prompt_tokens, int prompt_len, int has_image)
+{
+	const int embed_dim = ctx->model->embed_dim;
+	size_t current_pos = 0;
+	size_t image_embed_idx = 0;
+	MemType *image_embeddings = NULL;
+	void (*embedding_scale_func)(struct TIEContext *, MemType *) = ctx->model->interface.embedding_scale;
+
+	if (has_image == 1) {
+		process_image_vision(ctx);
+		image_embeddings = &ctx->vision_mem.projected_embeddings;
+	}
+
+	for (size_t i = 0; i < prompt_len; ++i) {
+		int token_id = prompt_tokens[i];
+
+		MemType dest_slice = mem_slice(&ctx->mem.hidden_state, current_pos * embed_dim);
+
+		if (token_id == IMAGE_EMBED_PLACEHOLDER_ID) {
+			// This is an image placeholder, copy the corresponding embedding slice
+			MemType image_src_slice = mem_slice(image_embeddings, image_embed_idx * embed_dim);
+			memcpy(dest_slice.data, image_src_slice.data, embed_dim * sizeof(float));
+			image_embed_idx++;
+		} else {
+			// This is a normal text token, look it up and scale it
+			dispatch_embedding_row(&ctx->model->token_embd, token_id, &dest_slice, embed_dim);
+			if (embedding_scale_func) {
+				embedding_scale_func(ctx, &dest_slice);
+			}
+		}
+
+		current_pos++;
+	}
+
+	printf("--- Multimodal Prompt Processing at pos: %u (%zu tokens) ---\n", ctx->kv_pos, current_pos);
+	process_embeddings(ctx, &ctx->mem.hidden_state, current_pos);
+	printf("--- Multimodal Prompt Processing Complete ---\n");
+}
+
+void generate_interactive(struct TIEContext *ctx, int max_new_tokens, int has_image)
 {
 	char input_buf[2048];
 	char prompt_buf[4096];
@@ -242,11 +299,12 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 	ctx->model->bos_token_sent = 0;
 	int *prompt_tokens;
 
+
 	// Initialize tool call handling
 	tool_call_init(ctx, &tool_call);
 
 #if 0
-	if (ctx->model->arch == ARCH_QWEN3) {
+	if (ctx->model->arch == ARCH_QWEN3 || ctx->model->arch == ARCH_QWEN3_MOE || ctx->model->arch == ARCH_QWEN3VL) {
 	    // Process system prompt immediately at start
 	    size_t system_prompt_len = 0;
 
@@ -265,13 +323,15 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 
 	while (1) {
 		if (!tool_call.result) {
+
 			read_user_input(input_buf, sizeof(input_buf));
 
-			if (strncmp(input_buf, "exit", 4) == 0)
+			if (strncmp(input_buf, "/exit", 5) == 0)
 				break;
 		} else {
 
-			if (ctx->model->arch == ARCH_QWEN3) {
+			if (ctx->gguf_text->arch == ARCH_QWEN3 || ctx->gguf_text->arch == ARCH_QWEN3_MOE
+			    || ctx->gguf_text->arch == ARCH_QWEN3VL) {
 				snprintf(
 					prompt_buf, sizeof(prompt_buf),
 					"<|im_start|>user\n<tool_response>%s</tool_response><|im_end|>\n<|im_start|>assistant\n",
@@ -288,20 +348,23 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 		}
 
 		size_t prompt_len = 0;
-		prompt_tokens = process_user_request(ctx, input_buf, &prompt_len);
+
+		prompt_tokens = build_multimodal_turn_tokens(ctx, input_buf, has_image, &prompt_len);
 
 		printf("--- Prompt Processing at pos: %u (Matrix Mode) %zu tokens ---\n", ctx->kv_pos, prompt_len);
 		clock_gettime(CLOCK_REALTIME, &start);
 
 		/* prompt processing */
-		ctx->model->interface.process_prompt(ctx, prompt_tokens, prompt_len);
+		run_multimodal_prompt(ctx, prompt_tokens, prompt_len, has_image);
+
+		has_image = 0;
 
 		clock_gettime(CLOCK_REALTIME, &end);
 		printf("--- Prompt Processing Complete %zu tokens, time: %llu msec ---\n", prompt_len,
 		       elapsed_time_us(end, start) / 1000);
 
 
-		printf("\n--- Generation Start (Max %d new tokens) ---\n%s: ", max_new_tokens, ctx->model->name);
+		printf("\n--- Generation Start (Max %d new tokens) ---\n", max_new_tokens);
 		clock_gettime(CLOCK_REALTIME, &start);
 		gen_len = 0;
 
@@ -312,7 +375,7 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 				break;
 			}
 
-			if (ctx->model->arch == ARCH_GEMMA3N) {
+			if (ctx->gguf_text->arch == ARCH_GEMMA3N) {
 				// For the first generation step (step == 0), the altup_hidden_states buffer
 				// contains `prompt_len` tokens. We need to process the LAST one.
 				// For all subsequent steps, the buffer only contains 1 token.
@@ -333,12 +396,9 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 							ctx->model->final_logit_softcap);
 			}
 
-			int next_token = predict_next_token(
-				(float *)ctx->mem.logits.data, ctx->model->vocab_size,
-				//							    "temperature",
-				// 0.7f, 64, 0.95f, prompt_tokens, prompt_len,
-				"temperature", 0.7f, 20, 0.95f, prompt_tokens, prompt_len, generated_tokens, gen_len,
-				ctx->model->repetition_penalty);
+			int next_token = predict_next_token((float *)ctx->mem.logits.data, ctx->model->vocab_size,
+							    "temperature", 0.7f, 64, 0.95f, prompt_tokens, prompt_len,
+							    generated_tokens, gen_len, ctx->model->repetition_penalty);
 
 			generate_output(ctx, next_token);
 
@@ -376,21 +436,64 @@ void generate_interactive(struct ctx_t *ctx, int max_new_tokens)
 
 static void print_usage(void)
 {
-	printf("parameters:\r\n");
-	printf("\t -h (help)\r\n");
-	printf("\t -m [model file]\r\n");
-	printf("\t -c [context length]\r\n");
-	printf("\t -t [thread num]\r\n");
+	printf("Usage:\n");
+	printf("\t -h, --help                     Show this help message\n");
+	printf("\t -m, --model <file>             Model file path\n");
+	printf("\t -c, --context <length>         Context length\n");
+	printf("\t -t, --threads <num>            Number of threads\n");
+	printf("\t -v, --mmproj <file>            Multi-modal vision projection file\n");
+	printf("\t -i, --image <file>             Multi-modal vision image file\n");
+	printf("\t --use-mmap                     Enable mmap for model loading\n");
+}
+
+void context_release(struct TIEContext *ctx)
+{
+	thread_pool_destroy(thread_pool);
+	free(ctx);
+}
+
+int engine_alloc(struct TIEContext *ctx, int num_threads)
+{
+	printf("Create thread_pool: %u threads\n", num_threads);
+	if ((thread_pool = thread_pool_create(num_threads)) == NULL) {
+		free(ctx);
+		exit(EXIT_FAILURE);
+	}
+
+	ctx->tokenizer.root = create_node();
+	ctx->tokenizer.pool = create_string_pool(1024 * 1024 * 4);
+	ctx->utf8_state = 0;
+	ctx->utf8_codepoint = 0;
+
+	// Initialize SiLU lookup table
+	printf("init: SiLU table\n");
+	silu_table_init();
+
+	// Initialize RoPE cache
+	printf("init: RoPE cache\n");
+	ctx->rope_cache_local = malloc(sizeof(RopeCacheType));
+	ctx->rope_cache_global = malloc(sizeof(RopeCacheType));
+	if (!ctx->rope_cache_local || !ctx->rope_cache_global) {
+		perror("Failed to allocate rope_cache");
+		return -1;
+	}
+
+	return 0;
 }
 
 int main(int argc, char *argv[])
 {
-	struct ctx_t *ctx;
-	int opt;
+	struct TIEContext *ctx = NULL;
 	int num_threads = 1;
 	char *model_path;
+	char *mmproj_path = NULL;
+	char *image_path = NULL;
 	int context_length = 0;
 	int use_mmap = 0;
+	int has_image = 0;
+	ModelDef *text_def = NULL;
+	ModelDef *vision_def = NULL;
+
 
 	printf("Toy Inference Engine v%u.%u\n", VERSION_MAJOR, VERSION_MINOR);
 	if (argc < 4) {
@@ -398,27 +501,34 @@ int main(int argc, char *argv[])
 		exit(EXIT_SUCCESS);
 	}
 
-	while ((opt = getopt(argc, argv, "t:m:h:c:")) != -1) {
-		switch (opt) {
-		case 't':
-			num_threads = atoi(optarg);
-			break;
-		case 'h':
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "-m") == 0 || strcmp(argv[i], "--model") == 0) {
+			model_path = argv[++i];
+		} else if (strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--threads") == 0) {
+			num_threads = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--mmproj") == 0) {
+			mmproj_path = argv[++i];
+		} else if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--image") == 0) {
+			image_path = argv[++i];
+		} else if (strcmp(argv[i], "--use-mmap") == 0) {
+			use_mmap = 1;
+		} else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
 			print_usage();
 			exit(EXIT_SUCCESS);
-			break;
-		case 'm':
-			model_path = optarg;
-			break;
-		case 'c':
-			context_length = atoi(optarg);
-			break;
-		case '?':
+		} else if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--context") == 0) {
+			context_length = atoi(argv[++i]);
+		} else {
+			fprintf(stderr, "Unknown option: %s\n", argv[i]);
 			print_usage();
 			exit(EXIT_FAILURE);
-			break;
 		}
 	}
+
+	printf("Model: %s\n", model_path);
+	printf("MMProj: %s\n", mmproj_path ? mmproj_path : "(none)");
+	printf("Threads: %d\n", num_threads);
+	printf("Context length: %d\n", context_length);
+	printf("Use mmap: %d\n", use_mmap);
 
 	setlocale(LC_ALL, "en_US.UTF-8");
 	srand(time(NULL));
@@ -433,39 +543,84 @@ int main(int argc, char *argv[])
 	}
 #endif
 
-	if ((ctx = malloc(sizeof(struct ctx_t))) == NULL)
-		return -1;
-
-	ctx->tokenizer.root = create_node();
-	ctx->tokenizer.pool = create_string_pool(1024 * 1024 * 4);
-	ctx->utf8_state = 0;
-	ctx->utf8_codepoint = 0;
-
-	if (gguf_parse(ctx, model_path) != 0) {
-		free(ctx);
-		return -1;
+	if ((ctx = malloc(sizeof(struct TIEContext))) == NULL) {
+		perror("Failed to create context\n");
+		exit(EXIT_FAILURE);
 	}
 
-	if (model_load(ctx, use_mmap, context_length) != 0) {
-		gguf_close(ctx);
-		free(ctx);
-		return -1;
+	/* Alloc engine */
+	engine_alloc(ctx, num_threads);
+
+	/* Parse language model GGUF file */
+	ctx->gguf_text = gguf_model_parse(model_path);
+	if (ctx->gguf_text == NULL) {
+		printf("Failed to detect model\n");
+		exit(EXIT_FAILURE);
 	}
 
-	printf("Create thread_pool: %u threads\n", num_threads);
-	thread_pool = thread_pool_create(num_threads);
+	/* Parse optional vision model GGUF file */
+	if (mmproj_path != NULL)
+		ctx->gguf_vision = gguf_model_parse(mmproj_path);
 
-	if (model_init(ctx, 1.0f, 1.0f) != 0)
-		goto _cleanup;
+	/* Load the language Model */
+	text_def = find_model_def(ctx->gguf_text->arch);
+	model_load(ctx, ctx->gguf_text, (void **)&ctx->model, (const ModelDef *)text_def, use_mmap);
+	ctx->model->def = text_def;
 
+	/* Load the vision Model */
+	if (ctx->gguf_vision) {
+		vision_def = find_model_def(ctx->gguf_vision->arch);
+		model_load(ctx, ctx->gguf_vision, (void **)&ctx->model_vision, (const ModelDef *)vision_def, use_mmap);
+		ctx->model_vision->def = vision_def;
+	}
+
+	/* Init language model defaults */
+	ctx->model->shared_kv_layers = 0;
+	ctx->model->final_logit_softcap = 0;
+	ctx->model->weight_layout = LAYOUT_ROW_MAJOR;
+
+	/* Fallbacks */
+	if (ctx->model->rope_scale_factor == 0.0f)
+		ctx->model->rope_scale_factor = 1.0f;
+	if (context_length != 0)
+		ctx->model->seq_length = context_length;
+
+	printf("set context_length: %u\n", ctx->model->seq_length);
+
+	/* Init language model */
+	model_language_init(ctx, (void *)ctx->model, text_def, 1.0f, 1.0f);
+	language_model_info(ctx);
+
+	/* Init vision model */
+	if (ctx->model_vision) {
+		model_vision_init(ctx, (void *)ctx->model_vision, vision_def);
+		vision_model_info(ctx);
+	}
+
+	if (ctx->model_vision && image_path != NULL) {
+		if (load_bmp_clip(image_path, &clip_vision_meta, ctx) == 0) {
+			has_image = 1;
+		} else {
+			printf("Error loading image for vision process\n");
+		}
+	}
+
+	/* start generation loop */
 	printf("Welcome to interactive chat. Type 'exit' to quit.\n");
-	generate_interactive(ctx, 8192);
+	generate_interactive(ctx, 8192, has_image);
+
 
 _cleanup:
-	model_cleanup(ctx, use_mmap);
-	gguf_close(ctx);
-	free(ctx);
+	gguf_model_close(ctx->gguf_text);
+	model_language_cleanup(ctx, ctx->gguf_text, text_def, use_mmap);
 
+	if (ctx->gguf_vision != NULL) {
+		gguf_model_close(ctx->gguf_vision);
+		model_vision_cleanup(ctx, ctx->gguf_vision, vision_def, use_mmap);
+	}
+
+	context_release(ctx);
 	printf("Done.\n");
-	return 0;
+
+	exit(EXIT_SUCCESS);
 }

@@ -9,15 +9,21 @@
 enum {
 	ARCH_UNKNOWN = 0,
 	ARCH_QWEN3,
+	ARCH_QWEN3_MOE,
+	ARCH_QWEN3VL,
 	ARCH_GEMMA3,
 	ARCH_GEMMA3N,
+	ARCH_GEMMA3_CLIP,
+};
+
+struct arch_t {
+	const char *name;
+	int id;
 };
 
 typedef enum {
 	FLAG_NONE = 0,
 	FLAG_OPTIONAL = 1 << 0,
-	FLAG_DENSE_ONLY = 1 << 1,
-	FLAG_MOE_ONLY = 1 << 2,
 } TensorLoadFlags;
 
 typedef enum {
@@ -29,6 +35,15 @@ typedef enum {
 	//	SIZE_PLI_DIM,
 	//	SIZE_HEAD_DIM,
 	SIZE_NUM_LAYERS_X_PLI_DIM, // For the full per_layer_inputs buffer
+
+	/* vision */
+	SIZE_VISION_IMAGE_RAW,
+	SIZE_VISION_PATCH_EMBEDS,
+	SIZE_VISION_SEQ_LEN_X_EMBED_DIM,
+	SIZE_VISION_SEQ_LEN_X_FFN_DIM,
+	SIZE_VISION_SEQ_LEN_X_QKV_DIM_X3,
+	SIZE_VISION_POOLED_EMBEDS,
+	SIZE_VISION_PROJ_EMBEDS,
 } BufferSizeType;
 
 typedef struct {
@@ -47,11 +62,12 @@ typedef struct {
 typedef struct {
 	size_t offset;
 	BufferSizeType size_type;
-	ggml_type type;
+	GGMLType type;
 	TensorLoadFlags flags;
 } BufferDef;
 
 typedef struct {
+	uint8_t is_moe;
 	int sot_token_id;
 	int eot_token_id;
 	int eos_token_id;
@@ -61,29 +77,63 @@ typedef struct {
 	int shared_kv_layers;
 	int ffn_dim;
 	float final_logit_softcap;
+
+	/* vision */
+	int proj_scale_factor;
 } ModelParams;
 
 typedef struct {
-	int *(*tokenize_prompt)(struct ctx_t *ctx, const char *prompt, size_t *num_tokens);
-	void (*process_prompt)(struct ctx_t *ctx, int *prompt_tokens, size_t prompt_len);
-	void (*token_out)(struct ctx_t *ctx, const char *p, int len);
-	void (*prepare_next_token)(struct ctx_t *ctx, int next_token);
-	void (*embedding_scale)(struct ctx_t *ctx, MemType *hidden_state_slice);
-	int (*transformer_layer)(struct ctx_t *ctx, int layer_idx, int batch_len);
+	int *(*tokenize_prompt)(struct TIEContext *ctx, const char *prompt, size_t *num_tokens);
+	void (*process_prompt)(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len);
+	void (*token_out)(struct TIEContext *ctx, const char *p, int len);
+	void (*prepare_next_token)(struct TIEContext *ctx, int next_token);
+	void (*embedding_scale)(struct TIEContext *ctx, MemType *hidden_state_slice);
+	int (*transformer_layer)(struct TIEContext *ctx, int layer_idx, int batch_len);
 } ModelInterface;
 
 typedef struct {
-	char *arch_name;
-	int arch;
-	char *name;
-	int is_moe;
+	uint8_t token_detect_specials;
+	uint8_t token_load_merges;
+	uint8_t token_load_scores;
+} TokenizeDef;
 
+typedef struct {
+	uint8_t arch;
+	char *name;
+
+	ModelParams params;
+	ModelInterface interface;
+
+	const MetadataDef *metadata_defs;
+	size_t num_metadata_defs;
+
+	const TensorDef *global_tensors;
+	size_t num_global_tensors;
+
+	const TensorDef *layer_tensors;
+	size_t num_layer_tensors;
+
+	const BufferDef *buffer_defs;
+	size_t num_buffer_defs;
+
+	const TokenizeDef *tokenize_defs;
+
+	size_t struct_size;
+	size_t layers_offset;
+	size_t layer_struct_size;
+	size_t num_layers_offset;
+} ModelDef;
+
+typedef struct {
+	ModelDef *def;
+
+	int is_moe;
 	ModelInterface interface;
 
 	int embed_dim;
-	int num_layers;
 	int num_heads;
 	int num_kv_heads;
+	int num_layers;
 	int shared_kv_layers;
 	int head_dim;
 	int ffn_dim;
@@ -120,7 +170,7 @@ typedef struct {
 	Tensor token_embd;
 	Tensor output_norm;
 	Tensor output;
-	layer_weights *layers;
+	LayerWeights *layers;
 	WeightLayout weight_layout;
 
 	/* gemma3n */
@@ -135,27 +185,49 @@ typedef struct {
 } Model;
 
 typedef struct {
-	uint8_t arch;
-	char *name;
+	ModelDef *def;
 
-	ModelParams params;
 	ModelInterface interface;
 
-	const MetadataDef *metadata_defs;
-	size_t num_metadata_defs;
+	int projection_dim;
+	int image_size;
+	int patch_size;
 
-	const TensorDef *global_tensors;
-	size_t num_global_tensors;
+	int embed_dim;
+	int ffn_dim;
+	int num_layers;
+	int num_heads;
+	float norm_eps;
 
-	const TensorDef *layer_tensors;
-	size_t num_layer_tensors;
+	int proj_scale_factor;
 
-	const BufferDef *buffer_defs;
-	size_t num_buffer_defs;
-} ModelDef;
+	int soi_token_id;
+	int eoi_token_id;
+	int image_soft_token_id;
 
-extern int model_load(struct ctx_t *ctx, int use_mmap, int context_length);
-extern int model_init(struct ctx_t *ctx, float yarn_scale_factor, float repetiton_penality);
-extern void model_cleanup(struct ctx_t *ctx, int use_mmap);
+	Tensor input_projection;
+	Tensor soft_embd_norm;
+	Tensor patch_embd_bias;
+	Tensor patch_embd;
+	Tensor position_embd;
+	Tensor post_ln_bias;
+	Tensor post_ln;
+
+	VisionLayerWeights *layers;
+	WeightLayout weight_layout;
+} VisionModel;
+
+extern ModelDef *find_model_def(int arch);
+extern int detect_architecture(const char *model_name);
+
+extern int model_load(struct TIEContext *ctx, struct GGUFModel *gguf, void **model, const ModelDef *def, int use_mmap);
+extern int model_language_init(struct TIEContext *ctx, Model *model, const ModelDef *def, float yarn_scale_factor,
+			       float repetiton_penality);
+extern int model_vision_init(struct TIEContext *ctx, VisionModel *model_vision, const ModelDef *def);
+
+extern void model_language_cleanup(struct TIEContext *ctx, struct GGUFModel *model, ModelDef *def, int use_mmap);
+extern void model_vision_cleanup(struct TIEContext *ctx, struct GGUFModel *model, ModelDef *def, int use_mmap);
+extern void language_model_info(struct TIEContext *ctx);
+extern void vision_model_info(struct TIEContext *ctx);
 
 #endif
