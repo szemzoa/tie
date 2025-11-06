@@ -7,7 +7,7 @@ Not breaking any speed records (~4.5 TPS for 4B model (Q4_K_M), ~10 for 1.7B Qwe
 
 ## Features
 
--  Runs Qwen3, Qwen3-MoE and Qwen3-VL GGUF models (Dense 0.6B/1.7B/4B/8B, MoE 30B-A3B tested)
+-  Runs Qwen3, Qwen3-MoE GGUF models (Dense 0.6B/1.7B/4B/8B, MoE 30B-A3B tested)
 -  Runs Gemma3 GGUF model (Gemma-3 270m/1b/4b/12b-it tested)
 -  Runs Gemma-3n GGUF model (Gemma-3n-E2B/E4B-it tested)
 -  Minimal Gemma3 clip vision support
