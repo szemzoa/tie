@@ -40,6 +40,44 @@ Hello! I'm an AI assistant that helps with various tasks and questions. I don't 
 
 ---
 
+## Example: Gemma3-4B Vision processing (896x896x24bit uncompressed BMP only)
+
+Initialized Gemma-3 language model with the following configuration:
+Embed Dim: 2560, Layers: 34, Heads: 8, KV Heads: 4, Head Dim: 256, Shared KV layers: 0
+FFN Dim: 10240, Rope Base: 1000000.0, Seq Len: 4096, Vocab: 262208
+Yarn Scale: 1.00, eps: 0.000001, rope_scale: 1.0, sliding_window: 1024
+Gemma3-clip init
+Initializing vision memory buffers...
+Initialized Gemma-3 vision model with the following configuration:
+Image size: 896, Proj Dim: 2560, Patch size: 14
+Embed Dim: 1152, FFN Dim: 4304, Layers: 27, Heads: 16, eps: 0.000001
+Proj Scale Factor: 4
+Welcome to interactive chat. Type '/exit' to quit.
+You: Describe the image.
+--- Prompt Processing at pos: 0 (Matrix Mode) 278 tokens ---
+Processing image...........................done
+--- Multimodal Prompt Processing at pos: 0 (278 tokens) ---
+--- Multimodal Prompt Processing Complete ---
+--- Prompt Processing Complete 278 tokens, time: 157226 msec ---
+
+--- Generation Start (Max 8192 new tokens) ---
+Here's a detailed description of the image:
+
+**Overview:**
+
+The image presents a breathtaking landscape of a lush, green valley with a serene lake nestled within. It’s a classic, idyllic scene of nature’s beauty.
+
+**Key Elements:**
+
+*   **Sky:** The sky is a brilliant, clear blue, dotted with fluffy white cumulus clouds. They are evenly distributed and add a sense of space and openness to the scene.
+*   **Mountains/Hills:**  Two prominent, forested hills flank the lake. They are densely covered in vibrant green trees, creating a strong contrast with the blue sky and water. The hills rise smoothly into the distance.
+*   **Lake:** The lake itself is a striking teal or emerald green color. It appears calm, with gentle ripples on the surface reflecting the sky and surrounding trees. The water’s color is very deep, hinting at considerable depth.
+*   **Vegetation:** The trees are lush and full, suggesting a healthy and thriving ecosystem. The sheer volume of greenery dominates the view, emphasizing the natural abundance of the area.
+
+**Composition and Atmosphere:**
+...
+---
+
 ## Example: Tool Call in Action
 
 ```
