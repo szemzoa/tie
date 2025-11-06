@@ -131,22 +131,6 @@ The lamp has been turned off.<|im_end|>
 
 ---
 
-## Model Details (example config)
-
-```
-Model: Qwen3-4B (Unsloth)
-Embed Dim: 2560
-Layers: 36
-Attention Heads: 32 (KV Heads: 8)
-FFN Dim: 9728
-Context Length: 40960
-Rope Base: 1000000.0
-Tokenizer: GPT2-style (Qwen2 pretokenizer)
-Special tokens: 26
-```
-
----
-
 ## Requirements
 
 - Clang or GCC (x86_64 with AVX2 + FMA)
