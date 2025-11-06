@@ -24,9 +24,22 @@ Not breaking any speed records (~4.5 TPS for 4B model (Q4_K_M), ~10 for 1.7B Qwe
 
 ## Example: 0.6B processing
 
+```
 Welcome to Qwen3 interactive chat. Type 'exit' to quit.
 
 You: Hi! Please tell me something about you! /no_think
+--- Prompt Processing at pos: 0 (Matrix Mode) 21 tokens---
+--- Prompt Processing Complete 21 tokens, time: 408 msec ---
+
+--- Generation Start at pos: 21 (Max 8192 new tokens) ---
+Qwen3: <think>
+
+</think>
+
+Hello! I'm an AI assistant that helps with various tasks and questions. I don't have personal experiences or feelings, but I can assist you with any questions you have. Let me know how I can help!<|im_end|>
+--- Generation End --- 48 tokens, 2055 msec, tps: 23.4
+```
+
 --- Prompt Processing at pos: 0 (Matrix Mode) 21 tokens---
 --- Prompt Processing Complete 21 tokens, time: 408 msec ---
 
@@ -42,6 +55,7 @@ Hello! I'm an AI assistant that helps with various tasks and questions. I don't 
 
 ## Example: Gemma3-4B Vision processing (896x896x24bit uncompressed BMP only)
 
+```
 Initialized Gemma-3 language model with the following configuration:
 Embed Dim: 2560, Layers: 34, Heads: 8, KV Heads: 4, Head Dim: 256, Shared KV layers: 0
 FFN Dim: 10240, Rope Base: 1000000.0, Seq Len: 4096, Vocab: 262208
@@ -76,6 +90,7 @@ The image presents a breathtaking landscape of a lush, green valley with a seren
 
 **Composition and Atmosphere:**
 ...
+```
 ---
 
 ## Example: Tool Call in Action
@@ -90,7 +105,7 @@ You: please turn off the light
 
 --- Generation Start at pos: 163 (Max 8192 new tokens) ---
 Qwen3: <think>
-Okay, the user says "please turn off the light"... 
+Okay, the user says "please turn off the light"...
 </think>
 
 <tool_call>
@@ -101,7 +116,7 @@ Okay, the user says "please turn off the light"...
 Function: 'set_lamp_state', Location: 'off'
 Tool Result: {"state": "off"}
 
-You: new prompt: 
+You: new prompt:
 <|im_start|>user
 <tool_response>{"state": "off"}</tool_response><|im_end|>
 <|im_start|>assistant
@@ -156,3 +171,4 @@ MIT — use it for research, experimentation, or as a foundation for your own CP
 ## Contact
 
 Built by [szemzoa](https://github.com/szemzoa)
+
