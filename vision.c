@@ -34,12 +34,12 @@ typedef struct __attribute__((packed)) {
 	uint32_t biClrImportant;
 } DIBHeader;
 
-clip_vision_meta_t clip_vision_meta = {.image_size = 896,
-				       .image_mean = {0.5f, 0.5f, 0.5f},
-				       .image_std = {0.5f, 0.5f, 0.5f}};
+//clip_vision_meta_t clip_vision_meta;
 
-int load_bmp_clip(const char *filename, const clip_vision_meta_t *meta, struct TIEContext *ctx)
+int load_bmp_clip(const char *filename, struct TIEContext *ctx)
 {
+    ClipVisionMeta *meta = &ctx->model_vision->meta;
+
 	FILE *f = fopen(filename, "rb");
 	if (!f) {
 		fprintf(stderr, "Cannot open %s\n", filename);

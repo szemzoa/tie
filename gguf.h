@@ -124,10 +124,14 @@ struct GGUFModel;
 extern size_t ggml_block_size(GGMLType type);
 extern size_t ggml_type_size(GGMLType type);
 extern char *gguf_get_type_name(uint32_t type);
+extern size_t gguf_get_type_size(uint32_t type);
 
+extern GGUFMetadata *gguf_metadata_get(struct GGUFModel *gguf, char *key);
 extern int gguf_metadata_get_value(struct GGUFModel *gguf, char *key, void *value);
 extern int gguf_metadata_get_type(struct GGUFModel *gguf, char *key);
 extern char *gguf_metadata_get_string(struct GGUFModel *gguf, char *key);
+extern void *gguf_metadata_get_array_typed(struct GGUFModel *gguf, const char *key, uint32_t expected_type,
+					   uint64_t *array_size);
 
 extern void *gguf_get_tensor_data_ptr(struct GGUFModel *gguf, const char *name, uint64_t *size_bytes);
 extern GGUFTensor *gguf_get_tensor(struct GGUFModel *gguf, const char *name);

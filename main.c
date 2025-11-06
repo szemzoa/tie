@@ -172,11 +172,8 @@ int64_t elapsed_time_us(const struct timespec after, const struct timespec befor
 
 void generate_output(struct TIEContext *ctx, int current_token)
 {
-	const char *p = get_token_string(ctx, current_token);
-	int len = get_token_string_length(ctx, current_token);
-
 	if (current_token != ctx->model->eos_token_id)
-		ctx->model->interface.token_out(ctx, p, len);
+		ctx->model->interface.token_out(ctx, current_token);
 
 	fflush(stdout);
 }
@@ -304,7 +301,7 @@ void generate_interactive(struct TIEContext *ctx, int max_new_tokens, int has_im
 	tool_call_init(ctx, &tool_call);
 
 #if 0
-	if (ctx->model->arch == ARCH_QWEN3 || ctx->model->arch == ARCH_QWEN3_MOE || ctx->model->arch == ARCH_QWEN3VL) {
+	if (ctx->gguf_text->arch == ARCH_QWEN3 || ctx->gguf_text->arch == ARCH_QWEN3_MOE || ctx->gguf_text->arch == ARCH_QWEN3VL) {
 	    // Process system prompt immediately at start
 	    size_t system_prompt_len = 0;
 
@@ -563,14 +560,26 @@ int main(int argc, char *argv[])
 		ctx->gguf_vision = gguf_model_parse(mmproj_path);
 
 	/* Load the language Model */
-	text_def = find_model_def(ctx->gguf_text->arch);
-	model_load(ctx, ctx->gguf_text, (void **)&ctx->model, (const ModelDef *)text_def, use_mmap);
+	if ((text_def = find_model_def(ctx->gguf_text)) == NULL) {
+		printf("Failed to detect model def\n");
+		exit(EXIT_FAILURE);
+	}
+	if (model_load(ctx, ctx->gguf_text, (void **)&ctx->model, (const ModelDef *)text_def, use_mmap) != 0) {
+		printf("Failed to load model %s\n", vision_def->name);
+		exit(EXIT_FAILURE);
+	}
 	ctx->model->def = text_def;
 
 	/* Load the vision Model */
 	if (ctx->gguf_vision) {
-		vision_def = find_model_def(ctx->gguf_vision->arch);
-		model_load(ctx, ctx->gguf_vision, (void **)&ctx->model_vision, (const ModelDef *)vision_def, use_mmap);
+		if ((vision_def = find_model_def(ctx->gguf_vision)) == NULL) {
+			printf("Failed to detect vision model def\n");
+			exit(EXIT_FAILURE);
+		}
+		if (model_load(ctx, ctx->gguf_vision, (void **)&ctx->model_vision, (const ModelDef *)vision_def, use_mmap) != 0) {
+			printf("Failed to load model %s\n", vision_def->name);
+			exit(EXIT_FAILURE);
+		}
 		ctx->model_vision->def = vision_def;
 	}
 
@@ -598,7 +607,7 @@ int main(int argc, char *argv[])
 	}
 
 	if (ctx->model_vision && image_path != NULL) {
-		if (load_bmp_clip(image_path, &clip_vision_meta, ctx) == 0) {
+		if (load_bmp_clip(image_path, ctx) == 0) {
 			has_image = 1;
 		} else {
 			printf("Error loading image for vision process\n");
@@ -606,12 +615,12 @@ int main(int argc, char *argv[])
 	}
 
 	/* start generation loop */
-	printf("Welcome to interactive chat. Type 'exit' to quit.\n");
+	printf("Welcome to interactive chat. Type '/exit' to quit.\n");
 	generate_interactive(ctx, 8192, has_image);
-
 
 _cleanup:
 	gguf_model_close(ctx->gguf_text);
+
 	model_language_cleanup(ctx, ctx->gguf_text, text_def, use_mmap);
 
 	if (ctx->gguf_vision != NULL) {

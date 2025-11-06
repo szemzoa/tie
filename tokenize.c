@@ -10,6 +10,7 @@
 #include "tokenize.h"
 #include "main.h"
 
+
 char merge_pool[MAX_SPANS][128];
 BpeMergeMap bpe_merges_map;
 SpecialTokenList special_tokens;
@@ -99,7 +100,6 @@ void free_string_pool(StringPool *pool)
 		free(pool);
 	}
 }
-
 
 void replace_g_spaces(char *s)
 {
@@ -200,39 +200,147 @@ int tokenize_step(TrieNode *root, const char *input, size_t len, size_t *pos, in
 	return 0;
 }
 
-char *preprocess_input(const char *text, size_t len, size_t *out_len)
+// Encodes a single Unicode codepoint into a UTF-8 byte sequence.
+void encode_cp_to_utf8(uint32_t cp, char *dest_buf, size_t *len)
 {
-	char *out = malloc(len * 3 + 1); // Expanded buffer for worst-case UTF-8
-	if (!out) {
-		*out_len = 0;
-		return NULL;
+	if (cp < 0x80) { // 1 byte
+		dest_buf[0] = (char)cp;
+		*len = 1;
+	} else if (cp < 0x800) { // 2 bytes
+		dest_buf[0] = (char)(0xC0 | (cp >> 6));
+		dest_buf[1] = (char)(0x80 | (cp & 0x3F));
+		*len = 2;
+	} else if (cp < 0x10000) { // 3 bytes
+		dest_buf[0] = (char)(0xE0 | (cp >> 12));
+	dest_buf[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+	dest_buf[2] = (char)(0x80 | (cp & 0x3F));
+	*len = 3;
+	} else if (cp <= 0x10FFFF) { // 4 bytes
+		dest_buf[0] = (char)(0xF0 | (cp >> 18));
+	dest_buf[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+	dest_buf[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+	dest_buf[3] = (char)(0x80 | (cp & 0x3F));
+	*len = 4;
+	} else {
+		// Error or 0xFFFD
+		dest_buf[0] = '?';
+		*len = 1;
 	}
+}
 
-	size_t j = 0;
-	for (size_t i = 0; i < len; i++) {
-		if (text[i] == ' ') {
-			out[j++] = (char)0xC4; // 'Ġ'
-			out[j++] = (char)0xA0;
-		} else if (text[i] == '\n') {
-			out[j++] = (char)0xC4; // 'Ċ'
-			out[j++] = (char)0x8A;
+char *munge_chunk(struct TIEContext *ctx, const char *chunk, size_t chunk_len, size_t *out_munged_len)
+{
+	// Allocate a worst-case buffer (each byte can become 4 UTF-8 bytes)
+	char *munged_buf = malloc(chunk_len * 4 + 1);
+	size_t out_idx = 0;
+
+	for (size_t i = 0; i < chunk_len; i++) {
+		unsigned char byte = (unsigned char)chunk[i];
+
+		// Look up byte -> codepoint
+		uint32_t cp = ctx->tokenizer.bpe_encoder_map[byte];
+
+		// Encode codepoint -> UTF-8 bytes
+		size_t utf8_len;
+		encode_cp_to_utf8(cp, &munged_buf[out_idx], &utf8_len);
+		out_idx += utf8_len;
+	}
+	munged_buf[out_idx] = '\0';
+	*out_munged_len = out_idx;
+	return munged_buf;
+}
+
+int run_bpe_on_munged_string(struct TIEContext *ctx, const char *munged_text, size_t len, int *out_tokens)
+{
+	BpeTokenSpan spans[MAX_SPANS];
+	int span_count = 0;
+	size_t p = 0;
+
+	// Find initial tokens using the Trie
+	while (p < len) {
+		int token_id;
+		size_t prev_p = p;
+		if (tokenize_step(ctx->tokenizer.root, munged_text, len, &p, &token_id)) {
+			spans[span_count++] = (BpeTokenSpan){.token_id = token_id,
+							     .start = &munged_text[prev_p],
+							     .length = (int)(p - prev_p),
+							     .is_special = false};
 		} else {
-			out[j++] = text[i];
+			// This should not happen if the vocab is correct, but as a fallback:
+			spans[span_count++] = (BpeTokenSpan){.token_id = -1, // Will be handled as '?'
+							     .start = &munged_text[p],
+							     .length = 1,
+							     .is_special = false};
+			p++;
 		}
 	}
-	out[j] = '\0'; // Null-terminate the output string
-	*out_len = j;
-	return out;
+
+	// Run BPE merge loop
+	while (1) {
+		int best_rank = INT32_MAX, best_idx = -1;
+
+		for (int i = 0; i < span_count - 1; i++) {
+			uint64_t key = ((uint64_t)spans[i].token_id << 32) | spans[i + 1].token_id;
+			uint32_t rank;
+			if (bpe_map_lookup(&bpe_merges_map, key, &rank)) {
+				if (rank < best_rank) {
+					best_rank = rank;
+					best_idx = i;
+				}
+			}
+		}
+
+		if (best_idx == -1)
+			break; // No more merges found
+
+		// Merge the best pair
+		int len1 = spans[best_idx].length;
+		int len2 = spans[best_idx + 1].length;
+
+		if (len1 + len2 > 127) // Safety check for merge_pool buffer
+			continue;
+
+		char *buf = merge_pool[best_idx]; // Reuse the static merge_pool
+		memcpy(buf, spans[best_idx].start, len1);
+		memcpy(buf + len1, spans[best_idx + 1].start, len2);
+		int merged_len = len1 + len2;
+
+		int merged_id = vocab_lookup_token_id(ctx->tokenizer.root, buf, merged_len);
+		if (merged_id < 0) {
+			fprintf(stderr, "ERROR: vocab lookup failed for merge '%.*s'\n", merged_len, buf);
+			// This merge is invalid, let's stop this path
+			spans[best_idx].token_id = -2; // Mark as "don't merge again"
+			spans[best_idx + 1].token_id = -2;
+			continue;
+		}
+
+		spans[best_idx].token_id = merged_id;
+		spans[best_idx].start = buf;
+		spans[best_idx].length = merged_len;
+		spans[best_idx].is_special = false;
+
+		// Shift remaining spans over
+		for (int i = best_idx + 1; i < span_count - 1; i++) {
+			spans[i] = spans[i + 1];
+		}
+		span_count--;
+	}
+
+	// Copy final token IDs to output
+	for (int i = 0; i < span_count; i++) {
+		out_tokens[i] = spans[i].token_id;
+	}
+
+	return span_count;
 }
 
 int *tokenize_bpe(struct TIEContext *ctx, const char *text, size_t *num_tokens)
 {
 	TokenChunk chunks[MAX_CHUNKS];
-	BpeTokenSpan spans[MAX_SPANS];
 	int chunk_count = 0;
-	int span_count = 0;
 	size_t text_len = strlen(text);
 	size_t p = 0;
+
 	while (p < text_len) {
 		bool matched = false;
 		for (int s = 0; s < special_tokens.count; s++) {
@@ -247,9 +355,7 @@ int *tokenize_bpe(struct TIEContext *ctx, const char *text, size_t *num_tokens)
 				break;
 			}
 		}
-
 		if (!matched) {
-			// Group consecutive non-special bytes into one chunk
 			size_t start = p;
 			while (p < text_len) {
 				bool is_special = false;
@@ -264,110 +370,203 @@ int *tokenize_bpe(struct TIEContext *ctx, const char *text, size_t *num_tokens)
 					break;
 				p++;
 			}
-			size_t non_special_len = p - start;
 			chunks[chunk_count++] =
-				(TokenChunk){.ptr = &text[start], .len = non_special_len, .is_special = false};
+				(TokenChunk){.ptr = &text[start], .len = p - start, .is_special = false};
 		}
 	}
+
+	// Process each chunk
+	int *all_tokens = malloc(text_len * 2 * sizeof(int)); // Worst-case allocation
+	int total_token_count = 0;
 
 	for (int i = 0; i < chunk_count; i++) {
 		TokenChunk *c = &chunks[i];
 
 		if (c->is_special) {
-			spans[span_count++] = (BpeTokenSpan){
-				.token_id = c->token_id, .start = c->ptr, .length = c->len, .is_special = true};
-			continue;
-		}
+			// It's a special token, just add its ID
+			all_tokens[total_token_count++] = c->token_id;
 
-		size_t pre_len;
-		char *processed = preprocess_input(c->ptr, c->len, &pre_len);
-		if (!processed)
-			return NULL;
+		} else {
+			const char *chunk_ptr = c->ptr;
+			size_t chunk_len = c->len;
+			size_t sub_p = 0;
+			const char *sub_chunk_start = chunk_ptr;
 
-		size_t p = 0;
-		while (p < pre_len) {
-			int token_id;
-			size_t prev_p = p;
-			if (tokenize_step(ctx->tokenizer.root, processed, pre_len, &p, &token_id)) {
-				spans[span_count++] = (BpeTokenSpan){.token_id = token_id,
-								     .start = &processed[prev_p],
-								     .length = (int)(p - prev_p),
-								     .is_special = false};
-			} else {
-				spans[span_count++] = (BpeTokenSpan){.token_id = (unsigned char)processed[p],
-								     .start = &processed[p],
-								     .length = 1,
-								     .is_special = false};
-				p++;
-			}
-		}
-		free(processed);
-	}
+			while (sub_p <= chunk_len) {
+				// Find next space or end of chunk
+				if (sub_p == chunk_len || chunk_ptr[sub_p] == ' ') {
 
-	for (int i = 0; i < span_count; i++) {
-		char buf[64];
-		memset((void *)&buf, 0, 64);
-		memcpy((void *)&buf, spans[i].start, spans[i].length);
-	}
+					size_t sub_chunk_len = sub_p - (sub_chunk_start - chunk_ptr);
 
-	while (1) {
-		int best_rank = INT32_MAX, best_idx = -1;
+					// A. Process the word (if it exists)
+					if (sub_chunk_len > 0) {
+						size_t munged_len;
+						char *munged_chunk =
+							munge_chunk(ctx, sub_chunk_start, sub_chunk_len, &munged_len);
 
-		for (int i = 0; i < span_count - 1; i++) {
-			if (spans[i].is_special || spans[i + 1].is_special)
-				continue;
+						int chunk_tokens[256]; // Temp buffer for one word
+						int num_chunk_tokens = run_bpe_on_munged_string(
+							ctx, munged_chunk, munged_len, chunk_tokens);
 
-			uint64_t key = ((uint64_t)spans[i].token_id << 32) | spans[i + 1].token_id;
-			uint32_t rank;
-			if (bpe_map_lookup(&bpe_merges_map, key, &rank)) {
-				if (rank < best_rank) {
-					best_rank = rank;
-					best_idx = i;
+						memcpy(&all_tokens[total_token_count], chunk_tokens,
+						       num_chunk_tokens * sizeof(int));
+						total_token_count += num_chunk_tokens;
+						free(munged_chunk);
+					}
+
+					// Process the space (if it exists)
+					if (sub_p < chunk_len) {
+						// " " (byte 32) -> "Ġ" (codepoint 288) -> bytes C4 A0
+						// The 'munged' string for space is "Ġ"
+						// We can look it up directly.
+
+						// We need the token ID for the "munged" space
+						// Munge the space
+						size_t munged_space_len;
+						char *munged_space = munge_chunk(ctx, " ", 1, &munged_space_len);
+
+						// Look up its ID
+						int space_token_id = vocab_lookup_token_id(
+							ctx->tokenizer.root, munged_space, munged_space_len);
+						if (space_token_id != -1) {
+							all_tokens[total_token_count++] = space_token_id;
+						}
+						free(munged_space);
+					}
+
+					sub_chunk_start = &chunk_ptr[sub_p + 1];
 				}
+				sub_p++;
 			}
 		}
-
-		if (best_idx == -1)
-			break;
-
-		int len1 = spans[best_idx].length;
-		int len2 = spans[best_idx + 1].length;
-
-		if (len1 + len2 > 127)
-			continue;
-		char *buf = merge_pool[best_idx];
-
-		memcpy(buf, spans[best_idx].start, len1);
-		memcpy(buf + len1, spans[best_idx + 1].start, len2);
-		int merged_len = len1 + len2;
-
-		int merged_id = vocab_lookup_token_id(ctx->tokenizer.root, buf, merged_len);
-		if (merged_id < 0) {
-			fprintf(stderr, "ERROR: vocab lookup failed for merge '%.*s'\n", merged_len, buf);
-			break;
-		}
-
-		spans[best_idx].token_id = merged_id;
-		spans[best_idx].start = buf;
-		spans[best_idx].length = merged_len;
-		spans[best_idx].is_special = false;
-
-		for (int i = best_idx + 1; i < span_count - 1; i++) {
-			spans[i] = spans[i + 1];
-		}
-		span_count--;
 	}
 
-	int *output_ids = malloc(span_count * sizeof(int));
-	if (!output_ids)
-		return NULL;
-	for (int i = 0; i < span_count; i++) {
-		output_ids[i] = spans[i].token_id;
-	}
-	*num_tokens = span_count;
-	return output_ids;
+	*num_tokens = total_token_count;
+	return all_tokens;
 }
 
+// BPE detokenization
+unsigned int decode_utf8(unsigned int *state, unsigned int *codep, unsigned char byte)
+{
+	if (*state == 0) {
+		if (byte < 0x80) {
+			*codep = byte;
+			return *codep;
+		} else if ((byte & 0xE0) == 0xC0) {
+			*state = 1;
+			*codep = byte & 0x1F;
+		} else if ((byte & 0xF0) == 0xE0) {
+			*state = 2;
+			*codep = byte & 0x0F;
+		} else if ((byte & 0xF8) == 0xF0) {
+			*state = 3;
+			*codep = byte & 0x07;
+		} else {
+			return 0xFFFD;
+		}
+	} else {
+		if ((byte & 0xC0) == 0x80) {
+			*codep = (*codep << 6) | (byte & 0x3F);
+			(*state)--;
+			if (*state == 0) {
+				return *codep;
+			}
+		} else {
+			*state = 0;
+			*codep = 0;
+			return 0xFFFD;
+		}
+	}
+	return 0;
+}
+
+void print_codepoint_as_utf8(unsigned int cp)
+{
+	if (cp == 0xFFFD) { // Handle replacement character
+		printf("\xEF\xBF\xBD");
+		return;
+	}
+
+	if (cp < 0x80) { // 1 byte
+		printf("%c", (char)cp);
+	} else if (cp < 0x800) { // 2 bytes
+		printf("%c", (char)(0xC0 | (cp >> 6)));
+		printf("%c", (char)(0x80 | (cp & 0x3F)));
+	} else if (cp < 0x10000) { // 3 bytes
+		printf("%c", (char)(0xE0 | (cp >> 12)));
+		printf("%c", (char)(0x80 | ((cp >> 6) & 0x3F)));
+		printf("%c", (char)(0x80 | (cp & 0x3F)));
+	} else if (cp <= 0x10FFFF) { // 4 bytes
+		printf("%c", (char)(0xF0 | (cp >> 18)));
+		printf("%c", (char)(0x80 | ((cp >> 12) & 0x3F)));
+		printf("%c", (char)(0x80 | ((cp >> 6) & 0x3F)));
+		printf("%c", (char)(0x80 | (cp & 0x3F)));
+	}
+}
+
+void token_out_utf8_stream(struct TIEContext *ctx, int token_id)
+{
+	const char *p = (const char *)get_token_string(ctx, token_id);
+	if (p == NULL)
+		return;
+
+	int len = get_token_string_length(ctx, token_id);
+	int token_type = ctx->tokenizer.token_types[token_id];
+
+	ctx->utf8_state = 0;
+
+	if (token_type == GGUF_TOKEN_TYPE_NORMAL) {
+		// We convert these keys back to their *real bytes* using our O(1) map.
+		unsigned char byte_buffer[64];
+		int b_idx = 0;
+
+		for (int i = 0; i < len; i++) {
+			unsigned int cp = decode_utf8(&ctx->utf8_state, &ctx->utf8_codepoint, (unsigned char)p[i]);
+
+			if (cp == 0)
+				continue;
+			if (cp == 0xFFFD || cp > 511) {
+				if (b_idx < 63)
+					byte_buffer[b_idx++] = '?';
+				continue;
+			}
+
+			// Get the real byte from map
+			int real_byte = ctx->tokenizer.bpe_decoder_map[cp];
+
+			if (real_byte != -1) {
+				if (b_idx < 64) {
+					byte_buffer[b_idx++] = (unsigned char)real_byte;
+				}
+			} else {
+				// This codepoint is not in the map (e.g., from a "broken"
+				// vocab token). We'll print '?' as a fallback.
+				if (b_idx < 63)
+					byte_buffer[b_idx++] = '?';
+			}
+		}
+
+		// Print the entire resulting byte buffer at once
+		if (b_idx > 0) {
+			fwrite(byte_buffer, 1, b_idx, stdout);
+			fflush(stdout);
+		}
+
+	} else {
+		// Special Token
+		// The token string is literal text. Print it as-is.
+		for (int i = 0; i < len; i++) {
+			unsigned int cp = decode_utf8(&ctx->utf8_state, &ctx->utf8_codepoint, (unsigned char)p[i]);
+			if (cp == 0)
+				continue; // In-progress UTF-8
+
+			print_codepoint_as_utf8(cp);
+		}
+		fflush(stdout);
+	}
+}
+
+// SentencePiece detokenization
 char *sp_preprocess_input(const char *text, size_t *out_len)
 {
 	size_t text_len = strlen(text);
@@ -509,54 +708,11 @@ _tokenize_sp_error:
 	return NULL;
 }
 
-unsigned int decode_utf8(unsigned int *state, unsigned int *codep, unsigned char byte)
+void token_out_sp(struct TIEContext *ctx, int token_id)
 {
-	if (*state == 0) {
-		if (byte < 0x80) {
-			*codep = byte;
-			return *codep;
-		} else if ((byte & 0xE0) == 0xC0) {
-			*state = 1;
-			*codep = byte & 0x1F;
-		} else if ((byte & 0xF0) == 0xE0) {
-			*state = 2;
-			*codep = byte & 0x0F;
-		} else if ((byte & 0xF8) == 0xF0) {
-			*state = 3;
-			*codep = byte & 0x07;
-		} else {
-			return 0xFFFD;
-		}
-	} else {
-		if ((byte & 0xC0) == 0x80) {
-			*codep = (*codep << 6) | (byte & 0x3F);
-			(*state)--;
-			if (*state == 0) {
-				return *codep;
-			}
-		} else {
-			*state = 0;
-			*codep = 0;
-			return 0xFFFD;
-		}
-	}
-	return 0;
-}
+	const char *p = get_token_string(ctx, token_id);
+	int len = get_token_string_length(ctx, token_id);
 
-// UTF-8 streaming decode
-void token_out_utf8_stream(struct TIEContext *ctx, const char *p, int len)
-{
-	for (char *c = (char *)p; len > 0; c++, len--) {
-		unsigned int result = decode_utf8(&ctx->utf8_state, &ctx->utf8_codepoint, (unsigned char)*c);
-		if (result != 0 && result != 0xFFFD) {
-			printf("%c", result);
-		}
-	}
-}
-
-// SentencePiece detokenization
-void token_out_sp(struct TIEContext *ctx, const char *p, int len)
-{
 	for (int i = 0; i < len; i++) {
 		unsigned char ch = (unsigned char)p[i];
 		if (ch == 0xE2 && i + 2 < len && (unsigned char)p[i + 1] == 0x96 && (unsigned char)p[i + 2] == 0x81) {
@@ -565,6 +721,58 @@ void token_out_sp(struct TIEContext *ctx, const char *p, int len)
 			i += 2; // skip extra bytes
 		} else {
 			putchar(ch);
+		}
+	}
+}
+
+
+void bpe_map_init_decoder(int *map)
+{
+	// Initialize all entries to -1 (not found)
+	for (int i = 0; i < 512; i++) {
+		map[i] = -1;
+	}
+
+	// Map "printable" ASCII bytes (33 '!' to 126 '~')
+	for (int b = 33; b <= 126; b++) {
+		map[b] = b;
+	}
+
+	// Map "printable" Latin-1 bytes (161 '¡' to 255 'ÿ')
+	//    (skipping 127-160 and 173, which are control/whitespace)
+	for (int b = 161; b <= 172; b++) {
+		map[b] = b;
+	}
+	for (int b = 174; b <= 255; b++) {
+		map[b] = b;
+	}
+
+	// Map the 100 "munged" non-printable bytes (0-31, 127, etc.)
+	int n = 0;
+	for (int b = 0; b < 256; b++) {
+		// If this byte 'b' does *not* have a direct 1-to-1 mapping...
+		if (map[b] == -1) {
+			// ...assign it the next "munged" codepoint (256 + n)
+			map[256 + n] = b;
+			n++;
+		}
+	}
+}
+
+void bpe_map_init_encoder(uint32_t *map)
+{
+	int n = 0;
+	for (int b = 0; b < 256; b++) {
+		// First, check if it's a "printable" 1-to-1 byte
+		if ((b >= 33 && b <= 126) ||  // '!' to '~'
+		    (b >= 161 && b <= 172) || // '¡' to '¬'
+		    (b >= 174 && b <= 255))   // '®' to 'ÿ'
+		{
+			map[b] = b;
+		} else {
+			// It's a "non-printable" byte, map it to 256 + n
+			map[b] = 256 + n;
+			n++;
 		}
 	}
 }
@@ -583,6 +791,10 @@ int init_token_table(struct TIEContext *ctx, int num_tokens)
 		fprintf(stderr, "Failed to allocate token table\n");
 		return -1;
 	}
+
+	// Generate the BPE byte-encoder/decoder map
+	bpe_map_init_encoder(ctx->tokenizer.bpe_encoder_map);
+	bpe_map_init_decoder(ctx->tokenizer.bpe_decoder_map);
 
 	return 0;
 }

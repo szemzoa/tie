@@ -3,15 +3,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "model.h"
+#include "model_defs.h"
 #include "engine.h"
 #include "tokenize.h"
 #include "threadpool.h"
 
 
 static const TensorDef QWEN3_GLOBAL_TENSORS[] = {
-	{"token_embd.weight", offsetof(Model, token_embd), FLAG_NONE},
-	{"output_norm.weight", offsetof(Model, output_norm), FLAG_NONE},
-	{"output.weight", offsetof(Model, output), FLAG_OPTIONAL},
+	DECLARE_GLOBAL_TENSORS_BASE_DEFS,
 };
 
 static const TensorDef QWEN3_LAYER_TENSORS[] = {
@@ -44,25 +43,12 @@ static const TensorDef QWEN3_MOE_LAYER_TENSORS[] = {
 };
 
 static const MetadataDef QWEN3_METADATA_DEFS[] = {
-	{"%s.context_length", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, seq_length), false},
-	{"%s.embedding_length", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, embed_dim), false},
-	{"%s.block_count", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, num_layers), false},
-	{"%s.feed_forward_length", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, ffn_dim), false},
-	{"%s.attention.head_count", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, num_heads), false},
-	{"%s.attention.layer_norm_rms_epsilon", GGUF_METADATA_VALUE_TYPE_FLOAT32, offsetof(Model, norm_eps), false},
-	{"%s.attention.key_length", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, head_dim), false},
-	{"%s.rope.freq_base", GGUF_METADATA_VALUE_TYPE_FLOAT32, offsetof(Model, rope_freq_base), false},
-	{"%s.attention.head_count_kv", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, num_kv_heads), false},
-	{"%s.expert_count", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, expert_count), true},
-	{"%s.expert_used_count", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, expert_used_count), true},
-	{"%s.expert_feed_forward_length", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, expert_ffn_dim), true},
-
-	{"tokenizer.ggml.eos_token_id", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, eos_token_id), true},
-	{"tokenizer.ggml.bos_token_id", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, bos_token_id), true},
-	{"tokenizer.ggml.unknown_token_id", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, unk_token_id), true},
-	{"tokenizer.ggml.pad_token_id", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, pad_token_id), true},
-	{"tokenizer.ggml.add_bos_token", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, add_bos_token), true},
-	{"tokenizer.ggml.add_eos_token", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, add_eos_token), true},
+	DECLARE_LLAMA_BASE_METADATA_DEFS,
+	// Qwen-specific (MoE)
+	{"%s.expert_count", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, expert_count), false, true},
+	{"%s.expert_used_count", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, expert_used_count), false, true},
+	{"%s.expert_feed_forward_length", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, expert_ffn_dim), false, true},
+	DECLARE_TOKENIZER_BASE_METADATA_DEFS,
 };
 
 static const BufferDef QWEN3_BUFFERS[] = {
@@ -107,19 +93,7 @@ ModelDef QWEN3_DEF = {
 			.embedding_scale = NULL,
 			.transformer_layer = transformer_layer_qwen3,
 		},
-	.metadata_defs = QWEN3_METADATA_DEFS,
-	.num_metadata_defs = ARRAY_SIZE(QWEN3_METADATA_DEFS),
-	.global_tensors = QWEN3_GLOBAL_TENSORS,
-	.num_global_tensors = ARRAY_SIZE(QWEN3_GLOBAL_TENSORS),
-	.layer_tensors = QWEN3_LAYER_TENSORS,
-	.num_layer_tensors = ARRAY_SIZE(QWEN3_LAYER_TENSORS),
-	.buffer_defs = QWEN3_BUFFERS,
-	.num_buffer_defs = ARRAY_SIZE(QWEN3_BUFFERS),
-	.tokenize_defs = &QWEN3_TOKENIZE_DEF,
-	.struct_size = sizeof(Model),
-	.layers_offset = offsetof(Model, layers),
-	.layer_struct_size = sizeof(LayerWeights),
-	.num_layers_offset = offsetof(Model, num_layers),
+	DECLARE_LANGUAGE_MODEL_DEF(QWEN3, QWEN3)
 };
 
 ModelDef QWEN3_MOE_DEF = {
@@ -144,20 +118,7 @@ ModelDef QWEN3_MOE_DEF = {
 			.embedding_scale = NULL,
 			.transformer_layer = transformer_layer_qwen3,
 		},
-
-	.metadata_defs = QWEN3_METADATA_DEFS,
-	.num_metadata_defs = ARRAY_SIZE(QWEN3_METADATA_DEFS),
-	.global_tensors = QWEN3_GLOBAL_TENSORS,
-	.num_global_tensors = ARRAY_SIZE(QWEN3_GLOBAL_TENSORS),
-	.layer_tensors = QWEN3_MOE_LAYER_TENSORS,
-	.num_layer_tensors = ARRAY_SIZE(QWEN3_MOE_LAYER_TENSORS),
-	.buffer_defs = QWEN3_BUFFERS,
-	.tokenize_defs = &QWEN3_TOKENIZE_DEF,
-	.num_buffer_defs = ARRAY_SIZE(QWEN3_BUFFERS),
-	.struct_size = sizeof(Model),
-	.layers_offset = offsetof(Model, layers),
-	.layer_struct_size = sizeof(LayerWeights),
-	.num_layers_offset = offsetof(Model, num_layers),
+	DECLARE_LANGUAGE_MODEL_DEF(QWEN3, QWEN3_MOE)
 };
 
 ModelDef QWEN3VL_DEF = {
@@ -181,25 +142,11 @@ ModelDef QWEN3VL_DEF = {
 			.embedding_scale = NULL,
 			.transformer_layer = transformer_layer_qwen3,
 		},
-	.metadata_defs = QWEN3_METADATA_DEFS,
-	.num_metadata_defs = ARRAY_SIZE(QWEN3_METADATA_DEFS),
-	.global_tensors = QWEN3_GLOBAL_TENSORS,
-	.num_global_tensors = ARRAY_SIZE(QWEN3_GLOBAL_TENSORS),
-	.layer_tensors = QWEN3_LAYER_TENSORS,
-	.num_layer_tensors = ARRAY_SIZE(QWEN3_LAYER_TENSORS),
-	.buffer_defs = QWEN3_BUFFERS,
-	.num_buffer_defs = ARRAY_SIZE(QWEN3_BUFFERS),
-	.tokenize_defs = &QWEN3_TOKENIZE_DEF,
-	.struct_size = sizeof(Model),
-	.layers_offset = offsetof(Model, layers),
-	.layer_struct_size = sizeof(LayerWeights),
-	.num_layers_offset = offsetof(Model, num_layers),
+	DECLARE_LANGUAGE_MODEL_DEF(QWEN3, QWEN3)
 };
 
 static const TensorDef GEMMA3_GLOBAL_TENSORS[] = {
-	{"token_embd.weight", offsetof(Model, token_embd), FLAG_NONE},
-	{"output_norm.weight", offsetof(Model, output_norm), FLAG_NONE},
-	{"output.weight", offsetof(Model, output), FLAG_OPTIONAL},
+	DECLARE_GLOBAL_TENSORS_BASE_DEFS,
 };
 
 static const TensorDef GEMMA3_LAYER_TENSORS[] = {
@@ -219,23 +166,9 @@ static const TensorDef GEMMA3_LAYER_TENSORS[] = {
 };
 
 static const MetadataDef GEMMA3_METADATA_DEFS[] = {
-	{"%s.context_length", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, seq_length), false},
-	{"%s.embedding_length", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, embed_dim), false},
-	{"%s.block_count", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, num_layers), false},
-	{"%s.feed_forward_length", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, ffn_dim), false},
-	{"%s.attention.head_count", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, num_heads), false},
-	{"%s.attention.layer_norm_rms_epsilon", GGUF_METADATA_VALUE_TYPE_FLOAT32, offsetof(Model, norm_eps), false},
-	{"%s.attention.key_length", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, head_dim), false},
-	{"%s.rope.freq_base", GGUF_METADATA_VALUE_TYPE_FLOAT32, offsetof(Model, rope_freq_base), false},
-	{"%s.attention.head_count_kv", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, num_kv_heads), false},
-	{"%s.attention.sliding_window", GGUF_METADATA_VALUE_TYPE_FLOAT32, offsetof(Model, attn_sliding_window), false},
-
-	{"tokenizer.ggml.eos_token_id", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, eos_token_id), true},
-	{"tokenizer.ggml.bos_token_id", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, bos_token_id), true},
-	{"tokenizer.ggml.unknown_token_id", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, unk_token_id), true},
-	{"tokenizer.ggml.pad_token_id", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, pad_token_id), true},
-	{"tokenizer.ggml.add_bos_token", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, add_bos_token), true},
-	{"tokenizer.ggml.add_eos_token", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, add_eos_token), true},
+	DECLARE_LLAMA_BASE_METADATA_DEFS,
+	{"%s.attention.sliding_window", GGUF_METADATA_VALUE_TYPE_FLOAT32, offsetof(Model, attn_sliding_window), false, false},
+	DECLARE_TOKENIZER_BASE_METADATA_DEFS,
 };
 
 static const BufferDef GEMMA3_BUFFERS[] = {
@@ -281,25 +214,11 @@ ModelDef GEMMA3_DEF = {
 			.embedding_scale = embedding_scale_gemma3,
 			.transformer_layer = transformer_layer_gemma3,
 		},
-	.metadata_defs = GEMMA3_METADATA_DEFS,
-	.num_metadata_defs = ARRAY_SIZE(GEMMA3_METADATA_DEFS),
-	.global_tensors = GEMMA3_GLOBAL_TENSORS,
-	.num_global_tensors = ARRAY_SIZE(GEMMA3_GLOBAL_TENSORS),
-	.layer_tensors = GEMMA3_LAYER_TENSORS,
-	.num_layer_tensors = ARRAY_SIZE(GEMMA3_LAYER_TENSORS),
-	.buffer_defs = GEMMA3_BUFFERS,
-	.tokenize_defs = &GEMMA3_TOKENIZE_DEF,
-	.num_buffer_defs = ARRAY_SIZE(GEMMA3_BUFFERS),
-	.struct_size = sizeof(Model),
-	.layers_offset = offsetof(Model, layers),
-	.layer_struct_size = sizeof(LayerWeights),
-	.num_layers_offset = offsetof(Model, num_layers),
+	DECLARE_LANGUAGE_MODEL_DEF(GEMMA3, GEMMA3)
 };
 
 static const TensorDef GEMMA3N_GLOBAL_TENSORS[] = {
-	{"token_embd.weight", offsetof(Model, token_embd), FLAG_NONE},
-	{"output_norm.weight", offsetof(Model, output_norm), FLAG_NONE},
-	{"output.weight", offsetof(Model, output), FLAG_OPTIONAL},
+	DECLARE_GLOBAL_TENSORS_BASE_DEFS,
 	{"altup_proj.weight", offsetof(Model, altup_proj), FLAG_NONE},
 	{"altup_unembd_proj.weight", offsetof(Model, altup_unembd_proj), FLAG_NONE},
 	{"per_layer_model_proj.weight", offsetof(Model, per_layer_model_proj), FLAG_NONE},
@@ -334,26 +253,20 @@ static const TensorDef GEMMA3N_LAYER_TENSORS[] = {
 };
 
 static const MetadataDef GEMMA3N_METADATA_DEFS[] = {
-	{"%s.context_length", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, seq_length), false},
-	{"%s.embedding_length", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, embed_dim), false},
-	{"%s.block_count", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, num_layers), false},
-	{"%s.attention.head_count", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, num_heads), false},
-	{"%s.attention.layer_norm_rms_epsilon", GGUF_METADATA_VALUE_TYPE_FLOAT32, offsetof(Model, norm_eps), false},
-	{"%s.attention.key_length", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, head_dim), false},
-	{"%s.rope.freq_base", GGUF_METADATA_VALUE_TYPE_FLOAT32, offsetof(Model, rope_freq_base), false},
-	{"%s.attention.head_count_kv", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, num_kv_heads), false},
-	{"%s.embedding_length_per_layer_input", GGUF_METADATA_VALUE_TYPE_FLOAT32, offsetof(Model, pli_dim), false},
-	{"%s.attention.sliding_window", GGUF_METADATA_VALUE_TYPE_FLOAT32, offsetof(Model, attn_sliding_window), false},
-	{"%s.altup.num_inputs", GGUF_METADATA_VALUE_TYPE_FLOAT32, offsetof(Model, altup_num_inputs), false},
+	{"%s.context_length", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, seq_length), false, false},
+	{"%s.embedding_length", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, embed_dim), false, false},
+	{"%s.block_count", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, num_layers), false, false},
+	{"%s.attention.head_count", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, num_heads), false, false},
+	{"%s.attention.layer_norm_rms_epsilon", GGUF_METADATA_VALUE_TYPE_FLOAT32, offsetof(Model, norm_eps), false, false},
+	{"%s.attention.key_length", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, head_dim), false, false},
+	{"%s.rope.freq_base", GGUF_METADATA_VALUE_TYPE_FLOAT32, offsetof(Model, rope_freq_base), false, false},
+	{"%s.attention.head_count_kv", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, num_kv_heads), false, false},
+	{"%s.embedding_length_per_layer_input", GGUF_METADATA_VALUE_TYPE_FLOAT32, offsetof(Model, pli_dim), false, false},
+	{"%s.attention.sliding_window", GGUF_METADATA_VALUE_TYPE_FLOAT32, offsetof(Model, attn_sliding_window), false, false},
+	{"%s.altup.num_inputs", GGUF_METADATA_VALUE_TYPE_FLOAT32, offsetof(Model, altup_num_inputs), false, false},
 	// This one is optional, with a fallback
-	{"%s.rope.scaling.factor", GGUF_METADATA_VALUE_TYPE_FLOAT32, offsetof(Model, rope_scale_factor), true},
-
-	{"tokenizer.ggml.eos_token_id", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, eos_token_id), true},
-	{"tokenizer.ggml.bos_token_id", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, bos_token_id), true},
-	{"tokenizer.ggml.unknown_token_id", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, unk_token_id), true},
-	{"tokenizer.ggml.pad_token_id", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, pad_token_id), true},
-	{"tokenizer.ggml.add_bos_token", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, add_bos_token), true},
-	{"tokenizer.ggml.add_eos_token", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, add_eos_token), true},
+	{"%s.rope.scaling.factor", GGUF_METADATA_VALUE_TYPE_FLOAT32, offsetof(Model, rope_scale_factor), false, true},
+	DECLARE_TOKENIZER_BASE_METADATA_DEFS,
 };
 
 static const BufferDef GEMMA3N_BUFFERS[] = {
@@ -371,6 +284,12 @@ static const BufferDef GEMMA3N_BUFFERS[] = {
 	{offsetof(MemLayout, logits), SIZE_VOCAB_SIZE, GGML_TYPE_F32, FLAG_NONE},
 	{offsetof(MemLayout, residual_stratch), SIZE_EMBED_DIM, GGML_TYPE_F32, FLAG_NONE},
 	{offsetof(MemLayout, per_layer_inputs), SIZE_NUM_LAYERS_X_PLI_DIM, GGML_TYPE_F32, FLAG_NONE},
+};
+
+static const TokenizeDef GEMMA3N_TOKENIZE_DEF = {
+	.token_detect_specials = 0,
+	.token_load_merges = 0,
+	.token_load_scores = 1,
 };
 
 ModelDef GEMMA3N_DEF = {
@@ -395,20 +314,9 @@ ModelDef GEMMA3N_DEF = {
 			.embedding_scale = embedding_scale_gemma3,
 			.transformer_layer = transformer_layer_gemma3n,
 		},
-	.metadata_defs = GEMMA3N_METADATA_DEFS,
-	.num_metadata_defs = ARRAY_SIZE(GEMMA3N_METADATA_DEFS),
-	.global_tensors = GEMMA3N_GLOBAL_TENSORS,
-	.num_global_tensors = ARRAY_SIZE(GEMMA3N_GLOBAL_TENSORS),
-	.layer_tensors = GEMMA3N_LAYER_TENSORS,
-	.num_layer_tensors = ARRAY_SIZE(GEMMA3N_LAYER_TENSORS),
-	.buffer_defs = GEMMA3N_BUFFERS,
-	.tokenize_defs = &GEMMA3_TOKENIZE_DEF,
-	.num_buffer_defs = ARRAY_SIZE(GEMMA3N_BUFFERS),
-	.struct_size = sizeof(Model),
-	.layers_offset = offsetof(Model, layers),
-	.layer_struct_size = sizeof(LayerWeights),
-	.num_layers_offset = offsetof(Model, num_layers),
+	DECLARE_LANGUAGE_MODEL_DEF(GEMMA3N, GEMMA3N)
 };
+
 
 static const TensorDef GEMMA3_CLIP_GLOBAL_TENSORS[] = {
 	{"mm.input_projection.weight", offsetof(VisionModel, input_projection), FLAG_NONE},
@@ -440,15 +348,7 @@ static const TensorDef GEMMA3_CLIP_LAYER_TENSORS[] = {
 };
 
 static const MetadataDef GEMMA3_CLIP_METADATA_DEFS[] = {
-	{"%s.vision.projection_dim", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(VisionModel, projection_dim), false},
-	{"%s.vision.image_size", GGUF_METADATA_VALUE_TYPE_FLOAT32, offsetof(VisionModel, image_size), false},
-	{"%s.vision.patch_size", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(VisionModel, patch_size), false},
-	{"%s.vision.embedding_length", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(VisionModel, embed_dim), false},
-	{"%s.vision.block_count", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(VisionModel, num_layers), false},
-	{"%s.vision.feed_forward_length", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(VisionModel, ffn_dim), false},
-	{"%s.vision.attention.head_count", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(VisionModel, num_heads), false},
-	{"%s.vision.attention.layer_norm_epsilon", GGUF_METADATA_VALUE_TYPE_FLOAT32, offsetof(VisionModel, norm_eps),
-	 false},
+	DECLARE_BASE_VISION_METADATA_DEFS
 };
 
 static const BufferDef GEMMA3_CLIP_BUFFERS[] = {
@@ -470,23 +370,101 @@ static const BufferDef GEMMA3_CLIP_BUFFERS[] = {
 };
 
 ModelDef GEMMA3_CLIP_DEF = {
-	.arch = ARCH_GEMMA3_CLIP,
-	.name = "Gemma-3-clip",
+	.arch = ARCH_CLIP_VISION,
+	.projector = VISION_PROJECTOR_GEMMA3,
+	.name = "Gemma3-clip",
 	.params =
 		{
 			.proj_scale_factor = 4,
 		},
 	.interface = {},
-	.metadata_defs = GEMMA3_CLIP_METADATA_DEFS,
-	.num_metadata_defs = ARRAY_SIZE(GEMMA3_CLIP_METADATA_DEFS),
-	.global_tensors = GEMMA3_CLIP_GLOBAL_TENSORS,
-	.num_global_tensors = ARRAY_SIZE(GEMMA3_CLIP_GLOBAL_TENSORS),
-	.layer_tensors = GEMMA3_CLIP_LAYER_TENSORS,
-	.num_layer_tensors = ARRAY_SIZE(GEMMA3_CLIP_LAYER_TENSORS),
-	.buffer_defs = GEMMA3_CLIP_BUFFERS,
-	.num_buffer_defs = ARRAY_SIZE(GEMMA3_CLIP_BUFFERS),
-	.struct_size = sizeof(VisionModel),
-	.layers_offset = offsetof(VisionModel, layers),
-	.layer_struct_size = sizeof(VisionLayerWeights),
-	.num_layers_offset = offsetof(VisionModel, num_layers),
+	DECLARE_VISION_MODEL_DEF(GEMMA3_CLIP)
+};
+
+/* QWEN3VL-CLIP */
+/*
+tensor # 306 name:                        mm.0.bias, type:    f32, shape: [ 4096,	1,	1,	1 ],	size: 16384, offset: 769013760
+tensor # 307 name:                      mm.0.weight, type:   bf16, shape: [ 4096,	4096,	1,	1 ],	size: 33554432, offset: 769030144
+tensor # 308 name:                        mm.2.bias, type:    f32, shape: [ 2560,	1,	1,	1 ],	size: 10240, offset: 802584576
+tensor # 309 name:                      mm.2.weight, type:   bf16, shape: [ 4096,	2560,	1,	1 ],	size: 20971520, offset: 802594816
+tensor # 314 name:            v.patch_embd.weight.1, type:    f32, shape: [ 16,	16,	3,	1024 ],	size: 3145728, offset: 826724352
+tensor # 288 name:           v.deepstack.5.fc1.bias, type:    f32, shape: [ 4096,	1,	1,	1 ],	size: 16384, offset: 605257728
+tensor # 289 name:         v.deepstack.5.fc1.weight, type:   bf16, shape: [ 4096,	4096,	1,	1 ],	size: 33554432, offset: 605274112
+tensor # 290 name:           v.deepstack.5.fc2.bias, type:    f32, shape: [ 2560,	1,	1,	1 ],	size: 10240, offset: 638828544
+tensor # 291 name:         v.deepstack.5.fc2.weight, type:   bf16, shape: [ 4096,	2560,	1,	1 ],	size: 20971520, offset: 638838784
+tensor # 292 name:          v.deepstack.5.norm.bias, type:    f32, shape: [ 4096,	1,	1,	1 ],	size: 16384, offset: 659810304
+tensor # 293 name:        v.deepstack.5.norm.weight, type:    f32, shape: [ 4096,	1,	1,	1 ],	size: 16384, offset: 659826688
+tensor # 294 name:          v.deepstack.11.fc1.bias, type:    f32, shape: [ 4096,	1,	1,	1 ],	size: 16384, offset: 659843072
+tensor # 295 name:        v.deepstack.11.fc1.weight, type:   bf16, shape: [ 4096,	4096,	1,	1 ],	size: 33554432, offset: 659859456
+tensor # 296 name:          v.deepstack.11.fc2.bias, type:    f32, shape: [ 2560,	1,	1,	1 ],	size: 10240, offset: 693413888
+tensor # 297 name:        v.deepstack.11.fc2.weight, type:   bf16, shape: [ 4096,	2560,	1,	1 ],	size: 20971520, offset: 693424128
+tensor # 298 name:         v.deepstack.11.norm.bias, type:    f32, shape: [ 4096,	1,	1,	1 ],	size: 16384, offset: 714395648
+tensor # 299 name:       v.deepstack.11.norm.weight, type:    f32, shape: [ 4096,	1,	1,	1 ],	size: 16384, offset: 714412032
+tensor # 300 name:          v.deepstack.17.fc1.bias, type:    f32, shape: [ 4096,	1,	1,	1 ],	size: 16384, offset: 714428416
+tensor # 301 name:        v.deepstack.17.fc1.weight, type:   bf16, shape: [ 4096,	4096,	1,	1 ],	size: 33554432, offset: 714444800
+tensor # 302 name:          v.deepstack.17.fc2.bias, type:    f32, shape: [ 2560,	1,	1,	1 ],	size: 10240, offset: 747999232
+tensor # 303 name:        v.deepstack.17.fc2.weight, type:   bf16, shape: [ 4096,	2560,	1,	1 ],	size: 20971520, offset: 748009472
+tensor # 304 name:         v.deepstack.17.norm.bias, type:    f32, shape: [ 4096,	1,	1,	1 ],	size: 16384, offset: 768980992
+tensor # 305 name:       v.deepstack.17.norm.weight, type:    f32, shape: [ 4096,	1,	1,	1 ],	size: 16384, offset: 768997376
+*/
+
+static const TensorDef QWEN3VL_CLIP_GLOBAL_TENSORS[] = {
+	{"v.patch_embd.bias", offsetof(VisionModel, patch_embd_bias), FLAG_NONE},
+	{"v.patch_embd.weight", offsetof(VisionModel, patch_embd), FLAG_NONE},
+	{"v.post_ln.bias", offsetof(VisionModel, post_ln_bias), FLAG_NONE},
+	{"v.post_ln.weight", offsetof(VisionModel, post_ln), FLAG_NONE},
+	{"v.position_embd.weight", offsetof(VisionModel, position_embd), FLAG_NONE},
+//	{"mm.input_projection.weight", offsetof(VisionModel, input_projection), FLAG_NONE},
+//	{"mm.soft_emb_norm.weight", offsetof(VisionModel, soft_embd_norm), FLAG_NONE},
+};
+
+static const TensorDef QWEN3VL_CLIP_LAYER_TENSORS[] = {
+	{"v.blk.%u.attn_out.bias", offsetof(VisionLayerWeights, attn_out_bias), FLAG_NONE},
+	{"v.blk.%u.attn_out.weight", offsetof(VisionLayerWeights, attn_out), FLAG_NONE},
+	{"v.blk.%u.ffn_up.bias", offsetof(VisionLayerWeights, ffn_up_bias), FLAG_NONE},
+	{"v.blk.%u.ffn_up.weight", offsetof(VisionLayerWeights, ffn_up), FLAG_NONE},
+	{"v.blk.%u.ffn_down.bias", offsetof(VisionLayerWeights, ffn_down_bias), FLAG_NONE},
+	{"v.blk.%u.ffn_down.weight", offsetof(VisionLayerWeights, ffn_down), FLAG_NONE},
+	{"v.blk.%u.ln1.bias", offsetof(VisionLayerWeights, ln1_bias), FLAG_NONE},
+	{"v.blk.%u.ln1.weight", offsetof(VisionLayerWeights, ln1), FLAG_NONE},
+	{"v.blk.%u.ln2.bias", offsetof(VisionLayerWeights, ln2_bias), FLAG_NONE},
+	{"v.blk.%u.ln2.weight", offsetof(VisionLayerWeights, ln2), FLAG_NONE},
+	{"v.blk.%u.attn_qkv.bias", offsetof(VisionLayerWeights, attn_qkv_bias), FLAG_NONE},
+	{"v.blk.%u.attn_qkv.weight", offsetof(VisionLayerWeights, attn_qkv), FLAG_NONE},
+};
+
+static const MetadataDef QWEN3VL_CLIP_METADATA_DEFS[] = {
+	DECLARE_BASE_VISION_METADATA_DEFS,
+	{"%s.vision.spatial_merge_size", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(VisionModel, spatial_merge_size), false, false},
+	{"%s.vision.is_deepstack_layers", GGUF_METADATA_VALUE_TYPE_BOOL, offsetof(VisionModel, is_deepstack_layers), true, false},
+};
+
+static const BufferDef QWEN3VL_CLIP_BUFFERS[] = {
+	{offsetof(MemLayoutVision, image_raw), SIZE_VISION_IMAGE_RAW, GGML_TYPE_F32, FLAG_NONE},
+	{offsetof(MemLayoutVision, patch_embeds), SIZE_VISION_PATCH_EMBEDS, INTERNAL_MEMORY_TYPE, FLAG_NONE},
+	{offsetof(MemLayoutVision, hidden_state), SIZE_VISION_SEQ_LEN_X_EMBED_DIM, INTERNAL_MEMORY_TYPE, FLAG_NONE},
+	{offsetof(MemLayoutVision, Q), SIZE_VISION_SEQ_LEN_X_EMBED_DIM, INTERNAL_MEMORY_TYPE, FLAG_NONE},
+	{offsetof(MemLayoutVision, K), SIZE_VISION_SEQ_LEN_X_EMBED_DIM, INTERNAL_MEMORY_TYPE, FLAG_NONE},
+	{offsetof(MemLayoutVision, V), SIZE_VISION_SEQ_LEN_X_EMBED_DIM, INTERNAL_MEMORY_TYPE, FLAG_NONE},
+	{offsetof(MemLayoutVision, residual_scratch), SIZE_VISION_SEQ_LEN_X_EMBED_DIM, INTERNAL_MEMORY_TYPE, FLAG_NONE},
+	{offsetof(MemLayoutVision, normed_input), SIZE_VISION_SEQ_LEN_X_EMBED_DIM, INTERNAL_MEMORY_TYPE, FLAG_NONE},
+	{offsetof(MemLayoutVision, qkv_proj_output), SIZE_VISION_SEQ_LEN_X_QKV_DIM_X3, INTERNAL_MEMORY_TYPE, FLAG_NONE},
+	{offsetof(MemLayoutVision, attn_output), SIZE_VISION_SEQ_LEN_X_EMBED_DIM, INTERNAL_MEMORY_TYPE, FLAG_NONE},
+	{offsetof(MemLayoutVision, attn_proj_output), SIZE_VISION_SEQ_LEN_X_EMBED_DIM, INTERNAL_MEMORY_TYPE, FLAG_NONE},
+	{offsetof(MemLayoutVision, ffn_up_output), SIZE_VISION_SEQ_LEN_X_FFN_DIM, INTERNAL_MEMORY_TYPE, FLAG_NONE},
+	{offsetof(MemLayoutVision, ffn_down_output), SIZE_VISION_SEQ_LEN_X_EMBED_DIM, INTERNAL_MEMORY_TYPE, FLAG_NONE},
+	{offsetof(MemLayoutVision, pooled_embeddings), SIZE_VISION_POOLED_EMBEDS, INTERNAL_MEMORY_TYPE, FLAG_NONE},
+	{offsetof(MemLayoutVision, projected_embeddings), SIZE_VISION_PROJ_EMBEDS, INTERNAL_MEMORY_TYPE, FLAG_NONE},
+};
+
+ModelDef QWEN3VL_CLIP_DEF = {
+	.arch = ARCH_CLIP_VISION,
+	.projector = VISION_PROJECTOR_QWEN3VL,
+	.name = "Qwen3-VL-clip",
+	.params =
+		{
+			.proj_scale_factor = 1,
+		},
+	.interface = {},
+	DECLARE_VISION_MODEL_DEF(QWEN3VL_CLIP)
 };

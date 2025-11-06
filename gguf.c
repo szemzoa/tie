@@ -15,6 +15,7 @@
 #include "threadpool.h"
 #include "tokenize.h"
 
+
 size_t ggml_block_size(GGMLType type)
 {
 	switch (type) {
@@ -202,43 +203,113 @@ int gguf_metadata_read_string(struct GGUFModel *gguf, GGUFMetadata *metadata)
 
 int gguf_metadata_read_array(struct GGUFModel *gguf, GGUFMetadata *metadata)
 {
-	uint64_t i;
-	uint64_t str_len;
-	uint32_t type;
-	uint64_t size;
-	uint32_t val;
+	uint32_t array_element_type;
+	uint64_t array_element_count;
+	uint64_t element_size_in_bytes = 0;
+	uint64_t total_array_size_in_bytes = 0;
 
-	type = *(uint32_t *)gguf->fptr;
+	// Read the array's element type (e.g., UINT32, FLOAT32, STRING)
+	array_element_type = *(uint32_t *)gguf->fptr;
 	gguf->fptr += sizeof(uint32_t);
 
-	size = *(uint64_t *)gguf->fptr;
+	// Read the number of elements in the array
+	array_element_count = *(uint64_t *)gguf->fptr;
 	gguf->fptr += sizeof(uint64_t);
-	metadata->size = size;
+
+	// Store the element count
+	metadata->size = array_element_count;
+	// Store the file offset where the actual data begins
 	metadata->arr_offset = gguf->fptr;
 
-	for (i = 0; i < size; i++) {
-		if (type == GGUF_METADATA_VALUE_TYPE_STRING) {
+	// Special case: Array of strings
+	if (array_element_type == GGUF_METADATA_VALUE_TYPE_STRING) {
+		uint64_t i;
+		uint64_t str_len;
+
+		// Allocate memory for the array of pointers
+		metadata->data = malloc(array_element_count * sizeof(char *));
+		if (!metadata->data) {
+			fprintf(stderr, "GGUF: Failed to allocate memory for string array pointers\n");
+			return -1;
+		}
+
+		char **string_array = (char **)metadata->data;
+
+		for (i = 0; i < array_element_count; i++) {
+			// Read the length of the string
 			str_len = *(uint64_t *)gguf->fptr;
 			gguf->fptr += sizeof(uint64_t);
 
+			// Allocate memory for the string data (+1 for null terminator)
+			string_array[i] = malloc(str_len + 1);
+			if (!string_array[i]) {
+				fprintf(stderr, "GGUF: Failed to allocate memory for string data\n");
+				return -1;
+			}
+
+			// Copy the string data
+			memcpy(string_array[i], gguf->fptr, str_len);
+			string_array[i][str_len] = '\0'; // Add null terminator
+
+			// Advance pointer past the string data
 			gguf->fptr += str_len;
 		}
-
-		if (type == GGUF_METADATA_VALUE_TYPE_INT32) {
-			val = *(uint32_t *)gguf->fptr;
-			gguf->fptr += sizeof(uint32_t);
+	} else {
+		// Determine the size of a single element
+		switch (array_element_type) {
+		case GGUF_METADATA_VALUE_TYPE_UINT8:
+			element_size_in_bytes = sizeof(uint8_t);
+			break;
+		case GGUF_METADATA_VALUE_TYPE_INT8:
+			element_size_in_bytes = sizeof(int8_t);
+			break;
+		case GGUF_METADATA_VALUE_TYPE_UINT16:
+			element_size_in_bytes = sizeof(uint16_t);
+			break;
+		case GGUF_METADATA_VALUE_TYPE_INT16:
+			element_size_in_bytes = sizeof(int16_t);
+			break;
+		case GGUF_METADATA_VALUE_TYPE_UINT32:
+			element_size_in_bytes = sizeof(uint32_t);
+			break;
+		case GGUF_METADATA_VALUE_TYPE_INT32:
+			element_size_in_bytes = sizeof(int32_t);
+			break;
+		case GGUF_METADATA_VALUE_TYPE_FLOAT32:
+			element_size_in_bytes = sizeof(float);
+			break;
+		case GGUF_METADATA_VALUE_TYPE_BOOL:
+			element_size_in_bytes = sizeof(uint8_t); // GGUF bools are uint8_t
+			break;
+		case GGUF_METADATA_VALUE_TYPE_UINT64:
+			element_size_in_bytes = sizeof(uint64_t);
+			break;
+		case GGUF_METADATA_VALUE_TYPE_INT64:
+			element_size_in_bytes = sizeof(int64_t);
+			break;
+		case GGUF_METADATA_VALUE_TYPE_FLOAT64:
+			element_size_in_bytes = sizeof(double);
+			break;
+		default:
+			fprintf(stderr, "GGUF: Unknown or unsupported array element type: %u\n", array_element_type);
+			return -1;
 		}
 
-		if (type == GGUF_METADATA_VALUE_TYPE_FLOAT32) {
-			val = *(float *)gguf->fptr;
-			gguf->fptr += sizeof(float);
+		// Calculate total size
+		total_array_size_in_bytes = element_size_in_bytes * array_element_count;
+
+		// Allocate a single block for the entire array
+		metadata->data = malloc(total_array_size_in_bytes);
+		if (!metadata->data) {
+			fprintf(stderr, "GGUF: Failed to allocate memory for metadata array\n");
+			return -1;
 		}
 
-		if (type == GGUF_METADATA_VALUE_TYPE_BOOL) {
+		// Copy the entire array data
+		memcpy(metadata->data, gguf->fptr, total_array_size_in_bytes);
 
-			val = *(uint8_t *)gguf->fptr;
-			gguf->fptr += sizeof(uint8_t);
-		}
+		// Advance the file pointer past the entire array
+		gguf->fptr += total_array_size_in_bytes;
 	}
 
 	return 0;
@@ -277,6 +348,22 @@ int gguf_metadata_get_type(struct GGUFModel *gguf, char *key)
 	return -1;
 }
 
+GGUFMetadata *gguf_metadata_get(struct GGUFModel *gguf, char *key)
+{
+	GGUFMetadata *metadata;
+	uint64_t i = 0;
+
+	for (i = 0; i < gguf->metadata_num; i++) {
+		metadata = &gguf->metadata[i];
+
+		if (!strcmp(gguf->metadata[i].name, key)) {
+			return &gguf->metadata[i];
+		}
+	}
+
+	return NULL;
+}
+
 char *gguf_metadata_get_string(struct GGUFModel *gguf, char *key)
 {
 	GGUFMetadata *metadata;
@@ -308,6 +395,35 @@ int gguf_metadata_get_size(struct GGUFModel *gguf, char *key, uint64_t *size)
 
 	return -1;
 }
+
+void *gguf_metadata_get_array_typed(struct GGUFModel *gguf, const char *key, uint32_t expected_type,
+				    uint64_t *array_size)
+{
+	if (array_size)
+		*array_size = 0;
+
+	// Find the metadata
+	GGUFMetadata *metadata = gguf_metadata_get(gguf, (char *)key);
+	if (metadata == NULL)
+		return NULL;
+
+	if (metadata->data == NULL || metadata->size == 0) {
+		fprintf(stderr, "GGUF: Metadata key '%s' has no data or is not an array.\n", key);
+		return NULL;
+	}
+
+	if (metadata->type != expected_type) {
+		fprintf(stderr, "GGUF: Type mismatch for key '%s'. Expected type %u, but file has %u.\n", key,
+			expected_type, metadata->type);
+		return NULL;
+	}
+
+	if (array_size)
+		*array_size = metadata->size;
+
+	return metadata->data;
+}
+
 
 char *gguf_get_type_name(uint32_t type)
 {
@@ -635,17 +751,50 @@ void gguf_model_metadata_free(struct GGUFModel *gguf)
 	GGUFMetadata *metadata;
 	uint64_t i;
 
+	if (!gguf || !gguf->metadata)
+		return;
+
 	for (i = 0; i < gguf->metadata_num; i++) {
 		metadata = &gguf->metadata[i];
 
-		if (metadata->name)
-			free(metadata->name);
+//		printf("cleanup metadata: %s\n", metadata->name);
 
-		if (metadata->data)
-			free(metadata->data);
+		// Free the metadata key name
+		if (metadata->name) {
+			free(metadata->name);
+			metadata->name = NULL; // Good practice
+		}
+
+		if (metadata->type == GGUF_METADATA_VALUE_TYPE_ARRAY) {
+		// Free the metadata value data
+		if (metadata->data) {
+			// Array of strings
+			// We must free each individual string before freeing the array of pointers.
+			// We identify this case if the type is STRING and the size > 0
+			// (assuming single/non-array values have size 0)
+			if (metadata->type == GGUF_METADATA_VALUE_TYPE_STRING && metadata->size > 0) {
+				char **string_array = (char **)metadata->data;
+				uint64_t j;
+				for (j = 0; j < metadata->size; j++) {
+					if (string_array[j]) {
+						free(string_array[j]);
+					}
+				}
+				// Now free the array of pointers itself
+				free(metadata->data);
+			} else {
+				free(metadata->data);
+			}
+
+			metadata->data = NULL; // Good practice
+		}
+		}
 	}
 
+	// Finally, free the array of metadata structs
 	free(gguf->metadata);
+	gguf->metadata = NULL;
+	gguf->metadata_num = 0;
 }
 
 int gguf_model_metadata_read(struct GGUFModel *gguf)
@@ -1129,4 +1278,22 @@ int gguf_model_read_token_merges(struct TIEContext *ctx, struct GGUFModel *gguf,
 	}
 
 	return 0;
+}
+
+size_t gguf_get_type_size(uint32_t type)
+{
+    switch (type) {
+        case GGUF_METADATA_VALUE_TYPE_UINT8:   return sizeof(uint8_t);
+        case GGUF_METADATA_VALUE_TYPE_INT8:    return sizeof(int8_t);
+        case GGUF_METADATA_VALUE_TYPE_BOOL:    return sizeof(uint8_t); // Bools are uint8_t
+        case GGUF_METADATA_VALUE_TYPE_UINT16:  return sizeof(uint16_t);
+        case GGUF_METADATA_VALUE_TYPE_INT16:   return sizeof(int16_t);
+        case GGUF_METADATA_VALUE_TYPE_UINT32:  return sizeof(uint32_t);
+        case GGUF_METADATA_VALUE_TYPE_INT32:   return sizeof(int32_t);
+        case GGUF_METADATA_VALUE_TYPE_FLOAT32: return sizeof(float);
+        case GGUF_METADATA_VALUE_TYPE_UINT64:  return sizeof(uint64_t);
+        case GGUF_METADATA_VALUE_TYPE_INT64:   return sizeof(int64_t);
+        case GGUF_METADATA_VALUE_TYPE_FLOAT64: return sizeof(double);
+        default: return 0;
+    }
 }

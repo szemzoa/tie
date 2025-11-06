@@ -1127,7 +1127,6 @@ void geglu_activation_f32_f32_scalar(void *gate, const void *up, int size)
 void dispatch_conv_2d_scalar(MemType *dest, const MemType *src_image, const Tensor *kernel_tensor,
 			     const Tensor *bias_tensor, int H_in, int W_in, int stride, int padding)
 {
-	// --- 1. Get pointers and dimensions ---
 	float *dest_data = (float *)dest->data;
 	const float *src_data = (const float *)src_image->data;
 	const float *kernel_data = (const float *)kernel_tensor->mem.data;
@@ -1147,14 +1146,14 @@ void dispatch_conv_2d_scalar(MemType *dest, const MemType *src_image, const Tens
 	const int W_out = (W_in + 2 * padding - K_W) / stride + 1; // 64
 	const size_t dest_plane_size = (size_t)H_out * W_out;	   // 4096
 
-	// --- KERNEL MEMORY LAYOUT (Actual layout in memory is [C_out, C_in, K_H, K_W]) ---
+	// KERNEL MEMORY LAYOUT (Actual layout in memory is [C_out, C_in, K_H, K_W])
 	// We must use this layout for calculating offsets
 	const size_t kernel_stride_K_W = 1;
 	const size_t kernel_stride_K_H = (size_t)K_W * kernel_stride_K_W;
 	const size_t kernel_stride_C_in = (size_t)K_H * kernel_stride_K_H;
 	const size_t kernel_stride_C_out = (size_t)C_in * kernel_stride_C_in;
 
-	// --- 2. Perform Convolution ---
+	// Perform Convolution
 	for (int c_out = 0; c_out < C_out; ++c_out) {
 
 		const float bias = bias_data[c_out];
@@ -1169,7 +1168,7 @@ void dispatch_conv_2d_scalar(MemType *dest, const MemType *src_image, const Tens
 
 				float sum = bias;
 
-				// --- 3. Apply the 3D kernel [C_in, K_H, K_W] ---
+				// Apply the 3D kernel [C_in, K_H, K_W]
 				for (int c_in = 0; c_in < C_in; ++c_in) {
 
 					const float *src_plane_ptr = src_data + (c_in * src_plane_size);
@@ -1197,7 +1196,6 @@ void dispatch_conv_2d_scalar(MemType *dest, const MemType *src_image, const Tens
 								continue;
 							}
 
-							// KERNEL INDEX CALCULATION (THE FIX)
 							// This is just kernel_row_ptr[kx]
 							const float kernel_val = kernel_row_ptr[kx * kernel_stride_K_W];
 

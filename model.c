@@ -11,11 +11,15 @@
 #include "threadpool.h"
 #include "engine.h"
 #include "math_dispatch.h"
+#include "vision.h"
 
 const struct arch_t known_archs[] = {
 	{"qwen3", ARCH_QWEN3},	   {"qwen3moe", ARCH_QWEN3_MOE}, {"gemma3", ARCH_GEMMA3},
-	{"gemma3n", ARCH_GEMMA3N}, {"clip", ARCH_GEMMA3_CLIP},	 {"qwen3vl", ARCH_QWEN3VL},
+	{"gemma3n", ARCH_GEMMA3N}, {"clip", ARCH_CLIP_VISION},	 {"qwen3vl", ARCH_QWEN3VL},
 };
+
+const struct arch_t known_projectors[] = {{"gemma3", VISION_PROJECTOR_GEMMA3},
+					  {"qwen3vl_merger", VISION_PROJECTOR_QWEN3VL}};
 
 #define MAX_CHUNK_SIZE (1LL << 30) // 1073741824 bytes
 static ssize_t safe_pread(int fd, void *buf, uint64_t count, off_t offset)
@@ -70,11 +74,58 @@ int detect_architecture(const char *model_name)
 	return -1;
 }
 
-ModelDef *find_model_def(int arch)
+int detect_projector(const char *model_name)
+{
+	const struct arch_t *best_match = NULL;
+	size_t best_len = 0;
+
+	for (int i = 0; i < ARRAY_SIZE(known_projectors); i++) {
+		const struct arch_t *current_projector = &known_projectors[i];
+
+		if (strstr(model_name, current_projector->name)) {
+			size_t current_len = strlen(current_projector->name);
+
+			if (current_len > best_len) {
+				best_len = current_len;
+				best_match = current_projector;
+			}
+		}
+	}
+
+	if (best_match) {
+		return best_match->id;
+	}
+
+	return -1;
+}
+
+ModelDef *find_projector_def(struct GGUFModel *gguf_model)
+{
+	ModelDef *def = NULL;
+	int projector;
+
+	projector = detect_projector(gguf_metadata_get_string(gguf_model, "clip.projector_type"));
+
+	switch (projector) {
+
+	case VISION_PROJECTOR_GEMMA3:
+		def = &GEMMA3_CLIP_DEF;
+		break;
+	case VISION_PROJECTOR_QWEN3VL:
+		def = &QWEN3VL_CLIP_DEF;
+		break;
+	default:
+		fprintf(stderr, "Failed to detect vision model\n");
+	}
+
+	return def;
+}
+
+ModelDef *find_model_def(struct GGUFModel *gguf_model)
 {
 	ModelDef *def = NULL;
 
-	switch (arch) {
+	switch (gguf_model->arch) {
 	case ARCH_QWEN3:
 		def = &QWEN3_DEF;
 		break;
@@ -90,12 +141,11 @@ ModelDef *find_model_def(int arch)
 	case ARCH_GEMMA3N:
 		def = &GEMMA3N_DEF;
 		break;
-	case ARCH_GEMMA3_CLIP:
-		def = &GEMMA3_CLIP_DEF;
+	case ARCH_CLIP_VISION:
+		return find_projector_def(gguf_model);
 		break;
 	default:
 		fprintf(stderr, "Failed to detect model\n");
-		break;
 	}
 
 	return def;
@@ -258,10 +308,42 @@ int model_load_metadata(struct GGUFModel *gguf, void *model, const ModelDef *def
 		// Calculate the destination pointer relative to the NEWLY allocated struct
 		void *dest_ptr = (uint8_t *)model + mdef->offset;
 
-		if (gguf_metadata_get_value(gguf, key_buffer, dest_ptr) != 0) {
-			if (!mdef->is_optional) {
+		if (mdef->is_array) {
+			uint64_t array_size = 0;
+
+			void *array_data = gguf_metadata_get_array_typed(gguf, key_buffer, GGUF_METADATA_VALUE_TYPE_ARRAY, &array_size);
+
+			if (array_data) {
+				// Get the target ModelArray struct in our model
+				ModelArray *target_array = (ModelArray *)((char *)dest_ptr);
+
+				// Get total size in bytes
+				size_t element_size = gguf_get_type_size(mdef->type);
+				size_t total_bytes = element_size * array_size;
+
+				// Allocate memory and copy the data to take ownership
+				target_array->data = malloc(total_bytes);
+				if (!target_array->data) { /* handle error */
+					fprintf(stderr, "Failed to load required metadata key: %s\n", key_buffer);
+		    			return -1;
+				}
+				memcpy(target_array->data, array_data, total_bytes);
+
+				// Store the size and type
+				target_array->size = array_size;
+				target_array->type = mdef->type;
+			} else {
+
 				fprintf(stderr, "Failed to load required metadata key: %s\n", key_buffer);
 				return -1;
+			}
+		} else {
+
+			if (gguf_metadata_get_value(gguf, key_buffer, dest_ptr) != 0) {
+				if (!mdef->is_optional) {
+					fprintf(stderr, "Failed to load required metadata key: %s\n", key_buffer);
+					return -1;
+				}
 			}
 		}
 	}
@@ -356,7 +438,6 @@ int model_init_mem_language(struct TIEContext *ctx, const ModelDef *def)
 
 int model_load(struct TIEContext *ctx, struct GGUFModel *gguf, void **model, const ModelDef *def, int use_mmap)
 {
-
 	// Allocate the destination model struct (e.g., sizeof(Model) or sizeof(VisionModel))
 	void *model_struct = calloc(1, def->struct_size);
 	if (!model_struct) {
@@ -499,6 +580,18 @@ void model_language_cleanup(struct TIEContext *ctx, struct GGUFModel *model, Mod
 
 		MemType *dest_buffer = (MemType *)((uint8_t *)&ctx->mem + bdef->offset);
 		free_memtype(dest_buffer);
+	}
+
+	for (size_t i = 0; i < def->num_metadata_defs; i++) {
+		const MetadataDef *mdef = &def->metadata_defs[i];
+
+		if (mdef->is_array) {
+		    void *dest_ptr = (uint8_t *)model + mdef->offset;
+
+		    ModelArray *target_array = (ModelArray *)((char *)dest_ptr);
+		    if (target_array->data)
+			free(target_array->data);
+		}
 	}
 
 	// MoE Buffers
@@ -681,6 +774,21 @@ void model_vision_cleanup(struct TIEContext *ctx, struct GGUFModel *model, Model
 		free(ctx->vision_mem.attn_scores_buffer[t]);
 	}
 
+//	printf("clean medata arrays\n"); fflush(stdout);
+	for (size_t i = 0; i < def->num_metadata_defs; i++) {
+		const MetadataDef *mdef = &def->metadata_defs[i];
+
+//		printf("clean medata array %s\n", mdef->key_fmt); fflush(stdout);
+
+		if (mdef->is_array) {
+		    void *dest_ptr = (uint8_t *)model + mdef->offset;
+
+		    ModelArray *target_array = (ModelArray *)((char *)dest_ptr);
+		    if (target_array->data)
+			free(target_array->data);
+		}
+	}
+
 	// Loaded Weights
 	if (use_mmap == 0) {
 		// Global Tensors
@@ -716,26 +824,55 @@ void model_vision_cleanup(struct TIEContext *ctx, struct GGUFModel *model, Model
 	free(model);
 }
 
-
 int model_vision_init(struct TIEContext *ctx, VisionModel *model_vision, const ModelDef *def)
 {
 	VisionModel *vm = model_vision;
+//	struct GGUFModel *gguf = ctx->gguf_vision;
+	float *mean = (float *)vm->image_mean.data;
+	float *std = (float *)vm->image_std.data;
 
 	vm->interface = def->interface;
 	vm->proj_scale_factor = def->params.proj_scale_factor;
 
-	switch (def->arch) {
-	case ARCH_GEMMA3_CLIP:
-		printf("%s init\n", def->name);
+	if (vm->has_vision_encoder != 1) {
+		printf("%s %s model has no vision encoder...\n", __FUNCTION__, def->name);
+		return -1;
+	}
+
+	printf("%s init\n", def->name);
+
+	switch (def->projector) {
+	case VISION_PROJECTOR_GEMMA3: {
 		vm->soi_token_id = 255999;
 		vm->eoi_token_id = 256000;
 		vm->image_soft_token_id = 262144;
-		break;
+	} break;
+
+	case VISION_PROJECTOR_QWEN3VL: {
+/*
+		uint64_t num_layers = 0;
+		uint8_t *dstack_layers = (uint8_t *)gguf_metadata_get_array_typed(
+			gguf, "clip.vision.is_deepstack_layers", GGUF_METADATA_VALUE_TYPE_BOOL, &num_layers);
+
+		if (dstack_layers != NULL) {
+			printf("deepstack_layers num=%llu\n", (unsigned long long)num_layers);
+			for (uint64_t i = 0; i < num_layers; i++) {
+				printf("deepstack_layers: #%llu %s\n", (unsigned long long)i,
+				       dstack_layers[i] == 0 ? "false" : "true");
+			}
+		}
+*/
+	} break;
 	default:
 		printf("%s %s model not defined?\n", __FUNCTION__, def->name);
-		break;
+		return -1;
 	}
 
+	model_vision->meta.image_size = vm->image_size;
+	for (int i = 0; i < 3; i++) {
+	    model_vision->meta.image_mean[i] = mean[i];
+	    model_vision->meta.image_std[i] = std[i];
+	}
 
 #if 0
 	printf("INFO: Checking for swapped FFN weights in vision model...\n");

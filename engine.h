@@ -103,6 +103,10 @@ typedef struct {
 
 	Tensor attn_out_bias;
 	Tensor attn_out;
+
+	/* QWEN3VL */
+	Tensor attn_qkv_bias;
+	Tensor attn_qkv;
 } VisionLayerWeights;
 
 typedef struct {

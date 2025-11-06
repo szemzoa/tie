@@ -69,6 +69,9 @@ typedef struct {
 	int *token_types;	     // Token type
 	float *token_scores;	     // Token scores
 	int token_count;	     // Total number of tokens
+	// Direct-lookup map: bpe_decoder_map[codepoint] -> byte_value
+	int bpe_decoder_map[512];
+	uint32_t bpe_encoder_map[256];
 } Tokenizer;
 
 struct TIEContext;
@@ -95,8 +98,8 @@ extern int vocab_lookup_token_id(TrieNode *root, const char *token, size_t len);
 extern int *tokenize_bpe(struct TIEContext *ctx, const char *text, size_t *num_tokens);
 extern int *tokenize_sp(struct TIEContext *ctx, const char *text, size_t *num_tokens);
 
-extern void token_out_utf8_stream(struct TIEContext *ctx, const char *p, int len);
-extern void token_out_sp(struct TIEContext *ctx, const char *p, int len);
+extern void token_out_utf8_stream(struct TIEContext *ctx, int token_id);
+extern void token_out_sp(struct TIEContext *ctx, int token_id);
 
 extern int init_token_table(struct TIEContext *ctx, int num_tokens);
 

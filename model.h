@@ -13,7 +13,12 @@ enum {
 	ARCH_QWEN3VL,
 	ARCH_GEMMA3,
 	ARCH_GEMMA3N,
-	ARCH_GEMMA3_CLIP,
+	ARCH_CLIP_VISION,
+};
+
+enum {
+	VISION_PROJECTOR_GEMMA3,
+	VISION_PROJECTOR_QWEN3VL,
 };
 
 struct arch_t {
@@ -56,8 +61,15 @@ typedef struct {
 	const char *key_fmt;
 	enum gguf_metadata_value_type type;
 	size_t offset;
+	bool is_array;
 	bool is_optional;
 } MetadataDef;
+
+typedef struct {
+    void *data;
+    uint64_t size;
+    uint32_t type;
+} ModelArray;
 
 typedef struct {
 	size_t offset;
@@ -85,21 +97,25 @@ typedef struct {
 typedef struct {
 	int *(*tokenize_prompt)(struct TIEContext *ctx, const char *prompt, size_t *num_tokens);
 	void (*process_prompt)(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len);
-	void (*token_out)(struct TIEContext *ctx, const char *p, int len);
+//	void (*token_out)(struct TIEContext *ctx, const char *p, int len);
+	void (*token_out)(struct TIEContext *ctx, int token_id);
 	void (*prepare_next_token)(struct TIEContext *ctx, int next_token);
 	void (*embedding_scale)(struct TIEContext *ctx, MemType *hidden_state_slice);
 	int (*transformer_layer)(struct TIEContext *ctx, int layer_idx, int batch_len);
 } ModelInterface;
 
 typedef struct {
-	uint8_t token_detect_specials;
-	uint8_t token_load_merges;
-	uint8_t token_load_scores;
+	int token_detect_specials;
+	int token_load_merges;
+	int token_load_scores;
 } TokenizeDef;
 
+
 typedef struct {
-	uint8_t arch;
+	int arch;
 	char *name;
+
+	int projector;
 
 	ModelParams params;
 	ModelInterface interface;
@@ -185,9 +201,16 @@ typedef struct {
 } Model;
 
 typedef struct {
+	int image_size;	     // e.g. 896
+	float image_mean[3]; // e.g. {0.5, 0.5, 0.5}
+	float image_std[3];  // e.g. {0.5, 0.5, 0.5}
+} ClipVisionMeta;
+
+typedef struct {
 	ModelDef *def;
 
 	ModelInterface interface;
+	int has_vision_encoder;
 
 	int projection_dim;
 	int image_size;
@@ -199,11 +222,19 @@ typedef struct {
 	int num_heads;
 	float norm_eps;
 
-	int proj_scale_factor;
+	int proj_scale_factor;		/* GEMMA3 */
+	int spatial_merge_size;		/* QWEN3VL */
 
 	int soi_token_id;
 	int eoi_token_id;
 	int image_soft_token_id;
+
+	ClipVisionMeta meta;
+
+	ModelArray image_mean;
+	ModelArray image_std;
+
+	ModelArray is_deepstack_layers;		/* QWEN3VL */
 
 	Tensor input_projection;
 	Tensor soft_embd_norm;
@@ -217,8 +248,10 @@ typedef struct {
 	WeightLayout weight_layout;
 } VisionModel;
 
-extern ModelDef *find_model_def(int arch);
+extern ModelDef *find_model_def(struct GGUFModel *gguf_model);
+
 extern int detect_architecture(const char *model_name);
+extern int detect_projector(const char *model_name);
 
 extern int model_load(struct TIEContext *ctx, struct GGUFModel *gguf, void **model, const ModelDef *def, int use_mmap);
 extern int model_language_init(struct TIEContext *ctx, Model *model, const ModelDef *def, float yarn_scale_factor,
