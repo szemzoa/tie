@@ -9,13 +9,13 @@ extern uint16_t fp32_to_bf16_rne(float f);
 extern float fp16_to_fp32(uint16_t h);
 extern void get_scale_min_k4(int j, const uint8_t *scales, uint8_t *scale, uint8_t *min);
 
-extern float dot_product_f32_f32_scalar(const void *__restrict a, const void *__restrict b, int size);
-extern float dot_product_f32_bf16_scalar(const void *__restrict a, const void *__restrict b, int size);
-
 extern void convert_bf16_f32_scalar(const void *src, void *dest, int size);
 extern void convert_bf16_bf16_scalar(const void *src, void *dest, int size);
 extern void convert_f32_bf16_scalar(const void *src, void *dest, int size);
 extern void convert_f32_f32_scalar(const void *src, void *dest, int size);
+
+extern float dot_product_f32_f32_scalar(const void *__restrict a, const void *__restrict b, int size);
+extern float dot_product_f32_bf16_scalar(const void *__restrict a, const void *__restrict b, int size);
 
 extern void get_embedding_row_q4k_f32_scalar(const Tensor *W, int row_index, void *dest, int embed_dim);
 extern void get_embedding_row_q6k_f32_scalar(const Tensor *W, int row_index, void *dest, int embed_dim);
@@ -81,5 +81,4 @@ extern void geglu_activation_f32_f32_scalar(void *gate, const void *up, int size
 
 extern void dispatch_conv_2d_scalar(MemType *dest, const MemType *src_image, const Tensor *kernel_tensor,
 				    const Tensor *bias_tensor, int H_in, int W_in, int stride, int padding);
-
 #endif

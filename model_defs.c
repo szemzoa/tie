@@ -5,6 +5,7 @@
 #include "model.h"
 #include "model_defs.h"
 #include "engine.h"
+#include "vision.h"
 #include "tokenize.h"
 #include "threadpool.h"
 
@@ -48,6 +49,7 @@ static const MetadataDef QWEN3_METADATA_DEFS[] = {
 	{"%s.expert_count", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, expert_count), false, true},
 	{"%s.expert_used_count", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, expert_used_count), false, true},
 	{"%s.expert_feed_forward_length", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, expert_ffn_dim), false, true},
+	{"%s.rope.dimension_sections", GGUF_METADATA_VALUE_TYPE_UINT32, offsetof(Model, mrope_sections), true, true},
 	DECLARE_TOKENIZER_BASE_METADATA_DEFS,
 };
 
@@ -83,6 +85,11 @@ ModelDef QWEN3_DEF = {
 			.newline_token_id = 198,
 			.role_user_token_id = 872,
 			.role_model_token_id = 77091,
+
+			.vision_start_token_id = -1,
+		        .vision_end_token_id   = -1,
+		        .vision_embed_token_id = -1,
+
 		},
 	.interface =
 		{
@@ -108,6 +115,10 @@ ModelDef QWEN3_MOE_DEF = {
 			.newline_token_id = 198,
 			.role_user_token_id = 872,
 			.role_model_token_id = 77091,
+
+			.vision_start_token_id = -1,
+		        .vision_end_token_id   = -1,
+		        .vision_embed_token_id = -1,
 		},
 	.interface =
 		{
@@ -132,6 +143,10 @@ ModelDef QWEN3VL_DEF = {
 			.newline_token_id = 198,
 			.role_user_token_id = 872,
 			.role_model_token_id = 77091,
+
+			.vision_start_token_id = 151652, // <|vision_start|>
+		        .vision_end_token_id   = 151653, // <|vision_end|>
+		        .vision_embed_token_id = 151654, // <|vision_pad|>
 		},
 	.interface =
 		{
@@ -141,6 +156,9 @@ ModelDef QWEN3VL_DEF = {
 			.prepare_next_token = prepare_next_token_standard,
 			.embedding_scale = NULL,
 			.transformer_layer = transformer_layer_qwen3,
+			.build_vision_tokens = build_vision_tokens_qwen3vl,
+			.vision_create_embeddings = vision_create_embeddings_qwen3vl,
+			.vision_transformer_layer = vision_transformer_layer_qwen3vl,
 		},
 	DECLARE_LANGUAGE_MODEL_DEF(QWEN3, QWEN3)
 };
@@ -204,6 +222,11 @@ ModelDef GEMMA3_DEF = {
 			.newline_token_id = 107,
 			.role_user_token_id = 2364,
 			.role_model_token_id = 4368,
+
+			.double_newline_token_id = 108,
+			.vision_start_token_id = 255999,
+			.vision_end_token_id = 256000,
+			.vision_embed_token_id = 262144,
 		},
 	.interface =
 		{
@@ -213,6 +236,9 @@ ModelDef GEMMA3_DEF = {
 			.prepare_next_token = prepare_next_token_standard,
 			.embedding_scale = embedding_scale_gemma3,
 			.transformer_layer = transformer_layer_gemma3,
+			.build_vision_tokens = build_vision_tokens_gemma3,
+			.vision_create_embeddings = vision_create_embeddings_gemma3,
+			.vision_transformer_layer = vision_transformer_layer_gemma3,
 		},
 	DECLARE_LANGUAGE_MODEL_DEF(GEMMA3, GEMMA3)
 };
@@ -304,6 +330,10 @@ ModelDef GEMMA3N_DEF = {
 			.role_user_token_id = 2364,
 			.role_model_token_id = 4368,
 			.final_logit_softcap = 30.0,
+
+			.vision_start_token_id = -1,
+		        .vision_end_token_id   = -1,
+		        .vision_embed_token_id = -1,
 		},
 	.interface =
 		{
@@ -381,41 +411,19 @@ ModelDef GEMMA3_CLIP_DEF = {
 	DECLARE_VISION_MODEL_DEF(GEMMA3_CLIP)
 };
 
-/* QWEN3VL-CLIP */
-/*
-tensor # 306 name:                        mm.0.bias, type:    f32, shape: [ 4096,	1,	1,	1 ],	size: 16384, offset: 769013760
-tensor # 307 name:                      mm.0.weight, type:   bf16, shape: [ 4096,	4096,	1,	1 ],	size: 33554432, offset: 769030144
-tensor # 308 name:                        mm.2.bias, type:    f32, shape: [ 2560,	1,	1,	1 ],	size: 10240, offset: 802584576
-tensor # 309 name:                      mm.2.weight, type:   bf16, shape: [ 4096,	2560,	1,	1 ],	size: 20971520, offset: 802594816
-tensor # 314 name:            v.patch_embd.weight.1, type:    f32, shape: [ 16,	16,	3,	1024 ],	size: 3145728, offset: 826724352
-tensor # 288 name:           v.deepstack.5.fc1.bias, type:    f32, shape: [ 4096,	1,	1,	1 ],	size: 16384, offset: 605257728
-tensor # 289 name:         v.deepstack.5.fc1.weight, type:   bf16, shape: [ 4096,	4096,	1,	1 ],	size: 33554432, offset: 605274112
-tensor # 290 name:           v.deepstack.5.fc2.bias, type:    f32, shape: [ 2560,	1,	1,	1 ],	size: 10240, offset: 638828544
-tensor # 291 name:         v.deepstack.5.fc2.weight, type:   bf16, shape: [ 4096,	2560,	1,	1 ],	size: 20971520, offset: 638838784
-tensor # 292 name:          v.deepstack.5.norm.bias, type:    f32, shape: [ 4096,	1,	1,	1 ],	size: 16384, offset: 659810304
-tensor # 293 name:        v.deepstack.5.norm.weight, type:    f32, shape: [ 4096,	1,	1,	1 ],	size: 16384, offset: 659826688
-tensor # 294 name:          v.deepstack.11.fc1.bias, type:    f32, shape: [ 4096,	1,	1,	1 ],	size: 16384, offset: 659843072
-tensor # 295 name:        v.deepstack.11.fc1.weight, type:   bf16, shape: [ 4096,	4096,	1,	1 ],	size: 33554432, offset: 659859456
-tensor # 296 name:          v.deepstack.11.fc2.bias, type:    f32, shape: [ 2560,	1,	1,	1 ],	size: 10240, offset: 693413888
-tensor # 297 name:        v.deepstack.11.fc2.weight, type:   bf16, shape: [ 4096,	2560,	1,	1 ],	size: 20971520, offset: 693424128
-tensor # 298 name:         v.deepstack.11.norm.bias, type:    f32, shape: [ 4096,	1,	1,	1 ],	size: 16384, offset: 714395648
-tensor # 299 name:       v.deepstack.11.norm.weight, type:    f32, shape: [ 4096,	1,	1,	1 ],	size: 16384, offset: 714412032
-tensor # 300 name:          v.deepstack.17.fc1.bias, type:    f32, shape: [ 4096,	1,	1,	1 ],	size: 16384, offset: 714428416
-tensor # 301 name:        v.deepstack.17.fc1.weight, type:   bf16, shape: [ 4096,	4096,	1,	1 ],	size: 33554432, offset: 714444800
-tensor # 302 name:          v.deepstack.17.fc2.bias, type:    f32, shape: [ 2560,	1,	1,	1 ],	size: 10240, offset: 747999232
-tensor # 303 name:        v.deepstack.17.fc2.weight, type:   bf16, shape: [ 4096,	2560,	1,	1 ],	size: 20971520, offset: 748009472
-tensor # 304 name:         v.deepstack.17.norm.bias, type:    f32, shape: [ 4096,	1,	1,	1 ],	size: 16384, offset: 768980992
-tensor # 305 name:       v.deepstack.17.norm.weight, type:    f32, shape: [ 4096,	1,	1,	1 ],	size: 16384, offset: 768997376
-*/
-
 static const TensorDef QWEN3VL_CLIP_GLOBAL_TENSORS[] = {
 	{"v.patch_embd.bias", offsetof(VisionModel, patch_embd_bias), FLAG_NONE},
 	{"v.patch_embd.weight", offsetof(VisionModel, patch_embd), FLAG_NONE},
+	{"v.patch_embd.weight.1", offsetof(VisionModel, patch_embd_1), FLAG_NONE},
 	{"v.post_ln.bias", offsetof(VisionModel, post_ln_bias), FLAG_NONE},
 	{"v.post_ln.weight", offsetof(VisionModel, post_ln), FLAG_NONE},
 	{"v.position_embd.weight", offsetof(VisionModel, position_embd), FLAG_NONE},
-//	{"mm.input_projection.weight", offsetof(VisionModel, input_projection), FLAG_NONE},
-//	{"mm.soft_emb_norm.weight", offsetof(VisionModel, soft_embd_norm), FLAG_NONE},
+
+	// Main Projector (Tensors 306-309)
+        {"mm.0.bias", offsetof(VisionModel, mm_0_bias), FLAG_NONE},
+        {"mm.0.weight", offsetof(VisionModel, mm_0_weight), FLAG_NONE},
+        {"mm.2.bias", offsetof(VisionModel, mm_2_bias), FLAG_NONE},
+        {"mm.2.weight", offsetof(VisionModel, mm_2_weight), FLAG_NONE},
 };
 
 static const TensorDef QWEN3VL_CLIP_LAYER_TENSORS[] = {
@@ -431,6 +439,14 @@ static const TensorDef QWEN3VL_CLIP_LAYER_TENSORS[] = {
 	{"v.blk.%u.ln2.weight", offsetof(VisionLayerWeights, ln2), FLAG_NONE},
 	{"v.blk.%u.attn_qkv.bias", offsetof(VisionLayerWeights, attn_qkv_bias), FLAG_NONE},
 	{"v.blk.%u.attn_qkv.weight", offsetof(VisionLayerWeights, attn_qkv), FLAG_NONE},
+
+        // DeepStack Projector
+        {"v.deepstack.%u.fc1.bias", offsetof(VisionLayerWeights, ds_fc1_bias), FLAG_OPTIONAL},
+        {"v.deepstack.%u.fc1.weight", offsetof(VisionLayerWeights, ds_fc1_weight), FLAG_OPTIONAL},
+        {"v.deepstack.%u.fc2.bias", offsetof(VisionLayerWeights, ds_fc2_bias), FLAG_OPTIONAL},
+        {"v.deepstack.%u.fc2.weight", offsetof(VisionLayerWeights, ds_fc2_weight), FLAG_OPTIONAL},
+        {"v.deepstack.%u.norm.bias", offsetof(VisionLayerWeights, ds_norm_bias), FLAG_OPTIONAL},
+        {"v.deepstack.%u.norm.weight", offsetof(VisionLayerWeights, ds_norm_weight), FLAG_OPTIONAL},
 };
 
 static const MetadataDef QWEN3VL_CLIP_METADATA_DEFS[] = {
@@ -443,6 +459,7 @@ static const BufferDef QWEN3VL_CLIP_BUFFERS[] = {
 	{offsetof(MemLayoutVision, image_raw), SIZE_VISION_IMAGE_RAW, GGML_TYPE_F32, FLAG_NONE},
 	{offsetof(MemLayoutVision, patch_embeds), SIZE_VISION_PATCH_EMBEDS, INTERNAL_MEMORY_TYPE, FLAG_NONE},
 	{offsetof(MemLayoutVision, hidden_state), SIZE_VISION_SEQ_LEN_X_EMBED_DIM, INTERNAL_MEMORY_TYPE, FLAG_NONE},
+	{offsetof(MemLayoutVision, QKV_fused), SIZE_VISION_SEQ_LEN_X_QKV_DIM_X3, INTERNAL_MEMORY_TYPE, FLAG_NONE},
 	{offsetof(MemLayoutVision, Q), SIZE_VISION_SEQ_LEN_X_EMBED_DIM, INTERNAL_MEMORY_TYPE, FLAG_NONE},
 	{offsetof(MemLayoutVision, K), SIZE_VISION_SEQ_LEN_X_EMBED_DIM, INTERNAL_MEMORY_TYPE, FLAG_NONE},
 	{offsetof(MemLayoutVision, V), SIZE_VISION_SEQ_LEN_X_EMBED_DIM, INTERNAL_MEMORY_TYPE, FLAG_NONE},
@@ -455,6 +472,8 @@ static const BufferDef QWEN3VL_CLIP_BUFFERS[] = {
 	{offsetof(MemLayoutVision, ffn_down_output), SIZE_VISION_SEQ_LEN_X_EMBED_DIM, INTERNAL_MEMORY_TYPE, FLAG_NONE},
 	{offsetof(MemLayoutVision, pooled_embeddings), SIZE_VISION_POOLED_EMBEDS, INTERNAL_MEMORY_TYPE, FLAG_NONE},
 	{offsetof(MemLayoutVision, projected_embeddings), SIZE_VISION_PROJ_EMBEDS, INTERNAL_MEMORY_TYPE, FLAG_NONE},
+	{offsetof(MemLayoutVision, merger_norm_buf), SIZE_VISION_MERGER_TEMP, GGML_TYPE_F32, FLAG_NONE},
+        {offsetof(MemLayoutVision, merger_fc1_buf), SIZE_VISION_MERGER_TEMP, GGML_TYPE_F32, FLAG_NONE},
 };
 
 ModelDef QWEN3VL_CLIP_DEF = {

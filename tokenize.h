@@ -103,4 +103,7 @@ extern void token_out_sp(struct TIEContext *ctx, int token_id);
 
 extern int init_token_table(struct TIEContext *ctx, int num_tokens);
 
+extern int build_vision_tokens_gemma3(struct TIEContext *ctx, int *token_buf, int buf_pos);
+extern int build_vision_tokens_qwen3vl(struct TIEContext *ctx, int *token_buf, int buf_pos);
+
 #endif

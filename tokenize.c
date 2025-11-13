@@ -725,7 +725,6 @@ void token_out_sp(struct TIEContext *ctx, int token_id)
 	}
 }
 
-
 void bpe_map_init_decoder(int *map)
 {
 	// Initialize all entries to -1 (not found)
@@ -797,4 +796,49 @@ int init_token_table(struct TIEContext *ctx, int num_tokens)
 	bpe_map_init_decoder(ctx->tokenizer.bpe_decoder_map);
 
 	return 0;
+}
+
+int build_vision_tokens_gemma3(struct TIEContext *ctx, int *token_buf, int buf_pos)
+{
+	int pos = buf_pos;
+
+	token_buf[pos++] = ctx->model->double_newline_token_id; // DOUBLE NEWLINE
+	token_buf[pos++] = ctx->model->vision_start_token_id;	// <start_of_image>
+
+	for (int i = 0; i < 256; ++i)
+		token_buf[pos++] = ctx->model->vision_embed_token_id;
+
+	token_buf[pos++] = ctx->model->vision_end_token_id;	// <end_of_image>
+	token_buf[pos++] = ctx->model->double_newline_token_id; // DOUBLE NEWLINE
+
+	return pos - buf_pos;
+}
+
+int build_vision_tokens_qwen3vl(struct TIEContext *ctx, int *token_buf, int buf_pos)
+{
+	int pos = buf_pos;
+
+	int image_size = ctx->model_vision->image_size;
+	int patch_size = ctx->model_vision->patch_size;
+	int patches_per_side = image_size / patch_size;						// 768 / 16 = 48
+	int merged_patches_per_side = patches_per_side / ctx->model_vision->spatial_merge_size; // 48 / 2 = 24
+	int num_patches = merged_patches_per_side * merged_patches_per_side;			// 576
+
+	// Add <|vision_start|> token
+	token_buf[pos++] = ctx->model->vision_start_token_id;
+
+	// Add the *same* <|vision_pad|> token N times
+	int patch_token = ctx->model->vision_embed_token_id;
+
+	for (int i = 0; i < num_patches; i++) {
+		token_buf[pos++] = patch_token;
+	}
+
+	// Add <|vision_end|> token
+	token_buf[pos++] = ctx->model->vision_end_token_id;
+
+	// Add the required newline
+	token_buf[pos++] = ctx->model->newline_token_id;
+
+	return pos - buf_pos;
 }

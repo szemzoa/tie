@@ -187,8 +187,6 @@ void read_user_input(char *input_buf, size_t buf_size)
 	input_buf[strcspn(input_buf, "\n")] = 0;
 }
 
-#define IMAGE_EMBED_PLACEHOLDER_ID 262144
-
 int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf, bool has_image, size_t *num_tokens)
 {
 	size_t user_text_token_count = 0;
@@ -221,17 +219,19 @@ int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf,
 	memcpy(&prompt_tokens[prompt_len], user_text_tokens, user_text_token_count * sizeof(int));
 	prompt_len += user_text_token_count;
 
-	// Image Block (if present)
 	if (has_image) {
-		prompt_tokens[prompt_len++] = 108;    // DOUBLE NEWLINE
-		prompt_tokens[prompt_len++] = 255999; // <start_of_image>
 
-		for (int i = 0; i < 256; ++i) {
-			prompt_tokens[prompt_len++] = IMAGE_EMBED_PLACEHOLDER_ID;
-		}
+	    if (ctx->model->interface.build_vision_tokens) {
+        	// Call the model-specific function
+        	int num_added = ctx->model->interface.build_vision_tokens(ctx, prompt_tokens, prompt_len);
+        	prompt_len += num_added;
 
-		prompt_tokens[prompt_len++] = 256000; // <end_of_image>
-		prompt_tokens[prompt_len++] = 108;    // DOUBLE NEWLINE
+    	    } else {
+        	fprintf(stderr, "ERROR: Model does not support vision, but an image was provided.\n");
+		*num_tokens = 0;
+		free(user_text_tokens);
+		return NULL;
+    	    }
 	}
 
 	// End of User Turn & Start of Model Turn
@@ -254,6 +254,11 @@ void run_multimodal_prompt(struct TIEContext *ctx, int *prompt_tokens, int promp
 	MemType *image_embeddings = NULL;
 	void (*embedding_scale_func)(struct TIEContext *, MemType *) = ctx->model->interface.embedding_scale;
 
+	if (ctx->gguf_text->arch == ARCH_GEMMA3N) {
+		process_prompt_gemma3n(ctx, prompt_tokens, prompt_len);
+		return;
+	}
+
 	if (has_image == 1) {
 		process_image_vision(ctx);
 		image_embeddings = &ctx->vision_mem.projected_embeddings;
@@ -264,17 +269,20 @@ void run_multimodal_prompt(struct TIEContext *ctx, int *prompt_tokens, int promp
 
 		MemType dest_slice = mem_slice(&ctx->mem.hidden_state, current_pos * embed_dim);
 
-		if (token_id == IMAGE_EMBED_PLACEHOLDER_ID) {
+		if (token_id == ctx->model->vision_embed_token_id) {
 			// This is an image placeholder, copy the corresponding embedding slice
 			MemType image_src_slice = mem_slice(image_embeddings, image_embed_idx * embed_dim);
 			memcpy(dest_slice.data, image_src_slice.data, embed_dim * sizeof(float));
 			image_embed_idx++;
 		} else {
+
 			// This is a normal text token, look it up and scale it
 			dispatch_embedding_row(&ctx->model->token_embd, token_id, &dest_slice, embed_dim);
+
 			if (embedding_scale_func) {
 				embedding_scale_func(ctx, &dest_slice);
 			}
+
 		}
 
 		current_pos++;
@@ -348,6 +356,11 @@ void generate_interactive(struct TIEContext *ctx, int max_new_tokens, int has_im
 
 		prompt_tokens = build_multimodal_turn_tokens(ctx, input_buf, has_image, &prompt_len);
 
+		if (prompt_tokens == NULL || prompt_len == 0) {
+		    printf("Build prompt failed\n");
+		    continue;
+		}
+
 		printf("--- Prompt Processing at pos: %u (Matrix Mode) %zu tokens ---\n", ctx->kv_pos, prompt_len);
 		clock_gettime(CLOCK_REALTIME, &start);
 
@@ -394,7 +407,7 @@ void generate_interactive(struct TIEContext *ctx, int max_new_tokens, int has_im
 			}
 
 			int next_token = predict_next_token((float *)ctx->mem.logits.data, ctx->model->vocab_size,
-							    "temperature", 0.7f, 64, 0.95f, prompt_tokens, prompt_len,
+							    "temperature", 0.7f, 20, 0.95f, prompt_tokens, prompt_len,
 							    generated_tokens, gen_len, ctx->model->repetition_penalty);
 
 			generate_output(ctx, next_token);
@@ -594,11 +607,11 @@ int main(int argc, char *argv[])
 	if (context_length != 0)
 		ctx->model->seq_length = context_length;
 
-	printf("set context_length: %u\n", ctx->model->seq_length);
 
 	/* Init language model */
 	model_language_init(ctx, (void *)ctx->model, text_def, 1.0f, 1.0f);
 	language_model_info(ctx);
+
 
 	/* Init vision model */
 	if (ctx->model_vision) {
@@ -609,13 +622,14 @@ int main(int argc, char *argv[])
 	if (ctx->model_vision && image_path != NULL) {
 		if (load_bmp_clip(image_path, ctx) == 0) {
 			has_image = 1;
+			printf("Succesfully loaded %s image for vision process\n", image_path);
 		} else {
 			printf("Error loading image for vision process\n");
 		}
 	}
 
 	/* start generation loop */
-	printf("Welcome to interactive chat. Type '/exit' to quit.\n");
+	printf("\nWelcome to interactive chat. Type '/exit' to quit.\n");
 	generate_interactive(ctx, 8192, has_image);
 
 _cleanup:

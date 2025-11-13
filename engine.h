@@ -24,6 +24,12 @@ typedef struct {
 } RopeCacheType;
 
 typedef struct {
+	float *cos_table;    // [seq_len * head_dim] (e.g., 2304 * 64)
+	float *sin_table;    // [seq_len * head_dim] (e.g., 2304 * 64)
+	size_t num_elements; // e.g., 2304 * 64
+} MRopeCacheType;
+
+typedef struct {
 	GGMLType type;
 	void *data;
 } MemType;
@@ -107,6 +113,13 @@ typedef struct {
 	/* QWEN3VL */
 	Tensor attn_qkv_bias;
 	Tensor attn_qkv;
+
+	Tensor ds_fc1_bias;
+	Tensor ds_fc1_weight;
+	Tensor ds_fc2_bias;
+	Tensor ds_fc2_weight;
+	Tensor ds_norm_bias;
+	Tensor ds_norm_weight;
 } VisionLayerWeights;
 
 typedef struct {
@@ -142,6 +155,7 @@ typedef struct {
 	MemType image_raw;	  // Input: The normalized 896x896x3 image
 	MemType patch_embeds;	  // After patch embedding: [4096, 1152]
 	MemType hidden_state;	  // Main buffer for ViT layers: [4096, 1152]
+	MemType QKV_fused;	  // QKV fused projection combined
 	MemType Q;		  // Q projection [4096 * 1152]
 	MemType K;		  // K projection [4096 * 1152]
 	MemType V;		  // V projection [4096 * 1152]
@@ -155,6 +169,13 @@ typedef struct {
 	MemType ffn_down_output;      // FFN down-projection
 	MemType pooled_embeddings;    // After downsampling: [256, 1152]
 	MemType projected_embeddings; // Final output for the LLM: [256, 2560]
+
+	/* QWEN3-VL */
+	MemType merger_norm_buf;   // Holds output of LayerNorm
+        MemType merger_fc1_buf;    // Holds output of FC1 + GELU
+        // Storage for DeepStack outputs
+        // Size: [merged_seq_len, proj_dim] = [576, 2048]
+        MemType *deepstack_features;
 } MemLayoutVision;
 
 typedef struct {
@@ -186,7 +207,7 @@ extern float silu_table[SILU_TABLE_SIZE];
 
 extern void alloc_memtype(MemType *m, GGMLType t, size_t nelems);
 extern void free_memtype(MemType *m);
-extern void debug_memtype_f32(MemType *mem, char *name, int layer_idx);
+
 extern MemType mem_slice(MemType *buffer, size_t offset_elements);
 
 extern void silu_table_init(void);
@@ -197,8 +218,9 @@ extern void kv_cache_reset(struct TIEContext *ctx);
 extern void rope_cache_init(struct TIEContext *ctx, RopeCacheType *rope_cache, int max_pos, int head_dim, float base,
 			    float scale);
 
-extern void softmax(float *x, int size);
 extern void dispatch_gelu_inplace(MemType *tensor, int size);
+
+extern void softmax(float *x, int size);
 
 extern void attention_worker(void *arg);
 extern void attention_worker_gemma3n(void *arg);
@@ -226,5 +248,9 @@ extern void calculate_and_deinterleave_pli_raw(struct TIEContext *ctx, int *prom
 					       MemType *dest_buffer);
 extern void post_process_altup_states(struct TIEContext *ctx, MemType *final_hidden_state, MemType *final_altup_states,
 				      size_t n_tokens);
+
+extern int compare_tensor_with_file(const char *ref_filename, const float *your_c_tensor, long num_elements,
+				    float tolerance, int debug_offset);
+extern void debug_memtype_f32(MemType *mem, char *name, int layer_idx, int debug_offset);
 
 #endif

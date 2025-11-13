@@ -757,8 +757,6 @@ void gguf_model_metadata_free(struct GGUFModel *gguf)
 	for (i = 0; i < gguf->metadata_num; i++) {
 		metadata = &gguf->metadata[i];
 
-//		printf("cleanup metadata: %s\n", metadata->name);
-
 		// Free the metadata key name
 		if (metadata->name) {
 			free(metadata->name);
@@ -766,33 +764,36 @@ void gguf_model_metadata_free(struct GGUFModel *gguf)
 		}
 
 		if (metadata->type == GGUF_METADATA_VALUE_TYPE_ARRAY) {
-		// Free the metadata value data
-		if (metadata->data) {
+
+		    // Free the metadata value data
+		    if (metadata->data) {
 			// Array of strings
 			// We must free each individual string before freeing the array of pointers.
-			// We identify this case if the type is STRING and the size > 0
-			// (assuming single/non-array values have size 0)
 			if (metadata->type == GGUF_METADATA_VALUE_TYPE_STRING && metadata->size > 0) {
+
 				char **string_array = (char **)metadata->data;
+
 				uint64_t j;
+
 				for (j = 0; j < metadata->size; j++) {
-					if (string_array[j]) {
+					if (string_array[j])
 						free(string_array[j]);
-					}
 				}
+
 				// Now free the array of pointers itself
 				free(metadata->data);
 			} else {
 				free(metadata->data);
 			}
 
-			metadata->data = NULL; // Good practice
-		}
+			metadata->data = NULL;
+		    }
 		}
 	}
 
-	// Finally, free the array of metadata structs
+	// free the array of metadata structs
 	free(gguf->metadata);
+
 	gguf->metadata = NULL;
 	gguf->metadata_num = 0;
 }
@@ -1243,7 +1244,7 @@ int gguf_model_read_token_merges(struct TIEContext *ctx, struct GGUFModel *gguf,
 
 	gguf->fptr = metadata->arr_offset;
 	ctx->model->merges_size = metadata->size;
-	printf("model merges_size: %llu\n", ctx->model->merges_size);
+	//printf("model merges_size: %llu\n", ctx->model->merges_size);
 
 	for (i = 0; i < metadata->size; i++) {
 		str_len = *(uint64_t *)gguf->fptr;

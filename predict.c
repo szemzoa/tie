@@ -186,7 +186,7 @@ int predict_next_token(float *logits, int vocab_size, const char *method, float 
 		       const int *prompt_tokens, int prompt_len, const int *generated_tokens, int gen_len,
 		       float repetition_penalty)
 {
-	// 1. Apply repetition penalty to the logits
+	// Apply repetition penalty to the logits
 	if (repetition_penalty != 1.0f) {
 		// Using a simple set for lookup, could be optimized further if needed
 		for (int i = 0; i < prompt_len; i++) {
@@ -209,7 +209,7 @@ int predict_next_token(float *logits, int vocab_size, const char *method, float 
 		}
 	}
 
-	// 2. Apply temperature scaling to the logits
+	// Apply temperature scaling to the logits
 	if (temperature <= 0.0f) {
 		// A temperature of 0 corresponds to greedy sampling (argmax)
 		return argmax(logits, vocab_size);
@@ -218,12 +218,12 @@ int predict_next_token(float *logits, int vocab_size, const char *method, float 
 		logits[i] /= temperature;
 	}
 
-	// 3. Compute the final probability distribution via softmax
+	// Compute the final probability distribution via softmax
 	float *probs = softmax(logits, vocab_size);
 	if (!probs)
 		return vocab_size - 1; // Fallback on error
 
-	// 4. Select the sampling method based on the final probabilities
+	// Select the sampling method based on the final probabilities
 	int token;
 	if (strcmp(method, "top_k") == 0) {
 		token = top_k_sampling(probs, vocab_size, k);
@@ -244,7 +244,7 @@ int sample_top_k_with_penalty(const float *logits_in, int vocab_size, const int 
 	if (top_k <= 0 || top_k > vocab_size)
 		top_k = vocab_size;
 
-	// Step 1: Copy and apply repetition penalty
+	// Copy and apply repetition penalty
 	float *logits = (float *)malloc(sizeof(float) * vocab_size);
 	memcpy(logits, logits_in, sizeof(float) * vocab_size);
 
@@ -258,12 +258,12 @@ int sample_top_k_with_penalty(const float *logits_in, int vocab_size, const int 
 		}
 	}
 
-	// Step 2: Scale by temperature
+	// Scale by temperature
 	for (int i = 0; i < vocab_size; ++i) {
 		logits[i] /= temperature;
 	}
 
-	// Step 3: Partial sort to get top-k indices
+	// Partial sort to get top-k indices
 	int *indices = (int *)malloc(sizeof(int) * vocab_size);
 	for (int i = 0; i < vocab_size; ++i)
 		indices[i] = i;
@@ -285,7 +285,7 @@ int sample_top_k_with_penalty(const float *logits_in, int vocab_size, const int 
 		}
 	}
 
-	// Step 4: Softmax over top-k
+	// Softmax over top-k
 	float max_logit = logits[0];
 	float sum_exp = 0.0f;
 	float *probs = (float *)malloc(sizeof(float) * top_k);
@@ -300,7 +300,7 @@ int sample_top_k_with_penalty(const float *logits_in, int vocab_size, const int 
 		probs[i] /= sum_exp;
 	}
 
-	// Step 5: Sample from top-k
+	// Sample from top-k
 	float r = (float)rand_r(&seed) / RAND_MAX;
 	float cum = 0.0f;
 	for (int i = 0; i < top_k; ++i) {

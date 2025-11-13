@@ -1130,7 +1130,7 @@ void dispatch_conv_2d_scalar(MemType *dest, const MemType *src_image, const Tens
 	float *dest_data = (float *)dest->data;
 	const float *src_data = (const float *)src_image->data;
 	const float *kernel_data = (const float *)kernel_tensor->mem.data;
-	const float *bias_data = (const float *)bias_tensor->mem.data;
+	const float *bias_data = bias_tensor == NULL ? NULL : (const float *)bias_tensor->mem.data;
 
 	// KERNEL DIMENSIONS (from GGUF metadata [K_H, K_W, C_in, C_out])
 	const int K_H = kernel_tensor->dimensions[0];	// 14
@@ -1156,7 +1156,7 @@ void dispatch_conv_2d_scalar(MemType *dest, const MemType *src_image, const Tens
 	// Perform Convolution
 	for (int c_out = 0; c_out < C_out; ++c_out) {
 
-		const float bias = bias_data[c_out];
+		float bias = bias_data == NULL ? 0.0f : bias_data[c_out];
 		float *dest_plane_ptr = dest_data + (c_out * dest_plane_size);
 
 		// Get the pointer to the start of this filter's weights
@@ -1216,3 +1216,4 @@ void dispatch_conv_2d_scalar(MemType *dest, const MemType *src_image, const Tens
 		} // y_out
 	} // c_out
 }
+

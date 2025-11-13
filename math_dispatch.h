@@ -134,20 +134,27 @@ typedef struct {
 } dot_product_dispatch_t;
 
 extern void dispatch_embedding_row(const Tensor *W, int row_index, MemType *O_slice, int embed_dim);
+
 extern void dispatch_rms_norm(const MemType *X_slice, const Tensor *W, MemType *O_slice, int size, float eps);
+
 extern void dispatch_mat_vec(struct TIEContext *ctx, const MemType *X, const Tensor *W, MemType *O, int in_dim,
 			     int out_dim, int use_threads);
 extern void dispatch_mat_mat(struct TIEContext *ctx, const MemType *X, const Tensor *W, MemType *O, int batch_len,
 			     int in_dim, int out_dim, int use_threads);
+
 extern void dispatch_apply_rope_cache(RopeCacheType *rope_cache, MemType *X_slice, int pos, int head_dim);
+
 extern void dispatch_accumulate_weighted_V(const MemType *V_slice, MemType *O_slice, float weight, int size);
+
 extern void dispatch_store_KV_cache(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len);
 
 extern void dispatch_apply_residual(MemType *acc, const MemType *residual, int size);
 
 extern void dispatch_swiglu_activation(MemType *gate, MemType *up, int size);
 extern void dispatch_geglu_activation(MemType *gate, MemType *up, int size);
+
 extern void dispatch_convert(const MemType *src, MemType *dest, int size);
+
 extern float dispatch_dot_product(const MemType *vec_a, const MemType *vec_b, int size);
 
 #endif

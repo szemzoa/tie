@@ -9,7 +9,6 @@ extern ModelDef GEMMA3_DEF;
 extern ModelDef GEMMA3N_DEF;
 extern ModelDef GEMMA3_CLIP_DEF;
 extern ModelDef QWEN3VL_DEF;
-
 extern ModelDef QWEN3VL_CLIP_DEF;
 
 // Common language model definitions

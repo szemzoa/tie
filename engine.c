@@ -12,18 +12,18 @@
 float silu_table[SILU_TABLE_SIZE];
 
 #define DEBUG_MEMTYPE_NUM 10
-void debug_memtype_f32(MemType *mem, char *name, int layer_idx)
+void debug_memtype_f32(MemType *mem, char *name, int layer_idx, int debug_offset)
 {
 	float *p = mem->data;
 
 	//	return;
 
-	printf("--- layer%d_%s --- [", layer_idx, name);
+	printf("--- layer%d_%s --- offset: %u [", layer_idx, name, debug_offset);
 	for (int i = 0; i < DEBUG_MEMTYPE_NUM; i++) {
 		if (i < DEBUG_MEMTYPE_NUM - 1) {
-			printf("%.10f, ", p[i]);
+			printf("%.10f, ", p[i + debug_offset]);
 		} else {
-			printf("%.10f ...", p[i]);
+			printf("%.10f ...", p[i + debug_offset]);
 		}
 	}
 	printf("]\n");
@@ -64,7 +64,7 @@ static void debug_check_tensor(const char *name, MemType *mem, int len, int laye
 	}
 }
 
-int compare_tensor_with_file(const char *ref_filename, const float *your_c_tensor, long num_elements, float tolerance)
+int compare_tensor_with_file(const char *ref_filename, const float *your_c_tensor, long num_elements, float tolerance, int debug_offset)
 {
 	FILE *file = fopen(ref_filename, "rb");
 	if (file == NULL) {
@@ -89,6 +89,16 @@ int compare_tensor_with_file(const char *ref_filename, const float *your_c_tenso
 		free(ref_tensor);
 		return 1;
 	}
+
+	printf("File: %s first %u elements from %u: ", ref_filename, DEBUG_MEMTYPE_NUM, debug_offset);
+	for (int i = 0; i < DEBUG_MEMTYPE_NUM; i++) {
+		if (i < DEBUG_MEMTYPE_NUM - 1) {
+			printf("%.10f, ", ref_tensor[i + debug_offset]);
+		} else {
+			printf("%.10f ...", ref_tensor[i + debug_offset]);
+		}
+	}
+	printf("\n");
 
 	// --- The Comparison ---
 	int mismatch_found = 0;

@@ -49,6 +49,7 @@ typedef enum {
 	SIZE_VISION_SEQ_LEN_X_QKV_DIM_X3,
 	SIZE_VISION_POOLED_EMBEDS,
 	SIZE_VISION_PROJ_EMBEDS,
+	SIZE_VISION_MERGER_TEMP,
 } BufferSizeType;
 
 typedef struct {
@@ -86,6 +87,12 @@ typedef struct {
 	int newline_token_id;
 	int role_user_token_id;
 	int role_model_token_id;
+
+	int double_newline_token_id;
+	int vision_start_token_id;
+	int vision_end_token_id;
+	int vision_embed_token_id;
+
 	int shared_kv_layers;
 	int ffn_dim;
 	float final_logit_softcap;
@@ -97,11 +104,15 @@ typedef struct {
 typedef struct {
 	int *(*tokenize_prompt)(struct TIEContext *ctx, const char *prompt, size_t *num_tokens);
 	void (*process_prompt)(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len);
-//	void (*token_out)(struct TIEContext *ctx, const char *p, int len);
 	void (*token_out)(struct TIEContext *ctx, int token_id);
 	void (*prepare_next_token)(struct TIEContext *ctx, int next_token);
 	void (*embedding_scale)(struct TIEContext *ctx, MemType *hidden_state_slice);
-	int (*transformer_layer)(struct TIEContext *ctx, int layer_idx, int batch_len);
+	int  (*transformer_layer)(struct TIEContext *ctx, int layer_idx, int batch_len);
+	int  (*build_vision_tokens)(struct TIEContext *ctx, int *token_buf, int buf_pos);
+
+	void (*vision_create_embeddings)(struct TIEContext *ctx);
+	void (*vision_transformer_layer)(struct TIEContext *ctx, int layer_idx);
+
 } ModelInterface;
 
 typedef struct {
@@ -168,6 +179,12 @@ typedef struct {
 	int role_user_token_id;
 	int role_model_token_id;
 	int newline_token_id;
+
+	int double_newline_token_id;
+	int vision_start_token_id;
+	int vision_end_token_id;
+	int vision_embed_token_id;
+
 	int add_bos_token;
 	int add_eos_token;
 	int bos_token_sent;
@@ -198,12 +215,16 @@ typedef struct {
 	Tensor per_layer_proj_norm;
 	Tensor per_layer_token_embd;
 	float final_logit_softcap;
+
+	/* qwen3-vl */
+	ModelArray mrope_sections;
+//	int mrope_section_num;
 } Model;
 
 typedef struct {
-	int image_size;	     // e.g. 896
-	float image_mean[3]; // e.g. {0.5, 0.5, 0.5}
-	float image_std[3];  // e.g. {0.5, 0.5, 0.5}
+	int image_size;
+	float image_mean[3];
+	float image_std[3];
 } ClipVisionMeta;
 
 typedef struct {
@@ -222,30 +243,40 @@ typedef struct {
 	int num_heads;
 	float norm_eps;
 
-	int proj_scale_factor;		/* GEMMA3 */
-	int spatial_merge_size;		/* QWEN3VL */
+	int proj_scale_factor;		/* Gemma-3 */
+	int spatial_merge_size;		/* Qwen3-VL */
 
 	int soi_token_id;
 	int eoi_token_id;
 	int image_soft_token_id;
+
+	int num_deepstack_layers;	/* Qwen3-VL */
+	ModelArray is_deepstack_layers;	/* Qwen3-VL */
 
 	ClipVisionMeta meta;
 
 	ModelArray image_mean;
 	ModelArray image_std;
 
-	ModelArray is_deepstack_layers;		/* QWEN3VL */
-
 	Tensor input_projection;
 	Tensor soft_embd_norm;
 	Tensor patch_embd_bias;
 	Tensor patch_embd;
+	Tensor patch_embd_1;		/* Qwen3-VL */
 	Tensor position_embd;
 	Tensor post_ln_bias;
 	Tensor post_ln;
 
+	/* Qwen3-VL */
+	Tensor	mm_0_bias;
+	Tensor	mm_0_weight;
+	Tensor	mm_2_bias;
+	Tensor	mm_2_weight;
+
 	VisionLayerWeights *layers;
 	WeightLayout weight_layout;
+
+	MRopeCacheType mrope_cache;
 } VisionModel;
 
 extern ModelDef *find_model_def(struct GGUFModel *gguf_model);
