@@ -76,6 +76,7 @@ extern void store_KV_cache_bf16_bf16_scalar(struct TIEContext *ctx, int layer_id
 
 extern void apply_rope_cache_f32_scalar(RopeCacheType *rope_cache, void *X, int pos, int head_dim);
 extern void apply_rope_cache_bf16_scalar(RopeCacheType *rope_cache, void *X, int pos, int head_dim);
+extern void apply_mrope_cache_f32_scalar(RopeCacheType *rope_cache, void *X, int pos, int head_dim);
 
 extern void geglu_activation_f32_f32_scalar(void *gate, const void *up, int size);
 

@@ -12,6 +12,7 @@ typedef void (*mat_vec_fn)(const void *X, const void *W, void *O, int in_dim, in
 typedef void (*mat_mat_fn)(const void *X, const void *W, void *O, int prompt_len, int in_dim, int out_dim,
 			   int use_threads);
 typedef void (*apply_rope_cache_fn)(RopeCacheType *rope_cache, void *X, int pos, int head_dim);
+typedef void (*apply_mrope_cache_fn)(RopeCacheType *rope_cache, void *X, int pos, int head_dim);
 typedef void (*accumulate_weighted_V_fn)(void *O, float W, const void *V, int size);
 typedef void (*store_KV_cache_fn)(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len);
 typedef void (*apply_residual_fn)(void *acc, const void *residual, int size);
@@ -85,6 +86,12 @@ typedef struct {
 } apply_rope_cache_dispatch_t;
 
 typedef struct {
+	GGMLType input_type;
+	apply_mrope_cache_fn func;
+	int accel;
+} apply_mrope_cache_dispatch_t;
+
+typedef struct {
 	GGMLType output_type;
 	GGMLType value_type;
 	accumulate_weighted_V_fn func;
@@ -143,6 +150,7 @@ extern void dispatch_mat_mat(struct TIEContext *ctx, const MemType *X, const Ten
 			     int in_dim, int out_dim, int use_threads);
 
 extern void dispatch_apply_rope_cache(RopeCacheType *rope_cache, MemType *X_slice, int pos, int head_dim);
+extern void dispatch_apply_mrope_cache(RopeCacheType *rope_cache, MemType *X_slice, int pos, int head_dim);
 
 extern void dispatch_accumulate_weighted_V(const MemType *V_slice, MemType *O_slice, float weight, int size);
 

@@ -221,17 +221,17 @@ int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf,
 
 	if (has_image) {
 
-	    if (ctx->model->interface.build_vision_tokens) {
-        	// Call the model-specific function
-        	int num_added = ctx->model->interface.build_vision_tokens(ctx, prompt_tokens, prompt_len);
-        	prompt_len += num_added;
+		if (ctx->model->interface.build_vision_tokens) {
+			// Call the model-specific function
+			int num_added = ctx->model->interface.build_vision_tokens(ctx, prompt_tokens, prompt_len);
+			prompt_len += num_added;
 
-    	    } else {
-        	fprintf(stderr, "ERROR: Model does not support vision, but an image was provided.\n");
-		*num_tokens = 0;
-		free(user_text_tokens);
-		return NULL;
-    	    }
+		} else {
+			fprintf(stderr, "ERROR: Model does not support vision, but an image was provided.\n");
+			*num_tokens = 0;
+			free(user_text_tokens);
+			return NULL;
+		}
 	}
 
 	// End of User Turn & Start of Model Turn
@@ -243,6 +243,12 @@ int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf,
 
 	free(user_text_tokens);
 	*num_tokens = prompt_len;
+
+	if (ctx->model->use_mrope == 1) {
+	    build_mrope_position_ids(ctx, prompt_tokens, prompt_len, has_image, ctx->kv_pos);
+	    text_rope_cache_init(ctx, prompt_len, ctx->kv_pos);
+	}
+
 	return prompt_tokens;
 }
 
@@ -254,6 +260,7 @@ void run_multimodal_prompt(struct TIEContext *ctx, int *prompt_tokens, int promp
 	MemType *image_embeddings = NULL;
 	void (*embedding_scale_func)(struct TIEContext *, MemType *) = ctx->model->interface.embedding_scale;
 
+// TODO
 	if (ctx->gguf_text->arch == ARCH_GEMMA3N) {
 		process_prompt_gemma3n(ctx, prompt_tokens, prompt_len);
 		return;
@@ -282,7 +289,6 @@ void run_multimodal_prompt(struct TIEContext *ctx, int *prompt_tokens, int promp
 			if (embedding_scale_func) {
 				embedding_scale_func(ctx, &dest_slice);
 			}
-
 		}
 
 		current_pos++;
@@ -309,7 +315,7 @@ void generate_interactive(struct TIEContext *ctx, int max_new_tokens, int has_im
 	tool_call_init(ctx, &tool_call);
 
 #if 0
-	if (ctx->gguf_text->arch == ARCH_QWEN3 || ctx->gguf_text->arch == ARCH_QWEN3_MOE || ctx->gguf_text->arch == ARCH_QWEN3VL) {
+	if (ctx->gguf_text->arch == ARCH_QWEN3 || ctx->gguf_text->arch == ARCH_QWEN3_MOE || ctx->gguf_text->arch == ARCH_QWEN3VL || ctx->gguf_text->arch == ARCH_QWEN3VL_MOE) {
 	    // Process system prompt immediately at start
 	    size_t system_prompt_len = 0;
 
@@ -336,7 +342,7 @@ void generate_interactive(struct TIEContext *ctx, int max_new_tokens, int has_im
 		} else {
 
 			if (ctx->gguf_text->arch == ARCH_QWEN3 || ctx->gguf_text->arch == ARCH_QWEN3_MOE
-			    || ctx->gguf_text->arch == ARCH_QWEN3VL) {
+			    || ctx->gguf_text->arch == ARCH_QWEN3VL || ctx->gguf_text->arch == ARCH_QWEN3VL_MOE) {
 				snprintf(
 					prompt_buf, sizeof(prompt_buf),
 					"<|im_start|>user\n<tool_response>%s</tool_response><|im_end|>\n<|im_start|>assistant\n",
@@ -357,8 +363,8 @@ void generate_interactive(struct TIEContext *ctx, int max_new_tokens, int has_im
 		prompt_tokens = build_multimodal_turn_tokens(ctx, input_buf, has_image, &prompt_len);
 
 		if (prompt_tokens == NULL || prompt_len == 0) {
-		    printf("Build prompt failed\n");
-		    continue;
+			printf("Build prompt failed\n");
+			continue;
 		}
 
 		printf("--- Prompt Processing at pos: %u (Matrix Mode) %zu tokens ---\n", ctx->kv_pos, prompt_len);
@@ -420,6 +426,7 @@ void generate_interactive(struct TIEContext *ctx, int max_new_tokens, int has_im
 			if (next_token == ctx->model->eos_token_id) {
 				printf("\n--- EOS token reached ---\n");
 				tool_call_handler(ctx, &tool_call, next_token);
+				ctx->kv_pos++;
 				break;
 			}
 
@@ -478,15 +485,6 @@ int engine_alloc(struct TIEContext *ctx, int num_threads)
 	// Initialize SiLU lookup table
 	printf("init: SiLU table\n");
 	silu_table_init();
-
-	// Initialize RoPE cache
-	printf("init: RoPE cache\n");
-	ctx->rope_cache_local = malloc(sizeof(RopeCacheType));
-	ctx->rope_cache_global = malloc(sizeof(RopeCacheType));
-	if (!ctx->rope_cache_local || !ctx->rope_cache_global) {
-		perror("Failed to allocate rope_cache");
-		return -1;
-	}
 
 	return 0;
 }
@@ -589,7 +587,9 @@ int main(int argc, char *argv[])
 			printf("Failed to detect vision model def\n");
 			exit(EXIT_FAILURE);
 		}
-		if (model_load(ctx, ctx->gguf_vision, (void **)&ctx->model_vision, (const ModelDef *)vision_def, use_mmap) != 0) {
+		if (model_load(ctx, ctx->gguf_vision, (void **)&ctx->model_vision, (const ModelDef *)vision_def,
+			       use_mmap)
+		    != 0) {
 			printf("Failed to load model %s\n", vision_def->name);
 			exit(EXIT_FAILURE);
 		}
@@ -604,6 +604,7 @@ int main(int argc, char *argv[])
 	/* Fallbacks */
 	if (ctx->model->rope_scale_factor == 0.0f)
 		ctx->model->rope_scale_factor = 1.0f;
+
 	if (context_length != 0)
 		ctx->model->seq_length = context_length;
 

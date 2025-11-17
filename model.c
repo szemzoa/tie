@@ -13,6 +13,9 @@
 #include "math_dispatch.h"
 #include "vision.h"
 
+extern void build_rope_cache_dynamic(struct TIEContext *ctx, size_t seq_len);
+
+
 const struct arch_t known_archs[] = {
 	{"qwen3", ARCH_QWEN3},
 	{"qwen3moe", ARCH_QWEN3_MOE},
@@ -20,6 +23,7 @@ const struct arch_t known_archs[] = {
 	{"gemma3n", ARCH_GEMMA3N},
 	{"clip", ARCH_CLIP_VISION},
 	{"qwen3vl", ARCH_QWEN3VL},
+	{"qwen3vlmoe", ARCH_QWEN3VL_MOE},
 };
 
 const struct arch_t known_projectors[] = {
@@ -140,6 +144,9 @@ ModelDef *find_model_def(struct GGUFModel *gguf_model)
 		break;
 	case ARCH_QWEN3VL:
 		def = &QWEN3VL_DEF;
+		break;
+	case ARCH_QWEN3VL_MOE:
+		def = &QWEN3VL_MOE_DEF;
 		break;
 	case ARCH_GEMMA3:
 		def = &GEMMA3_DEF;
@@ -369,34 +376,44 @@ int model_init_mem_language(struct TIEContext *ctx, const ModelDef *def)
 		const BufferDef *bdef = &def->buffer_defs[i];
 
 		MemType *dest_buffer = (MemType *)((uint8_t *)&ctx->mem + bdef->offset);
-		size_t size_multiplier = 0;
+//		size_t size_multiplier = 0;
+		size_t alloc_size = 0;
 
 		// Resolve size type to runtime value
 		switch (bdef->size_type) {
 
 		case SIZE_EMBED_DIM:
-			size_multiplier = ctx->model->embed_dim;
+			alloc_size = ctx->model->embed_dim * MAX_PROMPT_BATCH_SIZE;
 			break;
 		case SIZE_VOCAB_SIZE:
-			size_multiplier = ctx->model->vocab_size;
+			alloc_size = ctx->model->vocab_size * MAX_PROMPT_BATCH_SIZE;
 			break;
 		case SIZE_FFN_DIM:
-			size_multiplier = ctx->model->ffn_dim;
+			alloc_size = ctx->model->ffn_dim * MAX_PROMPT_BATCH_SIZE;
 			break;
 		case SIZE_Q_DIM:
-			size_multiplier = ctx->model->num_heads * ctx->model->head_dim;
+			alloc_size = ctx->model->num_heads * ctx->model->head_dim * MAX_PROMPT_BATCH_SIZE;
 			break;
 		case SIZE_KV_DIM:
-			size_multiplier = ctx->model->num_kv_heads * ctx->model->head_dim;
+			alloc_size = ctx->model->num_kv_heads * ctx->model->head_dim * MAX_PROMPT_BATCH_SIZE;
 			break;
 		case SIZE_NUM_LAYERS_X_PLI_DIM:
-			size_multiplier = ctx->model->num_layers * ctx->model->pli_dim;
+			alloc_size = ctx->model->num_layers * ctx->model->pli_dim * MAX_PROMPT_BATCH_SIZE;
+			break;
+		case SIZE_POS_IDS:
+			alloc_size = 3 * ctx->model->seq_length;
+			break;
+		case SIZE_ROPE_SIN:
+			alloc_size = ctx->model->seq_length * ctx->model->head_dim * MAX_PROMPT_BATCH_SIZE;
+			break;
+		case SIZE_ROPE_COS:
+			alloc_size = ctx->model->seq_length * ctx->model->head_dim * MAX_PROMPT_BATCH_SIZE;
 			break;
 		default:
 			return -1;
 		}
 
-		alloc_memtype(dest_buffer, bdef->type, size_multiplier * MAX_PROMPT_BATCH_SIZE);
+		alloc_memtype(dest_buffer, bdef->type, alloc_size);
 	}
 
 	// Explicit Block for Special MoE Array Buffers
@@ -510,6 +527,38 @@ int model_load(struct TIEContext *ctx, struct GGUFModel *gguf, void **model, con
 	return 0;
 }
 
+
+void build_rope_cache_global(struct TIEContext *ctx, size_t seq_len)
+{
+	ctx->model->rope_cache_global = malloc(sizeof(RopeCacheType));
+
+// TODO
+	if (!ctx->model->rope_cache_global) {
+		perror("Failed to allocate rope_cache");
+		exit(EXIT_FAILURE);
+	}
+
+	rope_cache_init(ctx, ctx->model->rope_cache_global, ctx->model->seq_length, ctx->model->head_dim,
+			ctx->model->rope_freq_base, ctx->model->yarn_scale_factor);
+}
+
+void build_rope_cache_shared(struct TIEContext *ctx, size_t seq_len)
+{
+	ctx->model->rope_cache_local = malloc(sizeof(RopeCacheType));
+	ctx->model->rope_cache_global = malloc(sizeof(RopeCacheType));
+
+	if (!ctx->model->rope_cache_local || !ctx->model->rope_cache_global) {
+		perror("Failed to allocate rope_cache");
+		exit(EXIT_FAILURE);
+	}
+
+	rope_cache_init(ctx, ctx->model->rope_cache_global, ctx->model->seq_length, ctx->model->head_dim,
+			ctx->model->rope_freq_base, ctx->model->rope_scale_factor);
+
+	rope_cache_init(ctx, ctx->model->rope_cache_local, ctx->model->seq_length, ctx->model->head_dim, 10000.0f,
+			1.0f);
+}
+
 int model_language_init(struct TIEContext *ctx, Model *model, const ModelDef *def, float yarn_scale_factor,
 			float repetiton_penality)
 {
@@ -534,24 +583,14 @@ int model_language_init(struct TIEContext *ctx, Model *model, const ModelDef *de
 	ctx->model->vision_end_token_id = def->params.vision_end_token_id;
 	ctx->model->vision_embed_token_id = def->params.vision_embed_token_id;
 
-
 	switch (def->arch) {
 	case ARCH_QWEN3:
 	case ARCH_QWEN3_MOE:
 		ctx->model->attn_scale = 1.0f / sqrtf((float)ctx->model->head_dim);
-
-		rope_cache_init(ctx, ctx->rope_cache_global, ctx->model->seq_length, ctx->model->head_dim,
-				ctx->model->rope_freq_base, ctx->model->yarn_scale_factor);
 		break;
 
 	case ARCH_GEMMA3:
 		ctx->model->attn_scale = 1.0f;
-
-		rope_cache_init(ctx, ctx->rope_cache_global, ctx->model->seq_length, ctx->model->head_dim,
-				ctx->model->rope_freq_base, ctx->model->rope_scale_factor);
-
-		rope_cache_init(ctx, ctx->rope_cache_local, ctx->model->seq_length, ctx->model->head_dim, 10000.0f,
-				1.0f);
 		break;
 
 	case ARCH_GEMMA3N:
@@ -564,33 +603,28 @@ int model_language_init(struct TIEContext *ctx, Model *model, const ModelDef *de
 			ctx->model->shared_kv_layers = 15;
 			ctx->model->ffn_dim = 16384;
 		}
-
-		rope_cache_init(ctx, ctx->rope_cache_global, ctx->model->seq_length, ctx->model->head_dim,
-				ctx->model->rope_freq_base, 1.0f);
-
-		rope_cache_init(ctx, ctx->rope_cache_local, ctx->model->seq_length, ctx->model->head_dim, 10000.0f,
-				1.0f);
 		break;
 
 	case ARCH_QWEN3VL:
 		ctx->model->attn_scale = 1.0f / sqrtf((float)ctx->model->head_dim);
-
-		printf("M-RoPE sections: ");
-		uint32_t *sect = (uint32_t *)ctx->model->mrope_sections.data;
-		for (int i = 0; i < ctx->model->mrope_sections.size; i++) {
-		    printf("[%u]", sect[i]);
-		}
-		printf("\n");
-
+		ctx->model->use_mrope = 1;
 // TODO
-		rope_cache_init(ctx, ctx->rope_cache_global, ctx->model->seq_length, ctx->model->head_dim,
-				ctx->model->rope_freq_base, ctx->model->yarn_scale_factor);
+		break;
+
+	case ARCH_QWEN3VL_MOE:
+		ctx->model->attn_scale = 1.0f / sqrtf((float)ctx->model->head_dim);
+		ctx->model->use_mrope = 1;
+// TODO
 		break;
 
 	default:
 		printf("%s %s model not defined?\n", __FUNCTION__, def->name);
 		break;
 	}
+
+	// Initialize RoPE cache
+	printf("init: RoPE cache\n");
+	ctx->model->interface.build_rope_cache(ctx, ctx->model->seq_length);
 
 	init_KV_cache(ctx);
 
@@ -688,6 +722,17 @@ void model_language_cleanup(struct TIEContext *ctx, struct GGUFModel *model, Mod
 	}
 	free(model->tensors);
 
+	/* free rope cache(s) */
+	free(ctx->model->rope_cache_local->sin);
+	free(ctx->model->rope_cache_local->cos);
+	free(ctx->model->rope_cache_local);
+
+	if (ctx->model->rope_cache_global) {
+		free(ctx->model->rope_cache_global->sin);
+		free(ctx->model->rope_cache_global->cos);
+		free(ctx->model->rope_cache_global);
+	}
+
 	/* free KV cache */
 	for (uint32_t i = 0; i < ctx->model->num_layers; i++) {
 		free_memtype(&ctx->kv_cache[i].k);
@@ -695,18 +740,8 @@ void model_language_cleanup(struct TIEContext *ctx, struct GGUFModel *model, Mod
 	}
 	free(ctx->kv_cache);
 
+
 	free(model);
-
-	/* free rope cache(s) */
-	free(ctx->rope_cache_local->sin);
-	free(ctx->rope_cache_local->cos);
-	free(ctx->rope_cache_local);
-
-	if (ctx->rope_cache_global) {
-		free(ctx->rope_cache_global->sin);
-		free(ctx->rope_cache_global->cos);
-		free(ctx->rope_cache_global);
-	}
 
 	/* free tokenizer */
 	free(ctx->tokenizer.token_table);
@@ -881,7 +916,9 @@ void model_vision_cleanup(struct TIEContext *ctx, struct GGUFModel *model, Model
 	}
 	free(model->tensors);
 
-// TODO cleanup mrope
+	/* free mrope cache(s) */
+	free(ctx->model_vision->mrope_cache.sin_table);
+	free(ctx->model_vision->mrope_cache.cos_table);
 
 	free(model);
 }
@@ -892,8 +929,10 @@ int model_vision_init(struct TIEContext *ctx, VisionModel *model_vision, const M
 	vm->interface = def->interface;
 	vm->proj_scale_factor = def->params.proj_scale_factor;
 	vm->num_deepstack_layers = 0;
+//	vm->spatial_merge_size = 1;
 	float *mean = (float *)vm->image_mean.data;
 	float *std = (float *)vm->image_std.data;
+
 
 	if (vm->has_vision_encoder != 1) {
 		printf("%s %s model has no vision encoder...\n", __FUNCTION__, def->name);
@@ -907,6 +946,7 @@ int model_vision_init(struct TIEContext *ctx, VisionModel *model_vision, const M
 		vm->soi_token_id = 255999;
 		vm->eoi_token_id = 256000;
 		vm->image_soft_token_id = 262144;
+		vm->spatial_merge_size = 1;
 	} break;
 
 	case VISION_PROJECTOR_QWEN3VL: {
@@ -977,10 +1017,20 @@ void language_model_info(struct TIEContext *ctx)
 	if (ctx->model->is_moe == 1)
 		printf("Expert Count: %d, Expert Used Count: %d, Expert FFN Dim: %d\n", ctx->model->expert_count,
 		       ctx->model->expert_used_count, ctx->model->expert_ffn_dim);
+	printf("Context_length: %u\n", ctx->model->seq_length);
+
 	if (ctx->model->altup_num_inputs > 0)
 		printf("Altup Num Inputs: %i\n", ctx->model->altup_num_inputs);
 
-	printf("Context_length: %u\n", ctx->model->seq_length);
+	if (ctx->model->use_mrope == 1) {
+	    printf("M-RoPE sections: ");
+	    uint32_t *sect = (uint32_t *)ctx->model->mrope_sections.data;
+
+	    for (int i = 0; i < ctx->model->mrope_sections.size; i++)
+		    printf("[%u]", sect[i]);
+
+	    printf("\n");
+	}
 }
 
 void vision_model_info(struct TIEContext *ctx)

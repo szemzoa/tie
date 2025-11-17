@@ -16,11 +16,17 @@ typedef struct {
 	float score;
 } ExpertChoice;
 
+enum {
+	ROPE_TYPE_STATIC = 0,
+	ROPE_TYPE_DYNAMIC,
+};
+
 typedef struct {
 	float *sin; // [max_pos][head_dim]
 	float *cos;
 	int max_pos;
 	int head_dim;
+	int type;
 } RopeCacheType;
 
 typedef struct {
@@ -31,6 +37,7 @@ typedef struct {
 
 typedef struct {
 	GGMLType type;
+	size_t n_bytes;
 	void *data;
 } MemType;
 
@@ -149,6 +156,16 @@ typedef struct {
 	MemType *altup_hidden_states;
 	MemType *altup_predicted_states;
 	MemType per_layer_inputs;
+
+/*
+	MemType rope_sin_global;
+	MemType rope_cos_global;
+
+	MemType rope_sin_local;
+	MemType rope_cos_local;
+*/
+	/* QWEN3-VL */
+	MemType pos_ids;
 } MemLayout;
 
 typedef struct {
@@ -226,6 +243,7 @@ extern void attention_worker(void *arg);
 extern void attention_worker_gemma3n(void *arg);
 
 extern int transformer_layer_qwen3(struct TIEContext *ctx, int layer_idx, int batch_len);
+extern int transformer_layer_qwen3vl(struct TIEContext *ctx, int layer_idx, int batch_len);
 extern int transformer_layer_gemma3(struct TIEContext *ctx, int layer_idx, int batch_len);
 extern int transformer_layer_gemma3n(struct TIEContext *ctx, int layer_idx, int batch_len);
 
@@ -252,5 +270,9 @@ extern void post_process_altup_states(struct TIEContext *ctx, MemType *final_hid
 extern int compare_tensor_with_file(const char *ref_filename, const float *your_c_tensor, long num_elements,
 				    float tolerance, int debug_offset);
 extern void debug_memtype_f32(MemType *mem, char *name, int layer_idx, int debug_offset);
+
+extern void build_mrope_position_ids(struct TIEContext *ctx, const int *prompt_tokens, size_t prompt_len,
+				     bool has_image, int start_pos);
+extern void text_rope_cache_init(struct TIEContext *ctx, int seq_len, int start_pos);
 
 #endif

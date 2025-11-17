@@ -66,6 +66,10 @@ static const BufferDef QWEN3_BUFFERS[] = {
 	{offsetof(MemLayout, up_proj_output), SIZE_FFN_DIM, INTERNAL_MEMORY_TYPE, FLAG_NONE},
 	{offsetof(MemLayout, ffn_down_output), SIZE_EMBED_DIM, INTERNAL_MEMORY_TYPE, FLAG_NONE},
 	{offsetof(MemLayout, logits), SIZE_VOCAB_SIZE, GGML_TYPE_F32, FLAG_NONE},
+	{offsetof(MemLayout, pos_ids), SIZE_POS_IDS, GGML_TYPE_I32, FLAG_NONE},
+
+//	{offsetof(MemLayout, rope_sin_global), SIZE_ROPE_SIN, GGML_TYPE_F32, FLAG_NONE},
+//	{offsetof(MemLayout, rope_cos_global), SIZE_ROPE_COS, GGML_TYPE_F32, FLAG_NONE},
 };
 
 static const TokenizeDef QWEN3_TOKENIZE_DEF = {
@@ -99,6 +103,7 @@ ModelDef QWEN3_DEF = {
 			.prepare_next_token = prepare_next_token_standard,
 			.embedding_scale = NULL,
 			.transformer_layer = transformer_layer_qwen3,
+			.build_rope_cache = build_rope_cache_global,
 		},
 	DECLARE_LANGUAGE_MODEL_DEF(QWEN3, QWEN3)
 };
@@ -128,6 +133,7 @@ ModelDef QWEN3_MOE_DEF = {
 			.prepare_next_token = prepare_next_token_standard,
 			.embedding_scale = NULL,
 			.transformer_layer = transformer_layer_qwen3,
+			.build_rope_cache = build_rope_cache_global,
 		},
 	DECLARE_LANGUAGE_MODEL_DEF(QWEN3, QWEN3_MOE)
 };
@@ -155,12 +161,46 @@ ModelDef QWEN3VL_DEF = {
 			.token_out = token_out_utf8_stream,
 			.prepare_next_token = prepare_next_token_standard,
 			.embedding_scale = NULL,
-			.transformer_layer = transformer_layer_qwen3,
+			.transformer_layer = transformer_layer_qwen3vl,
 			.build_vision_tokens = build_vision_tokens_qwen3vl,
 			.vision_create_embeddings = vision_create_embeddings_qwen3vl,
 			.vision_transformer_layer = vision_transformer_layer_qwen3vl,
+			.build_rope_cache = build_rope_cache_dynamic,
 		},
 	DECLARE_LANGUAGE_MODEL_DEF(QWEN3, QWEN3)
+};
+
+ModelDef QWEN3VL_MOE_DEF = {
+	.arch = ARCH_QWEN3VL_MOE,
+	.name = "Qwen3-VL-MoE",
+	.params =
+		{
+			.is_moe = 1,
+			.sot_token_id = 151644,
+			.eot_token_id = 151645,
+			.eos_token_id = 151645,
+			.newline_token_id = 198,
+			.role_user_token_id = 872,
+			.role_model_token_id = 77091,
+
+			.vision_start_token_id = 151652, // <|vision_start|>
+		        .vision_end_token_id   = 151653, // <|vision_end|>
+		        .vision_embed_token_id = 151654, // <|vision_pad|>
+		},
+	.interface =
+		{
+			.tokenize_prompt = tokenize_bpe,
+			.process_prompt = process_prompt_standard,
+			.token_out = token_out_utf8_stream,
+			.prepare_next_token = prepare_next_token_standard,
+			.embedding_scale = NULL,
+			.transformer_layer = transformer_layer_qwen3vl,
+			.build_vision_tokens = build_vision_tokens_qwen3vl,
+			.vision_create_embeddings = vision_create_embeddings_qwen3vl,
+			.vision_transformer_layer = vision_transformer_layer_qwen3vl,
+			.build_rope_cache = build_rope_cache_dynamic,
+		},
+	DECLARE_LANGUAGE_MODEL_DEF(QWEN3, QWEN3_MOE)
 };
 
 static const TensorDef GEMMA3_GLOBAL_TENSORS[] = {
@@ -203,6 +243,11 @@ static const BufferDef GEMMA3_BUFFERS[] = {
 	{offsetof(MemLayout, ffn_down_output), SIZE_EMBED_DIM, INTERNAL_MEMORY_TYPE, FLAG_NONE},
 	{offsetof(MemLayout, logits), SIZE_VOCAB_SIZE, GGML_TYPE_F32, FLAG_NONE},
 	{offsetof(MemLayout, residual_stratch), SIZE_EMBED_DIM, GGML_TYPE_F32, FLAG_NONE},
+
+//	{offsetof(MemLayout, rope_sin_global), SIZE_ROPE_SIN, GGML_TYPE_F32, FLAG_NONE},
+//	{offsetof(MemLayout, rope_cos_global), SIZE_ROPE_COS, GGML_TYPE_F32, FLAG_NONE},
+//	{offsetof(MemLayout, rope_sin_local), SIZE_ROPE_SIN, GGML_TYPE_F32, FLAG_NONE},
+//	{offsetof(MemLayout, rope_cos_local), SIZE_ROPE_COS, GGML_TYPE_F32, FLAG_NONE},
 };
 
 static const TokenizeDef GEMMA3_TOKENIZE_DEF = {
@@ -239,6 +284,7 @@ ModelDef GEMMA3_DEF = {
 			.build_vision_tokens = build_vision_tokens_gemma3,
 			.vision_create_embeddings = vision_create_embeddings_gemma3,
 			.vision_transformer_layer = vision_transformer_layer_gemma3,
+			.build_rope_cache = build_rope_cache_shared,
 		},
 	DECLARE_LANGUAGE_MODEL_DEF(GEMMA3, GEMMA3)
 };
@@ -310,6 +356,11 @@ static const BufferDef GEMMA3N_BUFFERS[] = {
 	{offsetof(MemLayout, logits), SIZE_VOCAB_SIZE, GGML_TYPE_F32, FLAG_NONE},
 	{offsetof(MemLayout, residual_stratch), SIZE_EMBED_DIM, GGML_TYPE_F32, FLAG_NONE},
 	{offsetof(MemLayout, per_layer_inputs), SIZE_NUM_LAYERS_X_PLI_DIM, GGML_TYPE_F32, FLAG_NONE},
+
+//	{offsetof(MemLayout, rope_sin_global), SIZE_ROPE_SIN, GGML_TYPE_F32, FLAG_NONE},
+//	{offsetof(MemLayout, rope_cos_global), SIZE_ROPE_COS, GGML_TYPE_F32, FLAG_NONE},
+//	{offsetof(MemLayout, rope_sin_local), SIZE_ROPE_SIN, GGML_TYPE_F32, FLAG_NONE},
+//	{offsetof(MemLayout, rope_cos_local), SIZE_ROPE_COS, GGML_TYPE_F32, FLAG_NONE},
 };
 
 static const TokenizeDef GEMMA3N_TOKENIZE_DEF = {
@@ -343,6 +394,7 @@ ModelDef GEMMA3N_DEF = {
 			.prepare_next_token = prepare_next_token_gemma3n,
 			.embedding_scale = embedding_scale_gemma3,
 			.transformer_layer = transformer_layer_gemma3n,
+			.build_rope_cache = build_rope_cache_shared,
 		},
 	DECLARE_LANGUAGE_MODEL_DEF(GEMMA3N, GEMMA3N)
 };

@@ -11,6 +11,7 @@
 
 float silu_table[SILU_TABLE_SIZE];
 
+
 #define DEBUG_MEMTYPE_NUM 10
 void debug_memtype_f32(MemType *mem, char *name, int layer_idx, int debug_offset)
 {
@@ -196,6 +197,7 @@ void alloc_memtype(MemType *m, GGMLType t, size_t nelems)
 		fprintf(stderr, "ERROR: alloc %zu bytes for MemType failed\n", total);
 		exit(1);
 	}
+	m->n_bytes = total;
 	m->data = ptr;
 }
 
@@ -231,6 +233,7 @@ void rope_cache_init(struct TIEContext *ctx, RopeCacheType *rope_cache, int max_
 
 	rope_cache->max_pos = max_pos;
 	rope_cache->head_dim = head_dim;
+	rope_cache->type = ROPE_TYPE_STATIC;
 
 	rope_cache->sin = aligned_alloc(32, sizeof(float) * max_pos * (head_dim / 2));
 	rope_cache->cos = aligned_alloc(32, sizeof(float) * max_pos * (head_dim / 2));
@@ -250,6 +253,267 @@ void rope_cache_init(struct TIEContext *ctx, RopeCacheType *rope_cache, int max_
 			rope_cache->sin[pos * (head_dim / 2) + i] = sinf(angle);
 			rope_cache->cos[pos * (head_dim / 2) + i] = cosf(angle);
 		}
+	}
+}
+
+void build_rope_cache_dynamic(struct TIEContext *ctx, size_t seq_len)
+{
+	printf("%s seq_len: %u\n", __FUNCTION__, ctx->model->seq_length);
+
+	// Allocate the container struct
+	ctx->model->rope_cache_global = malloc(sizeof(RopeCacheType));
+	if (!ctx->model->rope_cache_global) {
+		perror("Failed to allocate rope_cache");
+		exit(EXIT_FAILURE);
+	}
+
+	RopeCacheType *rope_cache = ctx->model->rope_cache_global;
+
+	// Allocate the *data buffers
+	size_t head_dim = ctx->model->head_dim;
+	size_t max_tokens = seq_len; // Use max context length
+	size_t buffer_bytes = sizeof(float) * max_tokens * head_dim;
+
+	rope_cache->sin = aligned_alloc(32, buffer_bytes);
+	rope_cache->cos = aligned_alloc(32, buffer_bytes);
+	rope_cache->max_pos = max_tokens;
+
+	if (!rope_cache->sin || !rope_cache->cos) {
+		perror("Failed to allocate dynamic rope_cache buffers");
+		exit(EXIT_FAILURE);
+	}
+
+	ctx->model->rope_cache_global->type = ROPE_TYPE_DYNAMIC;
+}
+
+// Applies the Qwen3-VL Interleaved M-RoPE logic
+// Shuffles H and W frequencies into the T frequency buffer.
+// Dest buffer (T freqs) [seq_len, head_dim/2]
+// Source W freqs [seq_len, head_dim/2]
+// [24, 20, 20]
+static void apply_interleaved_mrope(float *freqs_t, const float *freqs_h, const float *freqs_w,
+				    const int *mrope_sections, int seq_len, int half_head_dim)
+{
+	// Copy H frequencies
+	for (int i = 0; i < mrope_sections[1]; i++) { // Loop 0..19
+		int t_idx = i * 3 + 1;		      // 1, 4, 7, ...
+		if (t_idx >= half_head_dim)
+			break;
+		for (int j = 0; j < seq_len; j++) {
+			freqs_t[j * half_head_dim + t_idx] = freqs_h[j * half_head_dim + t_idx];
+		}
+	}
+
+	// Copy W frequencies
+	for (int i = 0; i < mrope_sections[2]; i++) { // Loop 0..19
+		int t_idx = i * 3 + 2;		      // 2, 5, 8, ...
+		if (t_idx >= half_head_dim)
+			break;
+		for (int j = 0; j < seq_len; j++) {
+			freqs_t[j * half_head_dim + t_idx] = freqs_w[j * half_head_dim + t_idx];
+		}
+	}
+}
+
+/* Builds the M-RoPE cos/sin tables */
+// void text_rope_cache_init(struct TIEContext *ctx, int seq_len)
+void text_rope_cache_init(struct TIEContext *ctx, int seq_len, int start_pos)
+{
+	Model *lm = ctx->model;
+	RopeCacheType *rope_cache = ctx->model->rope_cache_global;
+	MemLayout *mem = &ctx->mem;
+
+	const int head_dim = lm->head_dim;	    // e.g., 128
+	const int half_head_dim = head_dim / 2;	    // e.g., 64
+	const float rope_base = lm->rope_freq_base; // e.g., 5000000.0
+
+	// Calculate inv_freq
+	float inv_freq[half_head_dim];
+	const float log_rope_base = logf(rope_base);
+
+	for (int i = 0; i < head_dim; i += 2) { // Iterate 0, 2, ... 126
+		float dim_val = (float)i / (float)head_dim;
+		inv_freq[i / 2] = expf(-dim_val * log_rope_base); // Fills inv_freq[0...63]
+	}
+
+	// Get the position ID buffers (filled by build_mrope_position_ids)
+	const int max_len = ctx->model->seq_length;
+
+	int *pos_t_data = (int *)mem->pos_ids.data;
+	int *pos_h_data = pos_t_data + max_len;
+	int *pos_w_data = pos_h_data + max_len;
+
+
+	float *cos_table = (float *)rope_cache->cos;
+	float *sin_table = (float *)rope_cache->sin;
+
+	// Temporary buffers for T, H, W frequencies
+	float *freqs_t = malloc(seq_len * half_head_dim * sizeof(float));
+	float *freqs_h = malloc(seq_len * half_head_dim * sizeof(float));
+	float *freqs_w = malloc(seq_len * half_head_dim * sizeof(float));
+	if (!freqs_t || !freqs_h || !freqs_w) {
+		fprintf(stderr, "Failed to alloc temp freq buffers for M-RoPE\n");
+		return;
+	}
+
+	// Calculate T, H, W frequencies
+	for (int i = 0; i < seq_len; i++) {
+		for (int j = 0; j < half_head_dim; j++) {
+			freqs_t[i * half_head_dim + j] = (float)pos_t_data[i] * inv_freq[j];
+			freqs_h[i * half_head_dim + j] = (float)pos_h_data[i] * inv_freq[j];
+			freqs_w[i * half_head_dim + j] = (float)pos_w_data[i] * inv_freq[j];
+		}
+	}
+
+	// Apply Interleaved M-RoPE
+	// This shuffles H/W frequencies into the T buffer (freqs_t)
+	int *mrope_sections = (int *)lm->mrope_sections.data;
+	apply_interleaved_mrope(freqs_t, freqs_h, freqs_w, mrope_sections, seq_len, half_head_dim);
+
+	free(freqs_h);
+	free(freqs_w);
+
+	// Finalize cos/sin tables
+	for (int i = 0; i < seq_len; i++) {
+
+		int absolute_pos = start_pos + i; // e.g., 19 + 0, 19 + 1, ...
+		if (absolute_pos >= rope_cache->max_pos)
+			continue;
+
+		float *cos_row = cos_table + (size_t)absolute_pos * head_dim;
+		float *sin_row = sin_table + (size_t)absolute_pos * head_dim;
+
+		float *freqs_t_row = freqs_t + i * half_head_dim;
+
+		memcpy(cos_row, freqs_t_row, half_head_dim * sizeof(float));
+		memcpy(cos_row + half_head_dim, freqs_t_row, half_head_dim * sizeof(float));
+
+		memcpy(sin_row, freqs_t_row, half_head_dim * sizeof(float));
+		memcpy(sin_row + half_head_dim, freqs_t_row, half_head_dim * sizeof(float));
+
+		for (int j = 0; j < head_dim; j++) {
+			cos_row[j] = cosf(cos_row[j]);
+			sin_row[j] = sinf(sin_row[j]);
+		}
+	}
+
+	free(freqs_t);
+}
+
+// Calculates and writes the M-RoPE cos/sin values for a single new token at the specified position pos
+void text_rope_cache_extend(struct TIEContext *ctx, int pos)
+{
+	Model *lm = ctx->model;
+	RopeCacheType *rope_cache = ctx->model->rope_cache_global;
+
+	//    printf("%s pos: %u\n", __FUNCTION__, pos);
+
+	const int head_dim = lm->head_dim;	// e.g., 128
+	const int half_head_dim = head_dim / 2; // e.g., 64
+	const float rope_base = lm->rope_freq_base;
+
+	// Calculate inv_freq
+	float inv_freq[half_head_dim];
+	const float log_rope_base = logf(rope_base);
+	for (int i = 0; i < head_dim; i += 2) {
+		float dim_val = (float)i / (float)head_dim;
+		inv_freq[i / 2] = expf(-dim_val * log_rope_base);
+	}
+
+	// Calculate Frequencies for this one token
+	// A new token is a text token, so its position is (T=pos, H=0, W=0)
+	float freqs_t[half_head_dim];
+	float freqs_h[half_head_dim];
+	float freqs_w[half_head_dim];
+
+	for (int j = 0; j < half_head_dim; j++) {
+		freqs_t[j] = (float)pos * inv_freq[j];
+		freqs_h[j] = (float)pos * inv_freq[j];
+		freqs_w[j] = (float)pos * inv_freq[j];
+	}
+
+	// Apply Interleaved M-RoPE
+	int *mrope_sections = (int *)lm->mrope_sections.data;
+	apply_interleaved_mrope(freqs_t, freqs_h, freqs_w, mrope_sections,
+				1, // seq_len is 1
+				half_head_dim);
+
+	// Finalize and write cos/sin tables *only for pos
+	float *cos_row = (float *)rope_cache->cos + (size_t)pos * head_dim;
+	float *sin_row = (float *)rope_cache->sin + (size_t)pos * head_dim;
+
+	memcpy(cos_row, freqs_t, half_head_dim * sizeof(float));
+	memcpy(cos_row + half_head_dim, freqs_t, half_head_dim * sizeof(float));
+
+	memcpy(sin_row, freqs_t, half_head_dim * sizeof(float));
+	memcpy(sin_row + half_head_dim, freqs_t, half_head_dim * sizeof(float));
+
+	for (int j = 0; j < head_dim; j++) {
+		cos_row[j] = cosf(cos_row[j]);
+		sin_row[j] = sinf(sin_row[j]);
+	}
+}
+
+/* Fills the 3D M-RoPE position ID buffer based on the final token sequence */
+void build_mrope_position_ids(struct TIEContext *ctx, const int *prompt_tokens, size_t prompt_len, bool has_image,
+			      int start_pos)
+{
+	MemType *pos_id_buf = &ctx->mem.pos_ids;
+	memset((void *)pos_id_buf->data, 0, pos_id_buf->n_bytes);
+
+	// Get base pointers for each dimension (T, H, W)
+	const int max_len = ctx->model->seq_length;
+	int *pos_t = (int *)pos_id_buf->data;
+	int *pos_h = pos_t + max_len;
+	int *pos_w = pos_h + max_len;
+
+	int text_pos_counter = start_pos;
+	int image_patch_counter = 0;
+
+	// Get vision grid dimensions
+	int h_patches = 0;
+	int w_patches = 0;
+	int num_image_patches = 0;
+
+	if (has_image && ctx->model_vision) {
+		int patches_per_side = ctx->model_vision->image_size / ctx->model_vision->patch_size;
+		h_patches = patches_per_side / ctx->model_vision->spatial_merge_size; // e.g., 24
+		w_patches = patches_per_side / ctx->model_vision->spatial_merge_size; // e.g., 24
+		num_image_patches = h_patches * w_patches;			      // e.g., 576
+	}
+
+	// Loop over the final token list
+	for (int i = 0; i < prompt_len; i++) {
+		int token = prompt_tokens[i];
+
+		// Check for the <vision_pad> token
+		if (has_image && token == ctx->model->vision_embed_token_id) {
+			// This is an image patch token
+			int h = image_patch_counter / w_patches;
+			int w = image_patch_counter % w_patches;
+
+			// We use the text_pos_counter as the base for all.
+			pos_t[i] = text_pos_counter; // T is 0 + counter
+			pos_h[i] = h + text_pos_counter;
+			pos_w[i] = w + text_pos_counter;
+
+			image_patch_counter++;
+			text_pos_counter++;
+
+		} else {
+			// This is a normal text token
+			// The position is copied to all 3 dims.
+			pos_t[i] = text_pos_counter;
+			pos_h[i] = text_pos_counter;
+			pos_w[i] = text_pos_counter;
+
+			text_pos_counter++;
+		}
+	}
+
+	if (has_image && image_patch_counter != num_image_patches) {
+		fprintf(stderr, "WARNING: M-RoPE position mismatch. Expected %d patches, counted %d\n",
+			num_image_patches, image_patch_counter);
 	}
 }
 
@@ -716,7 +980,7 @@ int transformer_layer_qwen3(struct TIEContext *ctx, int layer_idx, int batch_len
 	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
 	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
 	AttentionType attn_type = ATTN_TYPE_GLOBAL;
-	RopeCacheType *active_rope_cache = ctx->rope_cache_global;
+	RopeCacheType *active_rope_cache = ctx->model->rope_cache_global;
 
 	// The absolute starting position for this batch
 	int start_pos = ctx->kv_pos;
@@ -892,6 +1156,188 @@ int transformer_layer_qwen3(struct TIEContext *ctx, int layer_idx, int batch_len
 	return 0;
 }
 
+int transformer_layer_qwen3vl(struct TIEContext *ctx, int layer_idx, int batch_len)
+{
+	LayerWeights *l = &ctx->model->layers[layer_idx];
+	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
+	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
+	AttentionType attn_type = ATTN_TYPE_GLOBAL;
+	RopeCacheType *active_rope_cache = ctx->model->rope_cache_global;
+
+	// The absolute starting position for this batch
+	int start_pos = ctx->kv_pos;
+
+	// ============ Attention Block ============
+	// RMSNorm on input
+	for (int i = 0; i < batch_len; i++) {
+		size_t offset = (size_t)i * ctx->model->embed_dim;
+
+		// Create slices for the specific token being processed
+		MemType hidden_state_slice = mem_slice(&ctx->mem.hidden_state, offset);
+		MemType normed_input_slice = mem_slice(&ctx->mem.normed_qkv_input, offset);
+
+		dispatch_rms_norm(&hidden_state_slice, &l->attn_norm, &normed_input_slice, ctx->model->embed_dim,
+				  ctx->model->norm_eps);
+	}
+
+	// Compute Q/K/V Matrices
+	dispatch_mat_mat(ctx, &ctx->mem.normed_qkv_input, &l->attn_q, &ctx->mem.Q, batch_len, ctx->model->embed_dim,
+			 q_dim, true);
+
+	dispatch_mat_mat(ctx, &ctx->mem.normed_qkv_input, &l->attn_k, &ctx->mem.K, batch_len, ctx->model->embed_dim,
+			 kv_dim, true);
+
+	dispatch_mat_mat(ctx, &ctx->mem.normed_qkv_input, &l->attn_v, &ctx->mem.V, batch_len, ctx->model->embed_dim,
+			 kv_dim, true);
+
+	// Apply RoPE
+	for (int i = 0; i < batch_len; i++) {
+		// The absolute position for the current token in the batch
+		int absolute_pos = start_pos + i;
+
+		for (int h = 0; h < ctx->model->num_heads; h++) {
+			MemType Q_slice = mem_slice(&ctx->mem.Q, (size_t)i * q_dim + h * ctx->model->head_dim);
+
+			if (l->attn_q_norm.mem.data) {
+				dispatch_rms_norm(&Q_slice, &l->attn_q_norm, &Q_slice, ctx->model->head_dim,
+						  ctx->model->norm_eps);
+			}
+
+			// Use the absolute position for RoPE
+			dispatch_apply_mrope_cache(active_rope_cache, &Q_slice, absolute_pos, ctx->model->head_dim);
+		}
+
+		for (int h = 0; h < ctx->model->num_kv_heads; h++) {
+			MemType K_slice = mem_slice(&ctx->mem.K, (size_t)i * kv_dim + h * ctx->model->head_dim);
+
+			if (l->attn_k_norm.mem.data) {
+				dispatch_rms_norm(&K_slice, &l->attn_k_norm, &K_slice, ctx->model->head_dim,
+						  ctx->model->norm_eps);
+			}
+
+			// Use the absolute position for RoPE
+			dispatch_apply_mrope_cache(active_rope_cache, &K_slice, absolute_pos, ctx->model->head_dim);
+		}
+	}
+
+	// Store K/V to cache
+	dispatch_store_KV_cache(ctx, layer_idx, start_pos, batch_len);
+
+	// Multi-Head Attention Calculation
+	attention(ctx, batch_len, layer_idx, layer_idx, start_pos, attn_type, attention_worker);
+
+	// Output projection
+	dispatch_mat_mat(ctx, &ctx->mem.attn_output, &l->attn_out, &ctx->mem.attn_proj_output, batch_len, q_dim,
+			 ctx->model->embed_dim, true);
+
+	// Add residual
+	dispatch_apply_residual(&ctx->mem.hidden_state, &ctx->mem.attn_proj_output, batch_len * ctx->model->embed_dim);
+
+	// ============ FFN Block ============
+	// RMSNorm
+	for (int i = 0; i < batch_len; i++) {
+		size_t offset = (size_t)i * ctx->model->embed_dim;
+
+		// Create slices for the specific token being processed
+		MemType hidden_state_slice = mem_slice(&ctx->mem.hidden_state, offset);
+		MemType normed_ffn_input_slice = mem_slice(&ctx->mem.normed_ffn_input, offset);
+
+		dispatch_rms_norm(&hidden_state_slice, &l->ffn_norm, &normed_ffn_input_slice, ctx->model->embed_dim,
+				  ctx->model->norm_eps);
+	}
+
+	// MoE
+	if (ctx->model->is_moe) {
+
+		// Get the size of a single quantization block for the expert tensors
+		size_t block_size_bytes = ggml_block_size(l->ffn_up_exps.mem.type);
+		if (block_size_bytes == 0) {
+			return -1;
+		}
+
+		for (int i = 0; i < batch_len; i++) {
+
+			// Pointers for the current token
+			MemType normed_input_for_token_i =
+				mem_slice(&ctx->mem.normed_ffn_input, (size_t)i * ctx->model->embed_dim);
+
+			// Create a slice for the destination buffer
+			MemType ffn_out_slice = mem_slice(&ctx->mem.ffn_down_output, (size_t)i * ctx->model->embed_dim);
+
+			// Use a per-thread scratch buffer for FP32 accumulation
+			MemType *ffn_out_fp32_scratch = &ctx->mem.expert_out_fp32;
+			float *ffn_out_fp32_token_buffer = ctx->mem.expert_out_fp32.data;
+
+			// Route, Select, and Gate
+			// The input type for the router is the intermediate type, but the output scores are always
+			// FP32.
+			dispatch_mat_vec(ctx, &normed_input_for_token_i, &l->ffn_gate_inp, &ctx->mem.expert_scores,
+					 ctx->model->embed_dim, ctx->model->expert_count, false);
+
+			ExpertChoice top_experts[ctx->model->expert_used_count];
+			find_top_k((float *)ctx->mem.expert_scores.data, ctx->model->expert_count,
+				   ctx->model->expert_used_count, top_experts);
+
+			float gate_values[ctx->model->expert_used_count];
+
+			for (int j = 0; j < ctx->model->expert_used_count; j++)
+				gate_values[j] = top_experts[j].score;
+
+			softmax(gate_values, ctx->model->expert_used_count);
+
+			// Parallel Expert Processing
+			for (int j = 0; j < ctx->model->expert_used_count; j++) {
+				expert_task_t *task = malloc(sizeof(expert_task_t));
+				*task = (expert_task_t){
+					.ctx = ctx,
+					.thread_id = j,
+					.layer_idx = layer_idx,
+					.expert_idx = top_experts[j].index,
+					.normed_input = normed_input_for_token_i,
+				};
+				thread_pool_submit(thread_pool, process_expert_task, task);
+			}
+			thread_pool_wait(thread_pool);
+
+			// Accumulate results in the FP32 temporary buffer
+			memset(ffn_out_fp32_scratch->data, 0, ctx->model->embed_dim * sizeof(float));
+
+			for (int j = 0; j < ctx->model->expert_used_count; j++) {
+				float gate_val = gate_values[j];
+				float *expert_result = ctx->mem.expert_outputs[j].data;
+				for (int k = 0; k < ctx->model->embed_dim; k++) {
+					ffn_out_fp32_token_buffer[k] += gate_val * expert_result[k];
+				}
+			}
+
+			// Convert the final FP32 result to the destination format
+			dispatch_convert(ffn_out_fp32_scratch, &ffn_out_slice, ctx->model->embed_dim);
+		}
+
+	} else { // DENSE FFN
+
+		// Gate + Up projections
+		dispatch_mat_mat(ctx, &ctx->mem.normed_ffn_input, &l->ffn_gate, &ctx->mem.gate_proj_output, batch_len,
+				 ctx->model->embed_dim, ctx->model->ffn_dim, true);
+		dispatch_mat_mat(ctx, &ctx->mem.normed_ffn_input, &l->ffn_up, &ctx->mem.up_proj_output, batch_len,
+				 ctx->model->embed_dim, ctx->model->ffn_dim, true);
+
+		/* Call the interface activation function */
+		dispatch_swiglu_activation(&ctx->mem.gate_proj_output, &ctx->mem.up_proj_output,
+					   batch_len * ctx->model->ffn_dim);
+
+
+		// Down projection
+		dispatch_mat_mat(ctx, &ctx->mem.gate_proj_output, &l->ffn_down, &ctx->mem.ffn_down_output, batch_len,
+				 ctx->model->ffn_dim, ctx->model->embed_dim, true);
+	}
+
+	// Add residual
+	dispatch_apply_residual(&ctx->mem.hidden_state, &ctx->mem.ffn_down_output, batch_len * ctx->model->embed_dim);
+
+	return 0;
+}
+
 int transformer_layer_gemma3(struct TIEContext *ctx, int layer_idx, int batch_len)
 {
 	LayerWeights *l = &ctx->model->layers[layer_idx];
@@ -906,10 +1352,10 @@ int transformer_layer_gemma3(struct TIEContext *ctx, int layer_idx, int batch_le
 	// Determine the attention and rope cache type for the current layer
 	if ((layer_idx + 1) % 6 == 0) {
 		attn_type = ATTN_TYPE_GLOBAL;
-		active_rope_cache = ctx->rope_cache_global; // Use the global cache
+		active_rope_cache = ctx->model->rope_cache_global; // Use the global cache
 	} else {
 		attn_type = ATTN_TYPE_LOCAL;
-		active_rope_cache = ctx->rope_cache_local; // Use the local cache
+		active_rope_cache = ctx->model->rope_cache_local; // Use the local cache
 	}
 
 	// Save the residual for the attention block.
@@ -1453,6 +1899,12 @@ void get_per_layer_input_for_layer(MemType *dest_buffer,    // Pre-allocated des
 
 void prepare_next_token_standard(struct TIEContext *ctx, int next_token)
 {
+	if (ctx->model->use_mrope == 1) {
+		// Build the cos/sin table for the new token at ctx->kv_pos
+		// *before* the transformer layer runs.
+		text_rope_cache_extend(ctx, ctx->kv_pos);
+	}
+
 	// Create a slice for this token's position in the hidden_state buffer
 	MemType hidden_state_slice = mem_slice(&ctx->mem.hidden_state, 0);
 
@@ -1843,7 +2295,7 @@ int transformer_layer_gemma3n(struct TIEContext *ctx, int layer_idx, int batch_l
 	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
 	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
 	AttentionType attn_type = ATTN_TYPE_LOCAL;
-	RopeCacheType *active_rope_cache = ctx->rope_cache_local;
+	RopeCacheType *active_rope_cache = ctx->model->rope_cache_local;
 	const int pli_dim = ctx->model->pli_dim;
 	const int embed_dim = ctx->model->embed_dim;
 	const int DATA_ACTIVE_IDX = 0; // The first state is used for the main computation path
@@ -1855,7 +2307,7 @@ int transformer_layer_gemma3n(struct TIEContext *ctx, int layer_idx, int batch_l
 	// Determine the attention and rope cache type for the current layer
 	if ((layer_idx + 1) % 5 == 0) {
 		attn_type = ATTN_TYPE_GLOBAL;
-		active_rope_cache = ctx->rope_cache_global; // Use the global cache
+		active_rope_cache = ctx->model->rope_cache_global; // Use the global cache
 	}
 
 	// Gemma-3n KV sharing logic

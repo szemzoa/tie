@@ -1217,3 +1217,39 @@ void dispatch_conv_2d_scalar(MemType *dest, const MemType *src_image, const Tens
 	} // c_out
 }
 
+void apply_mrope_cache_f32_scalar(RopeCacheType *rope_cache, void *X, int pos, int head_dim)
+{
+    float *x = (float *)X;
+    int h_dim_half = head_dim / 2; // e.g., 64
+
+    if (pos >= rope_cache->max_pos) {
+        fprintf(stderr, "Position %d exceeds rope cache max_pos %d\n", pos, rope_cache->max_pos);
+        return;
+    }
+
+    // --- START FIX ---
+    // Read from the head_dim-wide table, not head_dim/2
+    const float *cos_vals = (const float *)rope_cache->cos + (size_t)pos * head_dim;
+    const float *sin_vals = (const float *)rope_cache->sin + (size_t)pos * head_dim;
+    // --- END FIX ---
+
+    // This loop implements: q_embed = (q * cos) + (rotate_half(q) * sin)
+    //
+    for (int i = 0; i < h_dim_half; i++) {
+        float x_real = x[i];
+        float x_imag = x[i + h_dim_half];
+
+        // cos_vals[i] is from the first half of the table
+        // cos_vals[i + h_dim_half] is from the second half
+        float cos_real = cos_vals[i];
+        float cos_imag = cos_vals[i + h_dim_half];
+        float sin_real = sin_vals[i];
+        float sin_imag = sin_vals[i + h_dim_half];
+
+        // x[i] = (x_real * cos_real) + ((-x_imag) * sin_real)
+        x[i] = fmaf(-x_imag, sin_real, x_real * cos_real);
+        
+        // x[i + h_dim_half] = (x_imag * cos_imag) + (x_real * sin_imag)
+        x[i + h_dim_half] = fmaf(x_real, sin_imag, x_imag * cos_imag);
+    }
+}

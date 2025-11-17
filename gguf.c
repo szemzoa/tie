@@ -40,6 +40,8 @@ size_t ggml_type_size(GGMLType type)
 		return sizeof(uint16_t);
 	case GGML_TYPE_Q8_0:
 		return sizeof(int8_t);
+	case GGML_TYPE_I32:
+		return sizeof(int32_t);
 	default:
 		printf("FATAL: Unknown size for type %d\n", type);
 		return 0;

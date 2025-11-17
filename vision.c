@@ -420,8 +420,8 @@ void vision_create_embeddings_qwen3vl(struct TIEContext *ctx)
 	//	printf("Copy to initial hidden state...\n");
 	dispatch_memcpy(&mem->hidden_state, &permuted_patched_mem, 0, embed_dim * num_patches_vit);
 
-	free_memtype(&permuted_patched_mem); // We are done with the intermediate buffer
-					     // printf("Qwen3-VL patch embedding complete.\n");
+	free_memtype(&permuted_patched_mem);
+	// printf("Qwen3-VL patch embedding complete.\n");
 }
 
 static void vision_attention(struct TIEContext *ctx)
@@ -600,7 +600,7 @@ void vision_mrope_cache_init(MRopeCacheType *cache, int num_patches_h, int num_p
 		}
 	}
 
-	// Port coordinate generation
+	// Coordinate generation
 	int *pos_ids = (int *)malloc(seq_len * 2 * sizeof(int)); // [seq_len][2]
 	const int N_BIG = num_patches_h / 2;			 // 24
 	const int stride_h_big = N_BIG * 4;			 // 96
@@ -668,7 +668,7 @@ void apply_mrope_cache(float *q_head_ptr, float *k_head_ptr, const MRopeCacheTyp
 	const float *cos_ptr = cache->cos_table + (patch_idx * head_dim);
 	const float *sin_ptr = cache->sin_table + (patch_idx * head_dim);
 
-	// This loop ports `(x * cos) + (rotate_half(x) * sin)`
+	// This loop `(x * cos) + (rotate_half(x) * sin)`
 	for (int d = 0; d < half_dim; ++d) {
 
 		float q0 = q_head_ptr[d];
@@ -700,6 +700,9 @@ bool is_deepstack_layer(struct TIEContext *ctx, int layer_idx)
 	VisionModel *vm = ctx->model_vision;
 	bool *isdl = (bool *)vm->is_deepstack_layers.data;
 
+	if (vm->num_deepstack_layers == 0)
+		return false;
+
 	return isdl[layer_idx];
 }
 
@@ -727,8 +730,8 @@ void vision_run_patch_merger(struct TIEContext *ctx, MemType *dest_feature, MemT
 	// LayerNorm
 	if (use_postshuffle_norm) {
 		// DEEPSTACK PATH (post-shuffle norm)
-		// Norm is applied to the [576, 4096] reshaped tensor.
-		// We write the output to mem->merger_norm_buf.
+		// Norm is applied to the [576, 4096] reshaped tensor
+		// The output to mem->merger_norm_buf
 		for (int i = 0; i < merged_seq_len; i++) {
 			MemType src_slice = mem_slice(src_hidden_state, i * merged_dim);
 			MemType dest_slice = mem_slice(&mem->merger_norm_buf, i * merged_dim);
@@ -867,7 +870,7 @@ void vision_transformer_layer_qwen3vl(struct TIEContext *ctx, int layer_idx)
 
 	// Multi-Head Attention (Standard)
 	// It takes Q, K, V and produces attn_output.
-	vision_attention(ctx); // This populates mem->attn_output
+	vision_attention(ctx);
 
 	// Attention Output Projection
 	dispatch_mat_mat(ctx, &mem->attn_output, &l->attn_out, &mem->attn_proj_output, seq_len, embed_dim, embed_dim,

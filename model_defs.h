@@ -10,6 +10,7 @@ extern ModelDef GEMMA3N_DEF;
 extern ModelDef GEMMA3_CLIP_DEF;
 extern ModelDef QWEN3VL_DEF;
 extern ModelDef QWEN3VL_CLIP_DEF;
+extern ModelDef QWEN3VL_MOE_DEF;
 
 // Common language model definitions
 #define DECLARE_LANGUAGE_MODEL_DEF(model, layer_weights)		\

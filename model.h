@@ -11,6 +11,7 @@ enum {
 	ARCH_QWEN3,
 	ARCH_QWEN3_MOE,
 	ARCH_QWEN3VL,
+	ARCH_QWEN3VL_MOE,
 	ARCH_GEMMA3,
 	ARCH_GEMMA3N,
 	ARCH_CLIP_VISION,
@@ -40,6 +41,11 @@ typedef enum {
 	//	SIZE_PLI_DIM,
 	//	SIZE_HEAD_DIM,
 	SIZE_NUM_LAYERS_X_PLI_DIM, // For the full per_layer_inputs buffer
+
+	SIZE_ROPE_SIN,
+	SIZE_ROPE_COS,
+
+	SIZE_POS_IDS,	   // for m-rope
 
 	/* vision */
 	SIZE_VISION_IMAGE_RAW,
@@ -113,6 +119,7 @@ typedef struct {
 	void (*vision_create_embeddings)(struct TIEContext *ctx);
 	void (*vision_transformer_layer)(struct TIEContext *ctx, int layer_idx);
 
+	void (*build_rope_cache)(struct TIEContext *ctx, size_t seq_len);
 } ModelInterface;
 
 typedef struct {
@@ -206,6 +213,9 @@ typedef struct {
 	LayerWeights *layers;
 	WeightLayout weight_layout;
 
+	RopeCacheType *rope_cache_global;
+	RopeCacheType *rope_cache_local;
+
 	/* gemma3n */
 	int pli_dim;
 	uint32_t altup_num_inputs;
@@ -218,7 +228,7 @@ typedef struct {
 
 	/* qwen3-vl */
 	ModelArray mrope_sections;
-//	int mrope_section_num;
+	int use_mrope;
 } Model;
 
 typedef struct {
@@ -293,5 +303,9 @@ extern void model_language_cleanup(struct TIEContext *ctx, struct GGUFModel *mod
 extern void model_vision_cleanup(struct TIEContext *ctx, struct GGUFModel *model, ModelDef *def, int use_mmap);
 extern void language_model_info(struct TIEContext *ctx);
 extern void vision_model_info(struct TIEContext *ctx);
+
+extern void build_rope_cache_global(struct TIEContext *ctx, size_t seq_len);
+extern void build_rope_cache_shared(struct TIEContext *ctx, size_t seq_len);
+extern void build_rope_cache_dynamic(struct TIEContext *ctx, size_t seq_len);
 
 #endif

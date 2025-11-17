@@ -58,6 +58,10 @@ apply_rope_cache_dispatch_t APPLY_ROPE_CACHE_DISPATCH_TABLE[] = {
 	{GGML_TYPE_F32, apply_rope_cache_f32_scalar, 0},
 };
 
+apply_mrope_cache_dispatch_t APPLY_MROPE_CACHE_DISPATCH_TABLE[] = {
+	{GGML_TYPE_F32, apply_mrope_cache_f32_scalar, 0},
+};
+
 accumulate_weighted_V_dispatch_t ACCUMULATE_WEIGHTED_V_DISPATCH_TABLE[] = {
 #ifdef CONFIG_ENABLE_AVX2
 	{GGML_TYPE_BF16, GGML_TYPE_BF16, accumulate_weighted_V_bf16_bf16_avx2, 1},
@@ -350,6 +354,26 @@ void dispatch_apply_rope_cache(RopeCacheType *rope_cache, MemType *X_slice, int 
 	}
 
 	fprintf(stderr, "FATAL: No ApplyRope implementation found for input type %s\n",
+		gguf_get_type_name(X_slice->type));
+	exit(1);
+}
+
+void dispatch_apply_mrope_cache(RopeCacheType *rope_cache, MemType *X_slice, int pos, int head_dim)
+{
+	for (int i = 0; i < ARRAY_SIZE(APPLY_MROPE_CACHE_DISPATCH_TABLE); ++i) {
+		apply_mrope_cache_dispatch_t *entry = &APPLY_MROPE_CACHE_DISPATCH_TABLE[i];
+		if (entry->input_type == X_slice->type) {
+#ifdef DEBUG_ACCEL
+			if (entry->accel == 0) {
+				debug_accel("-- WARN: %s uses scalar function ---\n", __FUNCTION__);
+			}
+#endif
+			entry->func(rope_cache, X_slice->data, pos, head_dim);
+			return;
+		}
+	}
+
+	fprintf(stderr, "FATAL: No ApplyM-Rope implementation found for input type %s\n",
 		gguf_get_type_name(X_slice->type));
 	exit(1);
 }
