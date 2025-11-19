@@ -513,7 +513,7 @@ void token_out_utf8_stream(struct TIEContext *ctx, int token_id)
 	int len = get_token_string_length(ctx, token_id);
 	int token_type = ctx->tokenizer.token_types[token_id];
 
-	ctx->utf8_state = 0;
+	ctx->tokenizer.utf8_state = 0;
 
 	if (token_type == GGUF_TOKEN_TYPE_NORMAL) {
 		// We convert these keys back to their *real bytes* using our O(1) map.
@@ -521,7 +521,7 @@ void token_out_utf8_stream(struct TIEContext *ctx, int token_id)
 		int b_idx = 0;
 
 		for (int i = 0; i < len; i++) {
-			unsigned int cp = decode_utf8(&ctx->utf8_state, &ctx->utf8_codepoint, (unsigned char)p[i]);
+			unsigned int cp = decode_utf8(&ctx->tokenizer.utf8_state, &ctx->tokenizer.utf8_codepoint, (unsigned char)p[i]);
 
 			if (cp == 0)
 				continue;
@@ -556,7 +556,7 @@ void token_out_utf8_stream(struct TIEContext *ctx, int token_id)
 		// Special Token
 		// The token string is literal text. Print it as-is.
 		for (int i = 0; i < len; i++) {
-			unsigned int cp = decode_utf8(&ctx->utf8_state, &ctx->utf8_codepoint, (unsigned char)p[i]);
+			unsigned int cp = decode_utf8(&ctx->tokenizer.utf8_state, &ctx->tokenizer.utf8_codepoint, (unsigned char)p[i]);
 			if (cp == 0)
 				continue; // In-progress UTF-8
 
@@ -795,6 +795,9 @@ int init_token_table(struct TIEContext *ctx, int num_tokens)
 	bpe_map_init_encoder(ctx->tokenizer.bpe_encoder_map);
 	bpe_map_init_decoder(ctx->tokenizer.bpe_decoder_map);
 
+	ctx->tokenizer.utf8_state = 0;
+	ctx->tokenizer.utf8_codepoint = 0;
+
 	return 0;
 }
 
@@ -814,6 +817,7 @@ int build_vision_tokens_gemma3(struct TIEContext *ctx, int *token_buf, int buf_p
 	return pos - buf_pos;
 }
 
+#if 0
 int build_vision_tokens_qwen3vl(struct TIEContext *ctx, int *token_buf, int buf_pos)
 {
 	int pos = buf_pos;
@@ -841,4 +845,47 @@ int build_vision_tokens_qwen3vl(struct TIEContext *ctx, int *token_buf, int buf_
 	token_buf[pos++] = ctx->model->newline_token_id;
 
 	return pos - buf_pos;
+}
+#endif
+
+int build_vision_tokens_qwen3vl(struct TIEContext *ctx, int *token_buf, int buf_pos)
+{
+    int pos = buf_pos;
+    VisionModel *vm = ctx->model_vision;
+
+    // Use Dynamic Dimensions from the loaded image
+    int raw_w = ctx->vision_mem.image_raw_width;
+    int raw_h = ctx->vision_mem.image_raw_height;
+
+    // Calculate patches
+    int w_patches = raw_w / vm->patch_size;
+    int h_patches = raw_h / vm->patch_size;
+
+    // Calculate merged grid size
+    // Qwen3-VL reduces resolution by spatial_merge_size
+    int merged_w = w_patches / vm->spatial_merge_size;
+    int merged_h = h_patches / vm->spatial_merge_size;
+
+    int num_patches = merged_w * merged_h;
+
+    printf("Dynamic Vision Tokens: %dx%d image -> %dx%d patches -> %d tokens\n", 
+    	    raw_w, raw_h, merged_w, merged_h, num_patches);
+
+    // Add <|vision_start|> token
+    token_buf[pos++] = ctx->model->vision_start_token_id;
+
+    // Add the *same* <|vision_pad|> token N times
+    int patch_token = ctx->model->vision_embed_token_id;
+
+    for (int i = 0; i < num_patches; i++) {
+        token_buf[pos++] = patch_token;
+    }
+
+    // Add <|vision_end|> token
+    token_buf[pos++] = ctx->model->vision_end_token_id;
+
+    // Add the required newline
+    token_buf[pos++] = ctx->model->newline_token_id;
+
+    return pos - buf_pos;
 }

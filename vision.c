@@ -10,7 +10,6 @@
 #include "math_scalar.h"
 #include "vision.h"
 
-#define DEBUG_SKIP_VIT_LAYERS 0
 
 void dispatch_memcpy(MemType *dest, MemType *src, size_t src_element_offset, size_t element_count);
 
@@ -57,19 +56,26 @@ int load_bmp_clip(const char *filename, struct TIEContext *ctx)
 		return -1;
 	}
 
-	const int width = dib.biWidth;
-	const int height = dib.biHeight;
+	int width = dib.biWidth;
+	int height = dib.biHeight;
+
+	// --- DYNAMIC RESOLUTION LOGIC ---
+	int patch_size = ctx->model_vision->patch_size;
+
+	// Optionally clamp to max size if needed (e.g. downscale huge images)
+	// For now, just ensure multiple of patch_size
+	int target_w = (width / patch_size) * patch_size;
+	int target_h = (height / patch_size) * patch_size;
+
+	if (target_w == 0)
+		target_w = patch_size;
+	if (target_h == 0)
+		target_h = patch_size;
+
+	ctx->vision_mem.image_raw_width = target_w;
+	ctx->vision_mem.image_raw_height = target_h;
+
 	const int bpp = dib.biBitCount;
-	if (bpp != 24 && bpp != 32) {
-		fclose(f);
-		return -1;
-	}
-
-	const int target = meta->image_size;
-
-	if (width != target || height != target)
-		printf("Warning: Image is not target size. Using nearest-neighbor scaling.\n");
-
 	const size_t row_padded = ((width * (bpp / 8) + 3) & ~3);
 	unsigned char *rowbuf = malloc(row_padded);
 	if (!rowbuf) {
@@ -77,19 +83,21 @@ int load_bmp_clip(const char *filename, struct TIEContext *ctx)
 		return -1;
 	}
 
+	// Reallocate image_raw buffer if necessary (or rely on max allocation)
+	// Assuming image_raw is large enough (768x768 float32) to hold this dynamic image.
 	float *pixels = ctx->vision_mem.image_raw.data;
 
-	for (int y = 0; y < target; y++) {
-		int sample_y = (int)((float)(height - 1) * y / (target - 1));
-
-		// Invert the source Y-coordinate to account for BMP's bottom-to-top storage.
-		int src_y = height - 1 - sample_y;
+	// Resize/Crop loop
+	for (int y = 0; y < target_h; y++) {
+		// Nearest Neighbor Sampling
+		int sample_y = (int)((float)(height - 1) * y / (target_h - 1));
+		int src_y = height - 1 - sample_y; // BMP inversion
 
 		fseek(f, bmp.bfOffBits + (long)row_padded * src_y, SEEK_SET);
 		fread(rowbuf, 1, row_padded, f);
 
-		for (int x = 0; x < target; x++) {
-			int src_x = (int)((float)(width - 1) * x / (target - 1));
+		for (int x = 0; x < target_w; x++) {
+			int src_x = (int)((float)(width - 1) * x / (target_w - 1));
 			const unsigned char *px = rowbuf + src_x * (bpp / 8);
 
 			float r = px[2] / 255.0f;
@@ -100,16 +108,17 @@ int load_bmp_clip(const char *filename, struct TIEContext *ctx)
 			g = (g - meta->image_mean[1]) / meta->image_std[1];
 			b = (b - meta->image_mean[2]) / meta->image_std[2];
 
-			int idx = (y * target + x);
+			int idx = (y * target_w + x);
+			int plane_stride = target_w * target_h;
+
 			pixels[idx] = r;
-			pixels[target * target + idx] = g;
-			pixels[2 * target * target + idx] = b;
+			pixels[plane_stride + idx] = g;
+			pixels[2 * plane_stride + idx] = b;
 		}
 	}
 
 	free(rowbuf);
 	fclose(f);
-
 	return 0;
 }
 
@@ -239,200 +248,14 @@ void dispatch_memcpy(MemType *dest, MemType *src, size_t src_element_offset, siz
 	memcpy((void *)dest->data, (void *)src->data + src_byte_offset, total_bytes_to_copy);
 }
 
-void vision_create_embeddings_gemma3(struct TIEContext *ctx)
+static void vision_attention(struct TIEContext *ctx, int seq_len)
 {
 	VisionModel *vm = ctx->model_vision;
 	MemLayoutVision *mem = &ctx->vision_mem;
 
-	const int image_size = vm->image_size; // 896
-	const int patch_size = vm->patch_size; // 14
-	const int embed_dim = vm->embed_dim;   // 1152
-
-	const int num_patches_side = image_size / patch_size;	     // 64 (H_out, W_out)
-	const int num_patches = num_patches_side * num_patches_side; // 4096 (seq_len)
-
-	//	printf("%s, image_size: %u, patch_size: %u, embed_dim: %u, num_patches_side: %u, num_patches: %u\n",
-	//	       __FUNCTION__, image_size, patch_size, embed_dim, num_patches_side, num_patches);
-
-	// Allocate a temporary buffer for the Conv2D output
-	// The raw conv output is [C_out, H_out, W_out] = [1152, 64, 64].
-	MemType conv_output_mem;
-	alloc_memtype(&conv_output_mem, GGML_TYPE_F32, (size_t)embed_dim * num_patches);
-	if (!conv_output_mem.data) {
-		fprintf(stderr, "Failed to allocate memory for conv output\n");
-		return;
-	}
-
-	//	printf("Running Conv2D patch embedding\n");
-	dispatch_conv_2d_scalar(&conv_output_mem,     // Dest: [1152, 64, 64]
-				&mem->image_raw,      // Src: [3, 896, 896]
-				&vm->patch_embd,      // Kernel: [1152, 3, 14, 14]
-				&vm->patch_embd_bias, // Bias: [1152]
-				image_size,	      // H_in
-				image_size,	      // W_in
-				patch_size,	      // Stride (14)
-				0);		      // Padding (0)
-
-	// Permute and flatten the result
-	// The output of conv is [C_out, H_out, W_out] = [1152, 64, 64] (planar)
-	// The transformer needs [seq_len, C_out] = [4096, 1152]
-	// We must permute [1152, 64, 64] -> [64, 64, 1152] and then flatten.
-
-	//	printf("Permuting Conv2D output to [seq_len, embed_dim]...\n");
-	float *dest_data = (float *)mem->patch_embeds.data;			// [4096, 1152]
-	const float *conv_data = (const float *)conv_output_mem.data;		// [1152, 64, 64]
-	const size_t H_out_W_out = (size_t)num_patches_side * num_patches_side; // 4096
-
-	for (int c = 0; c < embed_dim; ++c) {
-		const float *conv_plane_ptr = conv_data + c * H_out_W_out;
-		for (int i = 0; i < num_patches; ++i) { // i = y*W_out + x
-			dest_data[i * embed_dim + c] = conv_plane_ptr[i];
-		}
-	}
-
-	// Create the initial hidden state by adding bias and positional embeddings.
-	const float *projected_patches = (const float *)mem->patch_embeds.data;
-	const float *pos_embeds_data = (const float *)vm->position_embd.mem.data;
-	float *hidden_state_data = (float *)mem->hidden_state.data;
-
-	for (int i = 0; i < num_patches; ++i) {
-		for (int j = 0; j < embed_dim; ++j) {
-			int idx = i * embed_dim + j;
-			hidden_state_data[idx] = projected_patches[idx] + pos_embeds_data[idx];
-		}
-	}
-
-	free_memtype(&conv_output_mem);
-}
-
-void vision_create_embeddings_qwen3vl(struct TIEContext *ctx)
-{
-	VisionModel *vm = ctx->model_vision;
-	MemLayoutVision *mem = &ctx->vision_mem;
-	MemType conv_output_mem_t0;
-	MemType conv_output_mem_t1;
-	MemType permuted_patched_mem;
-
-	const int image_size = vm->image_size; // 768
-	const int patch_size = vm->patch_size; // 16
-	const int embed_dim = vm->embed_dim;   // 1024
-
-	// ViT Patch Grid Calculation
-	const int num_patches_side = image_size / patch_size;		 // 48
-	const int num_patches_vit = num_patches_side * num_patches_side; // 2304
-
-	const int C = embed_dim;
-	const int H = num_patches_side;
-	const int W = num_patches_side;
-
-	//	printf("%s, img: %u, patch: %u, embed: %u, patches_vit: %u\n", __FUNCTION__, image_size, patch_size,
-	// embed_dim, 	       num_patches_vit);
-
-	// Allocate temp buffer for Conv2D output T0
-	alloc_memtype(&conv_output_mem_t0, GGML_TYPE_F32, (size_t)embed_dim * num_patches_vit);
-	// Allocate temp buffer for Conv2D output T1
-	alloc_memtype(&conv_output_mem_t1, GGML_TYPE_F32, (size_t)embed_dim * num_patches_vit);
-	// Allocate temp buffer for the permuted embeddings
-	alloc_memtype(&permuted_patched_mem, GGML_TYPE_F32, (size_t)embed_dim * num_patches_vit);
-
-	// Run Conv2D (Kernel T=0)
-	//	printf("Running Qwen3-VL Conv2D (Kernel T=0) patch embedding...\n");
-	dispatch_conv_2d_scalar(&conv_output_mem_t0, &mem->image_raw, &vm->patch_embd, NULL, image_size, image_size,
-				patch_size, 0);
-	// Run Conv2D (Kernel T=1)
-	//	printf("Running Qwen3-VL Conv2D (Kernel T=1) patch embedding...\n");
-	dispatch_conv_2d_scalar(&conv_output_mem_t1, &mem->image_raw, &vm->patch_embd_1, NULL, image_size, image_size,
-				patch_size, 0);
-
-	// Sum T=0, T=1
-	//	printf("Summing Conv2D results...\n");
-	dispatch_add_and_store(&conv_output_mem_t0, &conv_output_mem_t0, &conv_output_mem_t1,
-			       embed_dim * num_patches_vit);
-
-	free_memtype(&conv_output_mem_t1);
-
-	// Qwen3-VL interleaving
-	// We want the sequence to iterate:
-	// 1. Inside the 2x2 block (Fastest)
-	// 2. Then across the 24x24 grid of blocks (Slowest)
-	const int N_SUB = 2;
-	const int N_BIG = num_patches_side / 2; // 24
-
-	// Slowest: Move vertically by big block (stride = row width)
-	const int stride_h_big = N_BIG * (N_SUB * N_SUB); // 24 * 4 = 96
-
-	// Next: Move horizontally by big block (stride = block size)
-	const int stride_w_big = (N_SUB * N_SUB); // 4
-
-	const int stride_w_sub = 1;
-	const int stride_h_sub = 2;
-
-	// printf("Permuting Conv2D output...\n");
-	// Permute [C, 48, 48] → [2304, C] with 2×2 interleaving
-	float *permuted_data = (float *)permuted_patched_mem.data;
-	const float *conv_data = (const float *)conv_output_mem_t0.data;
-
-	for (int c = 0; c < C; ++c) {
-		for (int h = 0; h < H; ++h) {
-			for (int w = 0; w < W; ++w) {
-				float val = conv_data[c * H * W + h * W + w];
-
-				int h_sub = h % 2; // h is height (y)
-				int w_sub = w % 2; // w is width (x)
-				int h_big = h / 2;
-				int w_big = w / 2;
-
-				int patch_idx = h_big * stride_h_big + w_big * stride_w_big + h_sub * stride_h_sub
-						+ w_sub * stride_w_sub;
-
-				permuted_data[patch_idx * C + c] = val;
-			}
-		}
-	}
-	free_memtype(&conv_output_mem_t0);
-
-	// Add patch bias
-	// printf("Adding patch bias...\n");
-	dispatch_add_bias(&permuted_patched_mem, &vm->patch_embd_bias, num_patches_vit, embed_dim);
-
-	// Add Positional Embeddings
-	// printf("Adding positional embeddings...\n");
-	const float *pos_embd_data = (const float *)vm->position_embd.mem.data;
-
-	for (int c = 0; c < C; ++c) {
-		for (int h = 0; h < H; ++h) {
-			for (int w = 0; w < W; ++w) {
-				float val = pos_embd_data[h * W * C + w * C + c];
-
-				int h_sub = h % 2;
-				int w_sub = w % 2;
-				int h_big = h / 2;
-				int w_big = w / 2;
-
-				int patch_idx = h_big * stride_h_big + w_big * stride_w_big + h_sub * stride_h_sub
-						+ w_sub * stride_w_sub;
-
-				permuted_data[patch_idx * C + c] += val;
-			}
-		}
-	}
-
-	//	printf("Copy to initial hidden state...\n");
-	dispatch_memcpy(&mem->hidden_state, &permuted_patched_mem, 0, embed_dim * num_patches_vit);
-
-	free_memtype(&permuted_patched_mem);
-	// printf("Qwen3-VL patch embedding complete.\n");
-}
-
-static void vision_attention(struct TIEContext *ctx)
-{
-	VisionModel *vm = ctx->model_vision;
-	MemLayoutVision *mem = &ctx->vision_mem;
-
-	const int seq_len = (vm->image_size / vm->patch_size) * (vm->image_size / vm->patch_size); // 4096
-	const int embed_dim = vm->embed_dim;							   // 1152
-	const int num_heads = vm->num_heads;							   // 16
-	const int head_dim = embed_dim / num_heads;						   // 72
+	const int embed_dim = vm->embed_dim;	    // 1152
+	const int num_heads = vm->num_heads;	    // 16
+	const int head_dim = embed_dim / num_heads; // 72
 	const float attn_scale = 1.0f / sqrtf((float)head_dim);
 
 	const float *Q_data = (const float *)mem->Q.data;
@@ -512,146 +335,239 @@ static void vision_attention(struct TIEContext *ctx)
 	free_memtype(&output_head);
 }
 
-void vision_transformer_layer_gemma3(struct TIEContext *ctx, int layer_idx)
+
+/* =================== Qwen3-VL =================== */
+
+// Dynamically interpolates and shuffles positional embeddings
+void vision_build_pos_embeds_dynamic(struct TIEContext *ctx, MemType *dest_buffer, int h_patches, int w_patches)
+{
+	VisionModel *vm = ctx->model_vision;
+	float *out_data = (float *)dest_buffer->data;
+
+	// Get the raw pre-trained grid dimensions
+	int num_grid_per_side = vm->image_size / vm->patch_size; // 768 / 16 = 48
+
+	// Setup for Permutation (Spatial Merge)
+	int merge_size = vm->spatial_merge_size;
+	//	int merged_h = h_patches / merge_size;
+	int merged_w = w_patches / merge_size;
+
+	// Iterate over the TARGET grid (h_patches x w_patches)
+	// We generate the embedding for (h, w) and place it in the correct shuffled slot.
+	for (int h = 0; h < h_patches; h++) {
+		for (int w = 0; w < w_patches; w++) {
+
+			// Interpolation Logic (linspace)
+			// Calculate the source coordinates in the grid
+			// Safety check for 1xN or Nx1 grids
+			float r_h =
+				(h_patches > 1) ? (float)h * (num_grid_per_side - 1) / (float)(h_patches - 1) : 0.0f;
+			float r_w =
+				(w_patches > 1) ? (float)w * (num_grid_per_side - 1) / (float)(w_patches - 1) : 0.0f;
+
+			int h0 = (int)floorf(r_h);
+			int h1 = (int)ceilf(r_h);
+			int w0 = (int)floorf(r_w);
+			int w1 = (int)ceilf(r_w);
+
+			// Clamp to be safe
+			if (h1 >= num_grid_per_side)
+				h1 = num_grid_per_side - 1;
+			if (w1 >= num_grid_per_side)
+				w1 = num_grid_per_side - 1;
+
+			float dh = r_h - h0;
+			float dw = r_w - w0;
+
+			// Calculate Shuffle Index
+			// Map linear (h, w) to the 2x2 blocked layout
+			int h_big = h / merge_size;
+			int w_big = w / merge_size;
+			int h_sub = h % merge_size;
+			int w_sub = w % merge_size;
+
+			// [merged_h][merged_w][2][2]
+			int dest_idx = (h_big * merged_w * merge_size * merge_size) + (w_big * merge_size * merge_size)
+				       + (h_sub * merge_size) + (w_sub);
+
+			float *dest_vec = out_data + dest_idx * vm->embed_dim;
+
+			// Bilinear Interpolation & Write
+			// Get pointers to the 4 corner vectors in the pre-trained table
+			float *v00 =
+				(float *)vm->position_embd.mem.data + (h0 * num_grid_per_side + w0) * vm->embed_dim;
+			float *v01 =
+				(float *)vm->position_embd.mem.data + (h0 * num_grid_per_side + w1) * vm->embed_dim;
+			float *v10 =
+				(float *)vm->position_embd.mem.data + (h1 * num_grid_per_side + w0) * vm->embed_dim;
+			float *v11 =
+				(float *)vm->position_embd.mem.data + (h1 * num_grid_per_side + w1) * vm->embed_dim;
+
+			// w00 = (1-dh)(1-dw), w01 = (1-dh)(dw), etc.
+			float weight00 = (1.0f - dh) * (1.0f - dw);
+			float weight01 = (1.0f - dh) * dw;
+			float weight10 = dh * (1.0f - dw);
+			float weight11 = dh * dw;
+
+			for (int d = 0; d < vm->embed_dim; d++) {
+				dest_vec[d] =
+					v00[d] * weight00 + v01[d] * weight01 + v10[d] * weight10 + v11[d] * weight11;
+			}
+		}
+	}
+}
+
+void vision_rope_cache_build_dynamic(struct TIEContext *ctx, int h_patches, int w_patches)
+{
+	VisionModel *vm = ctx->model_vision;
+	MRopeCacheType *cache = &vm->mrope_cache;
+
+	int head_dim = vm->embed_dim / vm->num_heads; // 64
+	int half_dim = head_dim / 2;		      // 32
+	int mrope_dim = head_dim / 4;		      // 16 (This was missing in dynamic version)
+
+	int seq_len = h_patches * w_patches;
+
+	// 1. Calculate standard 1D inv_freq table (Size 16, not 32)
+	float inv_freq[mrope_dim];
+	for (int i = 0; i < mrope_dim; i++) {
+		// Use half_dim (32) as denominator, same as static version
+		inv_freq[i] = 1.0f / powf(10000.0f, (float)(2 * i) / (float)half_dim);
+	}
+
+	// 2. Iterate patches in the SHUFFLED order
+	int merge_size = vm->spatial_merge_size;
+	int merged_w = w_patches / merge_size;
+
+	for (int i = 0; i < seq_len; i++) {
+		// ... (Decode logic is correct, keep it) ...
+		int tokens_per_block = merge_size * merge_size;
+		int block_idx = i / tokens_per_block;
+		int intra_idx = i % tokens_per_block;
+
+		int w_block = block_idx % merged_w;
+		int h_block = block_idx / merged_w;
+		int w_sub = intra_idx % merge_size;
+		int h_sub = intra_idx / merge_size;
+
+		int h_coord = h_block * merge_size + h_sub;
+		int w_coord = w_block * merge_size + w_sub;
+
+		// 3. Build Frequencies [H, W, H, W]
+		float *cos_vec = cache->cos_table + i * head_dim;
+		float *sin_vec = cache->sin_table + i * head_dim;
+
+		for (int d = 0; d < mrope_dim; d++) {
+			// Calculate freq for this dimension
+			float freq_h = (float)h_coord * inv_freq[d];
+			float freq_w = (float)w_coord * inv_freq[d];
+
+			float ch = cosf(freq_h);
+			float sh = sinf(freq_h);
+			float cw = cosf(freq_w);
+			float sw = sinf(freq_w);
+
+			// Layout: [H (0-15), W (16-31), H (32-47), W (48-63)]
+
+			// First Half (0-31)
+			cos_vec[d] = ch; // H at 0..15
+			sin_vec[d] = sh;
+			cos_vec[d + mrope_dim] = cw; // W at 16..31
+			sin_vec[d + mrope_dim] = sw;
+
+			// Second Half (Duplicate for rotate_half logic)
+			cos_vec[d + half_dim] = ch; // H at 32..47
+			sin_vec[d + half_dim] = sh;
+			cos_vec[d + half_dim + mrope_dim] = cw; // W at 48..63
+			sin_vec[d + half_dim + mrope_dim] = sw;
+		}
+	}
+}
+
+void vision_create_embeddings_qwen3vl(struct TIEContext *ctx, int h_patches, int w_patches)
 {
 	VisionModel *vm = ctx->model_vision;
 	MemLayoutVision *mem = &ctx->vision_mem;
-	VisionLayerWeights *l = &vm->layers[layer_idx];
 
+	// Calculate Dynamic Dimensions
+	const int patch_size = vm->patch_size; // 16
+	const int embed_dim = vm->embed_dim;   // 2304
+	const int num_patches = h_patches * w_patches;
 
-	const int seq_len = (vm->image_size / vm->patch_size) * (vm->image_size / vm->patch_size);
-	const int embed_dim = vm->embed_dim;
-	const int ffn_dim = vm->ffn_dim;
-	const int total_size = seq_len * embed_dim;
+	// Image dimensions derived from patches
+	const int img_h = h_patches * patch_size;
+	const int img_w = w_patches * patch_size;
 
-	// Pre-Attention LayerNorm & Residual
-	memcpy(mem->residual_scratch.data, mem->hidden_state.data, seq_len * embed_dim * sizeof(float));
+	// Allocate Temps (Dynamic Size)
+	MemType conv_output_mem_t0, conv_output_mem_t1, pos_embeds_mem, permuted_patched_mem;
+	alloc_memtype(&conv_output_mem_t0, GGML_TYPE_F32, (size_t)embed_dim * num_patches);
+	alloc_memtype(&conv_output_mem_t1, GGML_TYPE_F32, (size_t)embed_dim * num_patches);
+	alloc_memtype(&permuted_patched_mem, GGML_TYPE_F32, (size_t)embed_dim * num_patches);
 
-	for (int i = 0; i < seq_len; ++i) {
-		MemType dest_slice = mem_slice(&mem->normed_input, i * embed_dim);
-		MemType src_slice = mem_slice(&mem->hidden_state, i * embed_dim);
-		dispatch_layer_norm(&dest_slice, &src_slice, &l->ln1, &l->ln1_bias, embed_dim, vm->norm_eps);
-	}
+	// Allocate temp buffer for the pos_embedss
+	alloc_memtype(&pos_embeds_mem, GGML_TYPE_F32, (size_t)embed_dim * num_patches);
 
-	// Multi-Head Attention
-	dispatch_mat_mat(ctx, &mem->normed_input, &l->attn_q, &mem->Q, seq_len, embed_dim, embed_dim, true);
-	dispatch_add_bias(&mem->Q, &l->attn_q_bias, seq_len, embed_dim);
+	// 3. Run Conv2D (Kernel T=0 & T=1) using Dynamic Sizes
+	dispatch_conv_2d_scalar(&conv_output_mem_t0, &mem->image_raw, &vm->patch_embd, NULL, img_h, img_w, patch_size,
+				0);
+	dispatch_conv_2d_scalar(&conv_output_mem_t1, &mem->image_raw, &vm->patch_embd_1, NULL, img_h, img_w, patch_size,
+				0);
 
-	dispatch_mat_mat(ctx, &mem->normed_input, &l->attn_k, &mem->K, seq_len, embed_dim, embed_dim, true);
-	dispatch_add_bias(&mem->K, &l->attn_k_bias, seq_len, embed_dim);
+	// Sum T=0, T=1
+	dispatch_add_and_store(&conv_output_mem_t0, &conv_output_mem_t0, &conv_output_mem_t1, embed_dim * num_patches);
+	free_memtype(&conv_output_mem_t1);
 
-	dispatch_mat_mat(ctx, &mem->normed_input, &l->attn_v, &mem->V, seq_len, embed_dim, embed_dim, true);
-	dispatch_add_bias(&mem->V, &l->attn_v_bias, seq_len, embed_dim);
+	// Dynamic Permutation Logic
+	// The goal: Interleave 2x2 blocks.
+	// Calculate strides dynamically
+	const int merge_size = vm->spatial_merge_size; // 2
+						       //	int merged_h = h_patches / merge_size;
+	int merged_w = w_patches / merge_size;
 
-	vision_attention(ctx);
-
-	dispatch_mat_mat(ctx, &mem->attn_output, &l->attn_out, &mem->attn_proj_output, seq_len, embed_dim, embed_dim,
-			 true);
-	dispatch_add_bias(&mem->attn_proj_output, &l->attn_out_bias, seq_len, embed_dim);
-
-	// First Residual Connection
-	dispatch_add_and_store(&mem->hidden_state, &mem->residual_scratch, &mem->attn_proj_output, total_size);
-
-	// Pre-FFN LayerNorm & Residual
-	// Save the result of the first residual connection before the FFN block.
-	memcpy(mem->residual_scratch.data, mem->hidden_state.data, total_size * sizeof(float));
-
-	for (int i = 0; i < seq_len; ++i) {
-		MemType dest_slice = mem_slice(&mem->normed_input, i * embed_dim);
-		MemType src_slice = mem_slice(&mem->hidden_state, i * embed_dim);
-		dispatch_layer_norm(&dest_slice, &src_slice, &l->ln2, &l->ln2_bias, embed_dim, vm->norm_eps);
-	}
-
-	// Feed-Forward Network
-	dispatch_mat_mat(ctx, &mem->normed_input, &l->ffn_up, &mem->ffn_up_output, seq_len, embed_dim, ffn_dim, true);
-	dispatch_add_bias(&mem->ffn_up_output, &l->ffn_up_bias, seq_len, ffn_dim);
-
-	// Activation
-	dispatch_gelu_inplace(&mem->ffn_up_output, seq_len * ffn_dim);
-
-	dispatch_mat_mat(ctx, &mem->ffn_up_output, &l->ffn_down, &mem->ffn_down_output, seq_len, ffn_dim, embed_dim,
-			 true);
-	dispatch_add_bias(&mem->ffn_down_output, &l->ffn_down_bias, seq_len, embed_dim);
-
-	// Second Residual Connection
-	dispatch_add_and_store(&mem->hidden_state, &mem->residual_scratch, &mem->ffn_down_output, total_size);
-}
-
-
-// 48, 48, 64, 10000.0f
-void vision_mrope_cache_init(MRopeCacheType *cache, int num_patches_h, int num_patches_w, int head_dim, float rope_base)
-{
-	const int seq_len = num_patches_h * num_patches_w;				  // 2304
-	const int half_head_dim = head_dim / 2;						  // 32
-	const int mrope_dim = head_dim / 4;						  // 16
-	const int max_hw = num_patches_h > num_patches_w ? num_patches_h : num_patches_w; // 48
-	float inv_freq[mrope_dim];							  // size 16
-
-	const float log_rope_base = logf(rope_base);
-	for (int i = 0; i < mrope_dim; ++i) {
-		float dim = (float)(2 * i) / (float)half_head_dim;
-		inv_freq[i] = expf(-dim * log_rope_base);
-	}
-
-	float *freq_table = (float *)malloc(max_hw * mrope_dim * sizeof(float));
-	for (int i = 0; i < max_hw; ++i) {
-		for (int j = 0; j < mrope_dim; ++j) {
-			freq_table[i * mrope_dim + j] = (float)i * inv_freq[j];
-		}
-	}
-
-	// Coordinate generation
-	int *pos_ids = (int *)malloc(seq_len * 2 * sizeof(int)); // [seq_len][2]
-	const int N_BIG = num_patches_h / 2;			 // 24
-	const int stride_h_big = N_BIG * 4;			 // 96
-	const int stride_w_big = 4;				 // 4
-	const int stride_h_sub = 2;
+	// Stride logic:
+	// We move through the output sequence one "merged block" at a time.
+	// A merged block contains (merge_size * merge_size) patches.
+	// A "row" of merged blocks contains `merged_w` blocks.
+	// So, skipping one "row" of blocks means skipping `merged_w * 4` patches.
 	const int stride_w_sub = 1;
-	for (int h = 0; h < num_patches_h; ++h) {
-		for (int w = 0; w < num_patches_w; ++w) {
-			int h_sub = h % 2, w_sub = w % 2;
-			int h_big = h / 2, w_big = w / 2;
-			int patch_idx = h_big * stride_h_big + w_big * stride_w_big + h_sub * stride_h_sub
-					+ w_sub * stride_w_sub;
-			pos_ids[patch_idx * 2 + 0] = h;
-			pos_ids[patch_idx * 2 + 1] = w;
+	const int stride_h_sub = merge_size;		    // 2
+	const int stride_w_big = (merge_size * merge_size); // 4
+	const int stride_h_big = merged_w * stride_w_big;   // e.g., 24 * 4 = 96
+
+	float *permuted_data = (float *)permuted_patched_mem.data;
+	const float *conv_data = (const float *)conv_output_mem_t0.data;
+
+	for (int c = 0; c < embed_dim; ++c) {
+		for (int h = 0; h < h_patches; ++h) {
+			for (int w = 0; w < w_patches; ++w) {
+				// Read linear from Conv2D [C, H, W]
+				float val = conv_data[c * h_patches * w_patches + h * w_patches + w];
+
+				int h_sub = h % merge_size;
+				int w_sub = w % merge_size;
+				int h_big = h / merge_size;
+				int w_big = w / merge_size;
+
+				int patch_idx = h_big * stride_h_big + w_big * stride_w_big + h_sub * stride_h_sub
+						+ w_sub * stride_w_sub;
+
+				permuted_data[patch_idx * embed_dim + c] = val;
+			}
 		}
 	}
+	free_memtype(&conv_output_mem_t0);
 
-	// Build final tables
-	cache->num_elements = (size_t)seq_len * head_dim;
-	cache->cos_table = (float *)malloc(cache->num_elements * sizeof(float));
-	cache->sin_table = (float *)malloc(cache->num_elements * sizeof(float));
+	// Add Patch Bias
+	dispatch_add_bias(&permuted_patched_mem, &vm->patch_embd_bias, num_patches, embed_dim);
 
-	float *emb = (float *)malloc(cache->num_elements * sizeof(float));
-	float *rotary_pos_emb = (float *)malloc(seq_len * half_head_dim * sizeof(float));
+	// Generate the interpolated grid for (h_patches, w_patches)
+	vision_build_pos_embeds_dynamic(ctx, &pos_embeds_mem, h_patches, w_patches);
 
-	// Lookup freq_table[pos_ids]
-	for (int i = 0; i < seq_len; ++i) {
-		int h = pos_ids[i * 2 + 0];
-		int w = pos_ids[i * 2 + 1];
-		memcpy(rotary_pos_emb + i * half_head_dim, freq_table + h * mrope_dim, mrope_dim * sizeof(float));
-		memcpy(rotary_pos_emb + i * half_head_dim + mrope_dim, freq_table + w * mrope_dim,
-		       mrope_dim * sizeof(float));
-	}
+	// Add them together
+	dispatch_add_and_store(&mem->hidden_state, &permuted_patched_mem, &pos_embeds_mem, num_patches * embed_dim);
 
-	// Concatenate and get cos/sin
-	for (int i = 0; i < seq_len; ++i) {
-		memcpy(emb + i * head_dim, rotary_pos_emb + i * half_head_dim, half_head_dim * sizeof(float));
-		memcpy(emb + i * head_dim + half_head_dim, rotary_pos_emb + i * half_head_dim,
-		       half_head_dim * sizeof(float));
-	}
-
-	// position_embeddings = (emb.cos(), emb.sin())
-	for (size_t i = 0; i < cache->num_elements; ++i) {
-		cache->cos_table[i] = cosf(emb[i]);
-		cache->sin_table[i] = sinf(emb[i]);
-	}
-
-	free(freq_table);
-	free(pos_ids);
-	free(emb);
-	free(rotary_pos_emb);
+	free_memtype(&permuted_patched_mem);
+	free_memtype(&pos_embeds_mem);
 }
 
 /*
@@ -708,7 +624,7 @@ bool is_deepstack_layer(struct TIEContext *ctx, int layer_idx)
 
 // Output: [576, 2048], Input: [2304, 1024], layer_idx,  DeepStack=true, Final=false
 void vision_run_patch_merger(struct TIEContext *ctx, MemType *dest_feature, MemType *src_hidden_state, int layer_idx,
-			     bool use_postshuffle_norm)
+			     int seq_len, bool use_postshuffle_norm)
 {
 	VisionModel *vm = ctx->model_vision;
 	MemLayoutVision *mem = &ctx->vision_mem;
@@ -717,12 +633,12 @@ void vision_run_patch_merger(struct TIEContext *ctx, MemType *dest_feature, MemT
 	VisionLayerWeights *weights = &vm->layers[layer_idx];
 
 	// Get Dimensions
-	const int seq_len = (vm->image_size / vm->patch_size) * (vm->image_size / vm->patch_size); // 2304
-	const int embed_dim = vm->embed_dim;							   // 1024
-	const int proj_dim = vm->projection_dim;						   // 2048
-	const int merge_factor = vm->spatial_merge_size * vm->spatial_merge_size;		   // 4
-	const int merged_seq_len = seq_len / merge_factor;					   // 576
-	const int merged_dim = embed_dim * merge_factor;					   // 4096
+	//	const int seq_len = (vm->image_size / vm->patch_size) * (vm->image_size / vm->patch_size); // 2304
+	const int embed_dim = vm->embed_dim;					  // 1024
+	const int proj_dim = vm->projection_dim;				  // 2048
+	const int merge_factor = vm->spatial_merge_size * vm->spatial_merge_size; // 4
+	const int merged_seq_len = seq_len / merge_factor;			  // 576
+	const int merged_dim = embed_dim * merge_factor;			  // 4096
 
 	// This is the buffer we'll use as input for FC1
 	MemType *norm_output_buffer;
@@ -792,17 +708,17 @@ void vision_run_patch_merger(struct TIEContext *ctx, MemType *dest_feature, MemT
 	}
 }
 
-void vision_transformer_layer_qwen3vl(struct TIEContext *ctx, int layer_idx)
+void vision_transformer_layer_qwen3vl(struct TIEContext *ctx, int layer_idx, int seq_len)
 {
 	VisionModel *vm = ctx->model_vision;
 	MemLayoutVision *mem = &ctx->vision_mem;
 	VisionLayerWeights *l = &vm->layers[layer_idx];
 
-	const int seq_len = (vm->image_size / vm->patch_size) * (vm->image_size / vm->patch_size);
 	const int embed_dim = vm->embed_dim;
 	const int ffn_dim = vm->ffn_dim;
 	const int total_size = seq_len * embed_dim;
 	const int qkv_width = embed_dim * 3;
+
 
 	// Pre-Attention LayerNorm & Residual
 	memcpy(mem->residual_scratch.data, mem->hidden_state.data, seq_len * embed_dim * sizeof(float));
@@ -870,7 +786,7 @@ void vision_transformer_layer_qwen3vl(struct TIEContext *ctx, int layer_idx)
 
 	// Multi-Head Attention (Standard)
 	// It takes Q, K, V and produces attn_output.
-	vision_attention(ctx);
+	vision_attention(ctx, seq_len);
 
 	// Attention Output Projection
 	dispatch_mat_mat(ctx, &mem->attn_output, &l->attn_out, &mem->attn_proj_output, seq_len, embed_dim, embed_dim,
@@ -902,6 +818,137 @@ void vision_transformer_layer_qwen3vl(struct TIEContext *ctx, int layer_idx)
 
 	// Second Residual Connection
 	dispatch_add_and_store(&mem->hidden_state, &mem->residual_scratch, &mem->ffn_down_output, total_size);
+}
+
+MemType *process_image_vision_qwen3vl(struct TIEContext *ctx)
+{
+	VisionModel *vm = ctx->model_vision;
+	MemLayoutVision *mem = &ctx->vision_mem;
+	int deepstack_merger_index = -1;
+	int h_patches, w_patches;
+
+
+	printf("Processing image QWEN3-VL\n");
+
+	if (ctx->vision_mem.image_raw_width > vm->image_size || ctx->vision_mem.image_raw_height > vm->image_size) {
+		printf("invalid image size, supports max %u x %u\n", vm->image_size, vm->image_size);
+		return NULL;
+	}
+
+	if ((ctx->vision_mem.image_raw_width % vm->patch_size != 0)
+	    || (ctx->vision_mem.image_raw_height % vm->patch_size != 0)) {
+		printf("invalid image size, supports %upx grid only\n", vm->patch_size);
+		return NULL;
+	}
+
+	// Project raw patches into `mem->patch_embeds`
+	w_patches = ctx->vision_mem.image_raw_width / vm->patch_size;
+	h_patches = ctx->vision_mem.image_raw_height / vm->patch_size;
+
+	vision_create_embeddings_qwen3vl(ctx, h_patches, w_patches);
+
+	// The loop logic (seq_len) must use (h_patches * w_patches)
+	int seq_len = h_patches * w_patches;
+
+	// Build Vision RoPE for THIS resolution
+	vision_rope_cache_build_dynamic(ctx, h_patches, w_patches);
+
+	// Run the Vision Transformer layers.
+	for (int layer_idx = 0; layer_idx < vm->num_layers; layer_idx++) {
+
+		vision_transformer_layer_qwen3vl(ctx, layer_idx, seq_len);
+
+		// DEEPSTACK
+		if (is_deepstack_layer(ctx, layer_idx) == true) {
+
+			deepstack_merger_index++;
+			// printf("%u layer is deepstack, merger_idx: %u\n", layer_idx, deepstack_merger_index);
+
+			// Get the destination buffer
+			MemType *dest_feature = &mem->deepstack_features[deepstack_merger_index];
+
+			// Run the merger
+			vision_run_patch_merger(ctx, dest_feature, &mem->hidden_state, layer_idx, seq_len, true);
+		}
+
+		printf(".");
+		fflush(stdout);
+	}
+
+	// Final merger
+	vision_run_patch_merger(ctx, &mem->projected_embeddings, &mem->hidden_state, 0, seq_len, false);
+
+	printf("done\n");
+	fflush(stdout);
+
+	return &mem->projected_embeddings;
+}
+
+/* =================== Gemma-3 =================== */
+void vision_create_embeddings_gemma3(struct TIEContext *ctx)
+{
+	VisionModel *vm = ctx->model_vision;
+	MemLayoutVision *mem = &ctx->vision_mem;
+
+	const int image_size = vm->image_size; // 896
+	const int patch_size = vm->patch_size; // 14
+	const int embed_dim = vm->embed_dim;   // 1152
+
+	const int num_patches_side = image_size / patch_size;	     // 64 (H_out, W_out)
+	const int num_patches = num_patches_side * num_patches_side; // 4096 (seq_len)
+
+	//	printf("%s, image_size: %u, patch_size: %u, embed_dim: %u, num_patches_side: %u, num_patches: %u\n",
+	//	       __FUNCTION__, image_size, patch_size, embed_dim, num_patches_side, num_patches);
+
+	// Allocate a temporary buffer for the Conv2D output
+	// The raw conv output is [C_out, H_out, W_out] = [1152, 64, 64].
+	MemType conv_output_mem;
+	alloc_memtype(&conv_output_mem, GGML_TYPE_F32, (size_t)embed_dim * num_patches);
+	if (!conv_output_mem.data) {
+		fprintf(stderr, "Failed to allocate memory for conv output\n");
+		return;
+	}
+
+	//	printf("Running Conv2D patch embedding\n");
+	dispatch_conv_2d_scalar(&conv_output_mem,     // Dest: [1152, 64, 64]
+				&mem->image_raw,      // Src: [3, 896, 896]
+				&vm->patch_embd,      // Kernel: [1152, 3, 14, 14]
+				&vm->patch_embd_bias, // Bias: [1152]
+				image_size,	      // H_in
+				image_size,	      // W_in
+				patch_size,	      // Stride (14)
+				0);		      // Padding (0)
+
+	// Permute and flatten the result
+	// The output of conv is [C_out, H_out, W_out] = [1152, 64, 64] (planar)
+	// The transformer needs [seq_len, C_out] = [4096, 1152]
+	// We must permute [1152, 64, 64] -> [64, 64, 1152] and then flatten.
+
+	//	printf("Permuting Conv2D output to [seq_len, embed_dim]...\n");
+	float *dest_data = (float *)mem->patch_embeds.data;			// [4096, 1152]
+	const float *conv_data = (const float *)conv_output_mem.data;		// [1152, 64, 64]
+	const size_t H_out_W_out = (size_t)num_patches_side * num_patches_side; // 4096
+
+	for (int c = 0; c < embed_dim; ++c) {
+		const float *conv_plane_ptr = conv_data + c * H_out_W_out;
+		for (int i = 0; i < num_patches; ++i) { // i = y*W_out + x
+			dest_data[i * embed_dim + c] = conv_plane_ptr[i];
+		}
+	}
+
+	// Create the initial hidden state by adding bias and positional embeddings.
+	const float *projected_patches = (const float *)mem->patch_embeds.data;
+	const float *pos_embeds_data = (const float *)vm->position_embd.mem.data;
+	float *hidden_state_data = (float *)mem->hidden_state.data;
+
+	for (int i = 0; i < num_patches; ++i) {
+		for (int j = 0; j < embed_dim; ++j) {
+			int idx = i * embed_dim + j;
+			hidden_state_data[idx] = projected_patches[idx] + pos_embeds_data[idx];
+		}
+	}
+
+	free_memtype(&conv_output_mem);
 }
 
 static void vision_downsample_and_project(struct TIEContext *ctx)
@@ -971,75 +1018,97 @@ static void vision_downsample_and_project(struct TIEContext *ctx)
 			 pooled_seq_len, embed_dim, proj_dim, true);
 }
 
-MemType *process_image_vision(struct TIEContext *ctx)
+void vision_transformer_layer_gemma3(struct TIEContext *ctx, int layer_idx)
 {
 	VisionModel *vm = ctx->model_vision;
 	MemLayoutVision *mem = &ctx->vision_mem;
-	int deepstack_merger_index = -1;
+	VisionLayerWeights *l = &vm->layers[layer_idx];
 
-	printf("Processing image");
-	fflush(stdout);
+
+	const int seq_len = (vm->image_size / vm->patch_size) * (vm->image_size / vm->patch_size);
+	const int embed_dim = vm->embed_dim;
+	const int ffn_dim = vm->ffn_dim;
+	const int total_size = seq_len * embed_dim;
+
+	// Pre-Attention LayerNorm & Residual
+	memcpy(mem->residual_scratch.data, mem->hidden_state.data, seq_len * embed_dim * sizeof(float));
+
+	for (int i = 0; i < seq_len; ++i) {
+		MemType dest_slice = mem_slice(&mem->normed_input, i * embed_dim);
+		MemType src_slice = mem_slice(&mem->hidden_state, i * embed_dim);
+		dispatch_layer_norm(&dest_slice, &src_slice, &l->ln1, &l->ln1_bias, embed_dim, vm->norm_eps);
+	}
+
+	// Multi-Head Attention
+	dispatch_mat_mat(ctx, &mem->normed_input, &l->attn_q, &mem->Q, seq_len, embed_dim, embed_dim, true);
+	dispatch_add_bias(&mem->Q, &l->attn_q_bias, seq_len, embed_dim);
+
+	dispatch_mat_mat(ctx, &mem->normed_input, &l->attn_k, &mem->K, seq_len, embed_dim, embed_dim, true);
+	dispatch_add_bias(&mem->K, &l->attn_k_bias, seq_len, embed_dim);
+
+	dispatch_mat_mat(ctx, &mem->normed_input, &l->attn_v, &mem->V, seq_len, embed_dim, embed_dim, true);
+	dispatch_add_bias(&mem->V, &l->attn_v_bias, seq_len, embed_dim);
+
+	vision_attention(ctx, seq_len);
+
+	dispatch_mat_mat(ctx, &mem->attn_output, &l->attn_out, &mem->attn_proj_output, seq_len, embed_dim, embed_dim,
+			 true);
+	dispatch_add_bias(&mem->attn_proj_output, &l->attn_out_bias, seq_len, embed_dim);
+
+	// First Residual Connection
+	dispatch_add_and_store(&mem->hidden_state, &mem->residual_scratch, &mem->attn_proj_output, total_size);
+
+	// Pre-FFN LayerNorm & Residual
+	// Save the result of the first residual connection before the FFN block.
+	memcpy(mem->residual_scratch.data, mem->hidden_state.data, total_size * sizeof(float));
+
+	for (int i = 0; i < seq_len; ++i) {
+		MemType dest_slice = mem_slice(&mem->normed_input, i * embed_dim);
+		MemType src_slice = mem_slice(&mem->hidden_state, i * embed_dim);
+		dispatch_layer_norm(&dest_slice, &src_slice, &l->ln2, &l->ln2_bias, embed_dim, vm->norm_eps);
+	}
+
+	// Feed-Forward Network
+	dispatch_mat_mat(ctx, &mem->normed_input, &l->ffn_up, &mem->ffn_up_output, seq_len, embed_dim, ffn_dim, true);
+	dispatch_add_bias(&mem->ffn_up_output, &l->ffn_up_bias, seq_len, ffn_dim);
+
+	// Activation
+	dispatch_gelu_inplace(&mem->ffn_up_output, seq_len * ffn_dim);
+
+	dispatch_mat_mat(ctx, &mem->ffn_up_output, &l->ffn_down, &mem->ffn_down_output, seq_len, ffn_dim, embed_dim,
+			 true);
+	dispatch_add_bias(&mem->ffn_down_output, &l->ffn_down_bias, seq_len, embed_dim);
+
+	// Second Residual Connection
+	dispatch_add_and_store(&mem->hidden_state, &mem->residual_scratch, &mem->ffn_down_output, total_size);
+}
+
+MemType *process_image_vision_gemma3(struct TIEContext *ctx)
+{
+	VisionModel *vm = ctx->model_vision;
+	MemLayoutVision *mem = &ctx->vision_mem;
+
+	printf("Processing image Gemma3");
+
+	if (ctx->vision_mem.image_raw_width != vm->image_size || ctx->vision_mem.image_raw_height != vm->image_size) {
+		printf("invalid image size, supports %u x %u only\n", vm->image_size, vm->image_size);
+		return NULL;
+	}
 
 	// Project raw patches into `mem->patch_embeds`
-	if (ctx->model->interface.vision_create_embeddings) {
-		// Call the model-specific function
-		ctx->model->interface.vision_create_embeddings(ctx);
-	} else {
-		fprintf(stderr, "FATAL: model has no vision_create_embeddings interface? Exiting.\n");
-		exit(EXIT_FAILURE);
-	}
+	vision_create_embeddings_gemma3(ctx);
 
-#if DEBUG_SKIP_VIT_LAYERS
-	// Load final layer output directly
-	printf("DEBUG: Skipping ViT layers 0-26. Loading result from file...\n");
-	int load_status = load_tensor_from_file("tensor_dumps/Layer_26_-_Final_Output.bin",
-						(float *)mem->hidden_state.data, (size_t)num_patches * embed_dim);
-	if (load_status != 0) {
-		fprintf(stderr, "FATAL: Could not load debug tensor. Exiting.\n");
-		exit(EXIT_FAILURE);
-	}
-
-#else
 	// Run the Vision Transformer layers.
 	for (int layer_idx = 0; layer_idx < vm->num_layers; layer_idx++) {
 
-		if (ctx->model->interface.vision_transformer_layer) {
-
-			// Call the model-specific function
-			ctx->model->interface.vision_transformer_layer(ctx, layer_idx);
-
-		} else {
-			fprintf(stderr, "FATAL: model has no vision_transformer_layer interface? Exiting.\n");
-			exit(EXIT_FAILURE);
-		}
-
-		// DEEPSTACK
-		if (is_deepstack_layer(ctx, layer_idx) == true) {
-
-			deepstack_merger_index++;
-			// printf("%u layer is deepstack, merger_idx: %u\n", layer_idx, deepstack_merger_index);
-
-			// Get the destination buffer
-			MemType *dest_feature = &mem->deepstack_features[deepstack_merger_index];
-
-			// Run the merger
-			vision_run_patch_merger(ctx, dest_feature, &mem->hidden_state, layer_idx, true);
-		}
+		vision_transformer_layer_gemma3(ctx, layer_idx);
 
 		printf(".");
 		fflush(stdout);
 	}
-#endif
 
-	if (vm->num_deepstack_layers == 0) {
-
-		// Final downsampling
-		vision_downsample_and_project(ctx);
-
-	} else {
-		// Final merger
-		vision_run_patch_merger(ctx, &mem->projected_embeddings, &mem->hidden_state, 0, false);
-	}
+	// Final downsampling
+	vision_downsample_and_project(ctx);
 
 	printf("done\n");
 	fflush(stdout);

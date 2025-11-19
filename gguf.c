@@ -767,29 +767,29 @@ void gguf_model_metadata_free(struct GGUFModel *gguf)
 
 		if (metadata->type == GGUF_METADATA_VALUE_TYPE_ARRAY) {
 
-		    // Free the metadata value data
-		    if (metadata->data) {
-			// Array of strings
-			// We must free each individual string before freeing the array of pointers.
-			if (metadata->type == GGUF_METADATA_VALUE_TYPE_STRING && metadata->size > 0) {
+			// Free the metadata value data
+			if (metadata->data) {
+				// Array of strings
+				// We must free each individual string before freeing the array of pointers.
+				if (metadata->type == GGUF_METADATA_VALUE_TYPE_STRING && metadata->size > 0) {
 
-				char **string_array = (char **)metadata->data;
+					char **string_array = (char **)metadata->data;
 
-				uint64_t j;
+					uint64_t j;
 
-				for (j = 0; j < metadata->size; j++) {
-					if (string_array[j])
-						free(string_array[j]);
+					for (j = 0; j < metadata->size; j++) {
+						if (string_array[j])
+							free(string_array[j]);
+					}
+
+					// Now free the array of pointers itself
+					free(metadata->data);
+				} else {
+					free(metadata->data);
 				}
 
-				// Now free the array of pointers itself
-				free(metadata->data);
-			} else {
-				free(metadata->data);
+				metadata->data = NULL;
 			}
-
-			metadata->data = NULL;
-		    }
 		}
 	}
 
@@ -1246,7 +1246,7 @@ int gguf_model_read_token_merges(struct TIEContext *ctx, struct GGUFModel *gguf,
 
 	gguf->fptr = metadata->arr_offset;
 	ctx->model->merges_size = metadata->size;
-	//printf("model merges_size: %llu\n", ctx->model->merges_size);
+	// printf("model merges_size: %llu\n", ctx->model->merges_size);
 
 	for (i = 0; i < metadata->size; i++) {
 		str_len = *(uint64_t *)gguf->fptr;
@@ -1285,18 +1285,30 @@ int gguf_model_read_token_merges(struct TIEContext *ctx, struct GGUFModel *gguf,
 
 size_t gguf_get_type_size(uint32_t type)
 {
-    switch (type) {
-        case GGUF_METADATA_VALUE_TYPE_UINT8:   return sizeof(uint8_t);
-        case GGUF_METADATA_VALUE_TYPE_INT8:    return sizeof(int8_t);
-        case GGUF_METADATA_VALUE_TYPE_BOOL:    return sizeof(uint8_t); // Bools are uint8_t
-        case GGUF_METADATA_VALUE_TYPE_UINT16:  return sizeof(uint16_t);
-        case GGUF_METADATA_VALUE_TYPE_INT16:   return sizeof(int16_t);
-        case GGUF_METADATA_VALUE_TYPE_UINT32:  return sizeof(uint32_t);
-        case GGUF_METADATA_VALUE_TYPE_INT32:   return sizeof(int32_t);
-        case GGUF_METADATA_VALUE_TYPE_FLOAT32: return sizeof(float);
-        case GGUF_METADATA_VALUE_TYPE_UINT64:  return sizeof(uint64_t);
-        case GGUF_METADATA_VALUE_TYPE_INT64:   return sizeof(int64_t);
-        case GGUF_METADATA_VALUE_TYPE_FLOAT64: return sizeof(double);
-        default: return 0;
-    }
+	switch (type) {
+	case GGUF_METADATA_VALUE_TYPE_UINT8:
+		return sizeof(uint8_t);
+	case GGUF_METADATA_VALUE_TYPE_INT8:
+		return sizeof(int8_t);
+	case GGUF_METADATA_VALUE_TYPE_BOOL:
+		return sizeof(uint8_t); // Bools are uint8_t
+	case GGUF_METADATA_VALUE_TYPE_UINT16:
+		return sizeof(uint16_t);
+	case GGUF_METADATA_VALUE_TYPE_INT16:
+		return sizeof(int16_t);
+	case GGUF_METADATA_VALUE_TYPE_UINT32:
+		return sizeof(uint32_t);
+	case GGUF_METADATA_VALUE_TYPE_INT32:
+		return sizeof(int32_t);
+	case GGUF_METADATA_VALUE_TYPE_FLOAT32:
+		return sizeof(float);
+	case GGUF_METADATA_VALUE_TYPE_UINT64:
+		return sizeof(uint64_t);
+	case GGUF_METADATA_VALUE_TYPE_INT64:
+		return sizeof(int64_t);
+	case GGUF_METADATA_VALUE_TYPE_FLOAT64:
+		return sizeof(double);
+	default:
+		return 0;
+	}
 }

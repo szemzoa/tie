@@ -69,9 +69,13 @@ typedef struct {
 	int *token_types;	     // Token type
 	float *token_scores;	     // Token scores
 	int token_count;	     // Total number of tokens
+
 	// Direct-lookup map: bpe_decoder_map[codepoint] -> byte_value
 	int bpe_decoder_map[512];
 	uint32_t bpe_encoder_map[256];
+
+	unsigned int utf8_state;
+	unsigned int utf8_codepoint;
 } Tokenizer;
 
 struct TIEContext;

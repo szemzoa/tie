@@ -245,8 +245,19 @@ int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf,
 	*num_tokens = prompt_len;
 
 	if (ctx->model->use_mrope == 1) {
-	    build_mrope_position_ids(ctx, prompt_tokens, prompt_len, has_image, ctx->kv_pos);
-	    text_rope_cache_init(ctx, prompt_len, ctx->kv_pos);
+		int h_patches = 0;
+		int w_patches = 0;
+
+		if (has_image && ctx->model_vision) {
+			// Retrieve dimensions from the most recently processed image
+			int raw_w = ctx->vision_mem.image_raw_width;
+			int raw_h = ctx->vision_mem.image_raw_height;
+			w_patches = raw_w / ctx->model_vision->patch_size;
+			h_patches = raw_h / ctx->model_vision->patch_size;
+		}
+
+		build_mrope_position_ids(ctx, prompt_tokens, prompt_len, has_image, ctx->kv_pos, h_patches, w_patches);
+		text_rope_cache_init(ctx, prompt_len, ctx->kv_pos);
 	}
 
 	return prompt_tokens;
@@ -260,15 +271,24 @@ void run_multimodal_prompt(struct TIEContext *ctx, int *prompt_tokens, int promp
 	MemType *image_embeddings = NULL;
 	void (*embedding_scale_func)(struct TIEContext *, MemType *) = ctx->model->interface.embedding_scale;
 
-// TODO
+	// TODO
 	if (ctx->gguf_text->arch == ARCH_GEMMA3N) {
 		process_prompt_gemma3n(ctx, prompt_tokens, prompt_len);
 		return;
 	}
 
 	if (has_image == 1) {
-		process_image_vision(ctx);
-		image_embeddings = &ctx->vision_mem.projected_embeddings;
+
+		if (ctx->model->interface.process_image_vision) {
+			// Call the model-specific function
+			image_embeddings = ctx->model->interface.process_image_vision(ctx);
+		} else {
+			fprintf(stderr, "ERROR: Model does not support vision, but an image was provided.\n");
+			return;
+		}
+
+		if (image_embeddings == NULL)
+			return;
 	}
 
 	for (size_t i = 0; i < prompt_len; ++i) {
@@ -479,8 +499,6 @@ int engine_alloc(struct TIEContext *ctx, int num_threads)
 
 	ctx->tokenizer.root = create_node();
 	ctx->tokenizer.pool = create_string_pool(1024 * 1024 * 4);
-	ctx->utf8_state = 0;
-	ctx->utf8_codepoint = 0;
 
 	// Initialize SiLU lookup table
 	printf("init: SiLU table\n");

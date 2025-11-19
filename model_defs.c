@@ -163,8 +163,7 @@ ModelDef QWEN3VL_DEF = {
 			.embedding_scale = NULL,
 			.transformer_layer = transformer_layer_qwen3vl,
 			.build_vision_tokens = build_vision_tokens_qwen3vl,
-			.vision_create_embeddings = vision_create_embeddings_qwen3vl,
-			.vision_transformer_layer = vision_transformer_layer_qwen3vl,
+			.process_image_vision = process_image_vision_qwen3vl,
 			.build_rope_cache = build_rope_cache_dynamic,
 		},
 	DECLARE_LANGUAGE_MODEL_DEF(QWEN3, QWEN3)
@@ -196,8 +195,7 @@ ModelDef QWEN3VL_MOE_DEF = {
 			.embedding_scale = NULL,
 			.transformer_layer = transformer_layer_qwen3vl,
 			.build_vision_tokens = build_vision_tokens_qwen3vl,
-			.vision_create_embeddings = vision_create_embeddings_qwen3vl,
-			.vision_transformer_layer = vision_transformer_layer_qwen3vl,
+			.process_image_vision = process_image_vision_qwen3vl,
 			.build_rope_cache = build_rope_cache_dynamic,
 		},
 	DECLARE_LANGUAGE_MODEL_DEF(QWEN3, QWEN3_MOE)
@@ -282,8 +280,7 @@ ModelDef GEMMA3_DEF = {
 			.embedding_scale = embedding_scale_gemma3,
 			.transformer_layer = transformer_layer_gemma3,
 			.build_vision_tokens = build_vision_tokens_gemma3,
-			.vision_create_embeddings = vision_create_embeddings_gemma3,
-			.vision_transformer_layer = vision_transformer_layer_gemma3,
+			.process_image_vision = process_image_vision_gemma3,
 			.build_rope_cache = build_rope_cache_shared,
 		},
 	DECLARE_LANGUAGE_MODEL_DEF(GEMMA3, GEMMA3)

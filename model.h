@@ -45,7 +45,7 @@ typedef enum {
 	SIZE_ROPE_SIN,
 	SIZE_ROPE_COS,
 
-	SIZE_POS_IDS,	   // for m-rope
+	SIZE_POS_IDS, // for m-rope
 
 	/* vision */
 	SIZE_VISION_IMAGE_RAW,
@@ -73,9 +73,9 @@ typedef struct {
 } MetadataDef;
 
 typedef struct {
-    void *data;
-    uint64_t size;
-    uint32_t type;
+	void *data;
+	uint64_t size;
+	uint32_t type;
 } ModelArray;
 
 typedef struct {
@@ -113,11 +113,10 @@ typedef struct {
 	void (*token_out)(struct TIEContext *ctx, int token_id);
 	void (*prepare_next_token)(struct TIEContext *ctx, int next_token);
 	void (*embedding_scale)(struct TIEContext *ctx, MemType *hidden_state_slice);
-	int  (*transformer_layer)(struct TIEContext *ctx, int layer_idx, int batch_len);
-	int  (*build_vision_tokens)(struct TIEContext *ctx, int *token_buf, int buf_pos);
+	int (*transformer_layer)(struct TIEContext *ctx, int layer_idx, int batch_len);
 
-	void (*vision_create_embeddings)(struct TIEContext *ctx);
-	void (*vision_transformer_layer)(struct TIEContext *ctx, int layer_idx);
+	int (*build_vision_tokens)(struct TIEContext *ctx, int *token_buf, int buf_pos);
+	MemType *(*process_image_vision)(struct TIEContext *ctx);
 
 	void (*build_rope_cache)(struct TIEContext *ctx, size_t seq_len);
 } ModelInterface;
@@ -253,15 +252,15 @@ typedef struct {
 	int num_heads;
 	float norm_eps;
 
-	int proj_scale_factor;		/* Gemma-3 */
-	int spatial_merge_size;		/* Qwen3-VL */
+	int proj_scale_factor;	/* Gemma-3 */
+	int spatial_merge_size; /* Qwen3-VL */
 
 	int soi_token_id;
 	int eoi_token_id;
 	int image_soft_token_id;
 
 	int num_deepstack_layers;	/* Qwen3-VL */
-	ModelArray is_deepstack_layers;	/* Qwen3-VL */
+	ModelArray is_deepstack_layers; /* Qwen3-VL */
 
 	ClipVisionMeta meta;
 
@@ -272,16 +271,16 @@ typedef struct {
 	Tensor soft_embd_norm;
 	Tensor patch_embd_bias;
 	Tensor patch_embd;
-	Tensor patch_embd_1;		/* Qwen3-VL */
+	Tensor patch_embd_1; /* Qwen3-VL */
 	Tensor position_embd;
 	Tensor post_ln_bias;
 	Tensor post_ln;
 
 	/* Qwen3-VL */
-	Tensor	mm_0_bias;
-	Tensor	mm_0_weight;
-	Tensor	mm_2_bias;
-	Tensor	mm_2_weight;
+	Tensor mm_0_bias;
+	Tensor mm_0_weight;
+	Tensor mm_2_bias;
+	Tensor mm_2_weight;
 
 	VisionLayerWeights *layers;
 	WeightLayout weight_layout;

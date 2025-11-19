@@ -11,6 +11,15 @@
 #ifdef CONFIG_ENABLE_AVX2
 #include <immintrin.h>
 
+__attribute__((target("avx2"))) static inline float hsum_f32_avx2(__m256 v)
+{
+    __m128 lo = _mm256_castps256_ps128(v);
+    __m128 hi = _mm256_extractf128_ps(v, 1);
+    __m128 sum = _mm_add_ps(lo, hi);
+    sum = _mm_hadd_ps(sum, sum);
+    return _mm_cvtss_f32(_mm_hadd_ps(sum, sum));
+}
+
 __attribute__((target("avx2"))) inline __m256 load_bf16_as_f32(const uint16_t *src)
 {
 	// Load 8 BF16s into 128-bit register
@@ -62,12 +71,7 @@ __attribute__((target("avx2"))) void rms_norm_f32_f32_f32_avx2(void *__restrict 
 	}
 
 	// Horizontal reduction of 8 floats
-	__m128 low = _mm256_castps256_ps128(sum);
-	__m128 high = _mm256_extractf128_ps(sum, 1);
-	__m128 sum128 = _mm_add_ps(low, high);
-	sum128 = _mm_hadd_ps(sum128, sum128);
-	sum128 = _mm_hadd_ps(sum128, sum128);
-	float ss = _mm_cvtss_f32(sum128);
+	float ss = hsum_f32_avx2(sum);
 
 	// Tail loop
 	for (; i < size; ++i) {
@@ -111,12 +115,7 @@ __attribute__((target("avx2"))) void rms_norm_bf16_f32_f32_avx2(void *__restrict
 	}
 
 	// Horizontal reduction of the sum vector to a single float 'ss'
-	__m128 sum_low = _mm256_castps256_ps128(sum_sq_vec);
-	__m128 sum_high = _mm256_extractf128_ps(sum_sq_vec, 1);
-	__m128 sum_4 = _mm_add_ps(sum_low, sum_high);
-	__m128 sum_2 = _mm_hadd_ps(sum_4, sum_4);
-	__m128 sum_1 = _mm_hadd_ps(sum_2, sum_2);
-	float ss = _mm_cvtss_f32(sum_1);
+	float ss = hsum_f32_avx2(sum_sq_vec);
 
 	// Scalar tail loop for sum of squares
 	for (; i < size; ++i) {
@@ -177,12 +176,7 @@ __attribute__((target("avx2"))) float dot_product_f32_f32_avx2(const void *__res
 	}
 
 	// Horizontal sum of 8 lanes
-	__m128 sum_low = _mm256_castps256_ps128(sum_vec);    // Lower 4 lanes
-	__m128 sum_high = _mm256_extractf128_ps(sum_vec, 1); // Upper 4 lanes
-	__m128 sum_4 = _mm_add_ps(sum_low, sum_high);	     // Sum lower + upper
-	__m128 sum_2 = _mm_hadd_ps(sum_4, sum_4);	     // Horizontal add: [s0+s1, s2+s3, ...]
-	__m128 sum_1 = _mm_hadd_ps(sum_2, sum_2);	     // Final sum: [s0+s1+s2+s3, ...]
-	float sum = _mm_cvtss_f32(sum_1);		     // Extract single float
+	float sum = hsum_f32_avx2(sum_vec);
 
 	// Handle remaining elements (size % 8)
 	for (; i < size; i++) {
@@ -221,12 +215,7 @@ __attribute__((target("avx2"))) float dot_product_f32_bf16_avx2(const void *__re
 		acc = _mm256_fmadd_ps(a_fp32, b_fp32, acc);
 	}
 
-	__m128 sum_low = _mm256_castps256_ps128(acc);
-	__m128 sum_high = _mm256_extractf128_ps(acc, 1);
-	__m128 sum_4 = _mm_add_ps(sum_low, sum_high);
-	__m128 sum_2 = _mm_hadd_ps(sum_4, sum_4);
-	__m128 sum_1 = _mm_hadd_ps(sum_2, sum_2);
-	float result = _mm_cvtss_f32(sum_1);
+	float result = hsum_f32_avx2(acc);
 
 	// Tail loop
 	for (; i < size; i++) {
@@ -256,12 +245,7 @@ __attribute__((target("avx2"))) void mat_vec_row_f32_f32_f32_avx2(const void *X,
 		}
 
 		// Horizontal sum of acc
-		__m128 low = _mm256_castps256_ps128(acc);
-		__m128 high = _mm256_extractf128_ps(acc, 1);
-		__m128 sum128 = _mm_add_ps(low, high);
-		sum128 = _mm_hadd_ps(sum128, sum128);
-		sum128 = _mm_hadd_ps(sum128, sum128);
-		float sum = _mm_cvtss_f32(sum128);
+		float sum = hsum_f32_avx2(acc);
 
 		// Tail
 		for (; j < in_dim; j++) {
@@ -501,12 +485,7 @@ __attribute__((target("avx2"))) float dot_product_f32_q6k_avx2(const float *x, c
 	}
 
 	// Reduce sum_vec to scalar
-	__m128 sum_low = _mm256_castps256_ps128(sum_vec);
-	__m128 sum_high = _mm256_extractf128_ps(sum_vec, 1);
-	__m128 sum_4 = _mm_add_ps(sum_low, sum_high);
-	__m128 sum_2 = _mm_hadd_ps(sum_4, sum_4);
-	__m128 sum_1 = _mm_hadd_ps(sum_2, sum_2);
-	float sum = _mm_cvtss_f32(sum_1);
+	float sum = hsum_f32_avx2(sum_vec);
 
 	return sum;
 }
@@ -607,15 +586,8 @@ __attribute__((target("avx2"))) float dot_product_f32_q4k_avx2(const float *x, c
 		is += 2;
 	}
 
-	// OPTIMIZED HORIZONTAL SUM
 	// Reduce the 8-lane sum to a single float
-	__m128 sum_low = _mm256_castps256_ps128(acc);
-	__m128 sum_high = _mm256_extractf128_ps(acc, 1);
-	__m128 sum_4 = _mm_add_ps(sum_low, sum_high);
-	__m128 sum_2 = _mm_hadd_ps(sum_4, sum_4);
-	__m128 sum_1 = _mm_hadd_ps(sum_2, sum_2);
-
-	return _mm_cvtss_f32(sum_1);
+	return hsum_f32_avx2(acc);
 }
 
 
@@ -975,25 +947,6 @@ __attribute__((target("avx2"))) void store_KV_cache_f32_bf16_avx2(struct TIECont
 	}
 }
 
-/* MIXED precision functions */
-__attribute__((target("avx2"))) static inline float hsum_f32_avx2(__m256 v)
-{
-	// Extract the high and low 128-bit lanes from the 256-bit vector
-	__m128 low = _mm256_castps256_ps128(v);
-	__m128 high = _mm256_extractf128_ps(v, 1);
-
-	// Add the two 128-bit lanes together
-	__m128 sum128 = _mm_add_ps(low, high);
-
-	// Perform two horizontal adds. This sums the 4 floats in the __m128 register.
-	// 1st hadd: [a, b, c, d] -> [a+b, c+d, a+b, c+d]
-	sum128 = _mm_hadd_ps(sum128, sum128);
-	// 2nd hadd: [a+b, c+d, a+b, c+d] -> [a+b+c+d, a+b+c+d, a+b+c+d, a+b+c+d]
-	sum128 = _mm_hadd_ps(sum128, sum128);
-
-	// Extract the first float, which now contains the total sum
-	return _mm_cvtss_f32(sum128);
-}
 
 __attribute__((target("avx2"))) void rms_norm_bf16_f32_bf16_avx2(void *O, const void *X, const Tensor *W, int size,
 								 float eps)
@@ -1174,157 +1127,100 @@ __attribute__((target("avx2"))) void store_KV_cache_bf16_bf16_avx2(struct TIECon
 	}
 }
 
-__attribute__((target("avx2"))) float dot_product_bf16_q4k_avx2(const uint16_t *x_bf16, const block_q4_k *blk)
+__attribute__((target("avx2"))) float dot_product_bf16_q4k_avx2(const uint16_t *x_bf16,
+                                                               const block_q4_k *block)
 {
-	const float d = fp16_to_fp32(blk->d);
-	const float dmin = fp16_to_fp32(blk->dmin);
-	float scales[8], mins[8];
-	for (int i = 0; i < 8; i += 2) {
-		uint8_t s1, m1, s2, m2;
-		get_scale_min_k4(i + 0, blk->scales, &s1, &m1);
-		get_scale_min_k4(i + 1, blk->scales, &s2, &m2);
-		scales[i] = d * s1;
-		mins[i] = dmin * m1;
-		scales[i + 1] = d * s2;
-		mins[i + 1] = dmin * m2;
-	}
+    const float d = fp16_to_fp32(block->d);
+    const float dmin = fp16_to_fp32(block->dmin);
+    const uint8_t *qs = block->qs;
 
-	// Use two accumulators for loop unrolling
-	__m256 acc0 = _mm256_setzero_ps();
-	__m256 acc1 = _mm256_setzero_ps();
-	const uint8_t *q = blk->qs;
-	int is = 0;
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
 
-	for (int j = 0; j < QK_K; j += 64) {
-		__m256 d1_vec = _mm256_set1_ps(scales[is]);
-		__m256 m1_vec = _mm256_set1_ps(mins[is]);
-		__m256 d2_vec = _mm256_set1_ps(scales[is + 1]);
-		__m256 m2_vec = _mm256_set1_ps(mins[is + 1]);
+    // Pre-load all 8 scales + mins once (they are only 8×2 values)
+    float scales[8], mins[8];
+    for (int i = 0; i < 8; i += 2) {
+        uint8_t s1,m1,s2,m2;
+        get_scale_min_k4(i,   block->scales, &s1, &m1);
+        get_scale_min_k4(i+1, block->scales, &s2, &m2);
+        scales[i]   = d    * s1;  mins[i]   = dmin * m1;
+        scales[i+1] = d    * s2;  mins[i+1] = dmin * m2;
+    }
 
-		// Process 64 nibbles (32 bytes) per inner loop, unrolled
-		for (int offset = 0; offset < 32; offset += 16) { // Process 16 bytes -> 32 nibbles
-			// --- First 8 bytes ---
-			__m128i q_i8_0 = _mm_loadu_si64(q + offset);
-			const __m128i mask_lo = _mm_set1_epi8(0x0F);
-			__m128i q_lo_i8_0 = _mm_and_si128(q_i8_0, mask_lo);
-			__m128i q_hi_i8_0 = _mm_and_si128(_mm_srli_epi16(q_i8_0, 4), mask_lo);
-			__m256 qv_lo0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q_lo_i8_0));
-			__m256 qv_hi0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q_hi_i8_0));
+    // Unrolled over the two 32-byte chunks → removes branch + pointer math
+    for (int chunk = 0; chunk < 2; ++chunk) {
+        const int off = chunk * 32;
+        const int scale_base = chunk * 4;
 
-			__m256 xv_lo0 = load_bf16_as_f32(x_bf16 + j + offset);
-			__m256 xv_hi0 = load_bf16_as_f32(x_bf16 + j + 32 + offset);
+        #define PROCESS_8(offset) do { \
+            __m128i q8 = _mm_loadu_si64(qs + off + offset); \
+            __m128i lo = _mm_and_si128(q8, _mm_set1_epi8(0x0F)); \
+            __m128i hi = _mm_and_si128(_mm_srli_epi16(q8, 4), _mm_set1_epi8(0x0F)); \
+            __m256 q_lo = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(lo)); \
+            __m256 q_hi = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(hi)); \
+            __m256 x_lo = load_bf16_as_f32(x_bf16 + off + offset); \
+            __m256 x_hi = load_bf16_as_f32(x_bf16 + off + 32 + offset); \
+            __m256 w_lo = _mm256_sub_ps(_mm256_mul_ps(q_lo, _mm256_set1_ps(scales[scale_base + (offset/8)*2])), \
+                                        _mm256_set1_ps(mins[scale_base + (offset/8)*2])); \
+            __m256 w_hi = _mm256_sub_ps(_mm256_mul_ps(q_hi, _mm256_set1_ps(scales[scale_base + (offset/8)*2 + 1])), \
+                                        _mm256_set1_ps(mins[scale_base + (offset/8)*2 + 1])); \
+            acc0 = _mm256_fmadd_ps(x_lo, w_lo, acc0); \
+            acc1 = _mm256_fmadd_ps(x_hi, w_hi, acc1); \
+        } while(0)
 
-			acc0 = _mm256_fmadd_ps(xv_lo0, _mm256_sub_ps(_mm256_mul_ps(qv_lo0, d1_vec), m1_vec), acc0);
-			acc1 = _mm256_fmadd_ps(xv_hi0, _mm256_sub_ps(_mm256_mul_ps(qv_hi0, d2_vec), m2_vec), acc1);
+        PROCESS_8(0);
+        PROCESS_8(8);
+        PROCESS_8(16);
+        PROCESS_8(24);
 
-			// --- Second 8 bytes ---
-			__m128i q_i8_1 = _mm_loadu_si64(q + offset + 8);
-			__m128i q_lo_i8_1 = _mm_and_si128(q_i8_1, mask_lo);
-			__m128i q_hi_i8_1 = _mm_and_si128(_mm_srli_epi16(q_i8_1, 4), mask_lo);
-			__m256 qv_lo1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q_lo_i8_1));
-			__m256 qv_hi1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q_hi_i8_1));
+        #undef PROCESS_8
+    }
 
-			__m256 xv_lo1 = load_bf16_as_f32(x_bf16 + j + offset + 8);
-			__m256 xv_hi1 = load_bf16_as_f32(x_bf16 + j + 32 + offset + 8);
-
-			acc0 = _mm256_fmadd_ps(xv_lo1, _mm256_sub_ps(_mm256_mul_ps(qv_lo1, d1_vec), m1_vec), acc0);
-			acc1 = _mm256_fmadd_ps(xv_hi1, _mm256_sub_ps(_mm256_mul_ps(qv_hi1, d2_vec), m2_vec), acc1);
-		}
-		q += 32;
-		is += 2;
-	}
-
-	// Add the two accumulators together before the final horizontal sum
-	acc0 = _mm256_add_ps(acc0, acc1);
-	return hsum_f32_avx2(acc0);
+    return hsum_f32_avx2(_mm256_add_ps(acc0, acc1));
 }
 
-__attribute__((target("avx2"))) float dot_product_bf16_q6k_avx2(const uint16_t *x_bf16, const block_q6_k *block)
+__attribute__((target("avx2"))) float dot_product_bf16_q6k_avx2(const uint16_t *x_bf16,
+                                                               const block_q6_k *block)
 {
-	__m256 sum_vec = _mm256_setzero_ps();
-	const float d = fp16_to_fp32(block->d);
-	__m256 d_vec = _mm256_set1_ps(d);
+    const float d = fp16_to_fp32(block->d);
+    __m256 acc = _mm256_setzero_ps();
+    __m256 dvec = _mm256_set1_ps(d);
 
-	const uint8_t *ql = block->ql;
-	const uint8_t *qh = block->qh;
-	const int8_t *sc = block->scales;
+    const uint8_t *ql = block->ql;
+    const uint8_t *qh = block->qh;
+    const int8_t  *sc = block->scales;
 
-	for (int n = 0; n < 2; n++) { // Two halves: 128 each
-		const uint16_t *x_half = x_bf16 + n * 128;
-		const uint8_t *ql_half = ql + n * 64;
-		const uint8_t *qh_half = qh + n * 32;
-		const int8_t *sc_half = sc + n * 8;
+    // Fully unrolled 4×8 loop – removes all inner branches
+    #define Q6K_BLOCK(l, xoff, qloff, scaleoff) do { \
+        __m256 xv = load_bf16_as_f32(x_bf16 + (l) + (xoff)); \
+        __m128i qlv = _mm_loadu_si128((const __m128i*)(ql + (qloff) + (l))); \
+        __m128i qhv = _mm_loadu_si128((const __m128i*)(qh + (qloff)/2 + (l))); \
+        __m128i qv = _mm_or_si128(_mm_and_si128(qlv, _mm_set1_epi8(0x0F)), \
+                                  _mm_slli_epi16(_mm_and_si128(qhv, _mm_set1_epi8(3)), 4)); \
+        if ((l) >= 16) qv = _mm_or_si128(_mm_and_si128(_mm_srli_epi16(qlv,4), _mm_set1_epi8(0x0F)), \
+                                         _mm_slli_epi16(_mm_and_si128(_mm_srli_epi16(qhv, (scaleoff)*2), _mm_set1_epi8(3)), 4)); \
+        __m256 qf = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_sub_epi8(qv, _mm_set1_epi8(32)))); \
+        __m256 wf = _mm256_mul_ps(dvec, _mm256_mul_ps(_mm256_set1_ps((float)sc[(scaleoff)]), qf)); \
+        acc = _mm256_fmadd_ps(wf, xv, acc); \
+    } while(0)
 
-		for (int l = 0; l < 32; l += 8) {
-			int is = (l >= 16) ? 1 : 0;
+    for (int base = 0; base < 128; base += 64) {  // two 128-element halves
+        int qbase = base;
+        int xbase = base;
+        Q6K_BLOCK(0,  xbase,      qbase,       0);
+        Q6K_BLOCK(8,  xbase,      qbase,       0);
+        Q6K_BLOCK(32, xbase + 32, qbase + 32,   2);
+        Q6K_BLOCK(40, xbase + 32, qbase + 32,   2);
+        Q6K_BLOCK(64, xbase + 64, qbase,       4);
+        Q6K_BLOCK(72, xbase + 64, qbase,       4);
+        Q6K_BLOCK(96, xbase + 96, qbase + 32,   6);
+        Q6K_BLOCK(104,xbase + 96, qbase + 32,   6);
+    }
+    #undef Q6K_BLOCK
 
-			// --- Load x as BF16 → FP32 ---
-			__m256 x1 = load_bf16_as_f32(x_half + l);
-			__m256 x2 = load_bf16_as_f32(x_half + l + 32);
-			__m256 x3 = load_bf16_as_f32(x_half + l + 64);
-			__m256 x4 = load_bf16_as_f32(x_half + l + 96);
-
-			// --- Load quantization data ---
-			__m128i ql_vec = _mm_loadu_si128((const __m128i *)(ql_half + l));
-			__m128i qh_vec = _mm_loadu_si128((const __m128i *)(qh_half + l));
-			__m128i ql_vec32 = _mm_loadu_si128((const __m128i *)(ql_half + l + 32));
-
-			// q1
-			__m128i ql_low = _mm_and_si128(ql_vec, _mm_set1_epi8(0x0F));
-			__m128i qh_01 = _mm_and_si128(qh_vec, _mm_set1_epi8(3));
-			__m128i qh_shift1 = _mm_slli_epi16(qh_01, 4);
-			__m128i q_vec1 = _mm_or_si128(ql_low, qh_shift1);
-			__m128i q_int1 = _mm_sub_epi8(q_vec1, _mm_set1_epi8(32));
-			__m256 q1_vec = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q_int1));
-			__m256 scale_vec1 = _mm256_set1_ps((float)sc_half[is]);
-			__m256 w1_vec = _mm256_mul_ps(d_vec, _mm256_mul_ps(scale_vec1, q1_vec));
-			sum_vec = _mm256_fmadd_ps(w1_vec, x1, sum_vec);
-
-			// q2
-			__m128i ql_low2 = _mm_and_si128(ql_vec32, _mm_set1_epi8(0x0F));
-			__m128i qh_23 = _mm_and_si128(_mm_srli_epi16(qh_vec, 2), _mm_set1_epi8(3));
-			__m128i qh_shift2 = _mm_slli_epi16(qh_23, 4);
-			__m128i q_vec2 = _mm_or_si128(ql_low2, qh_shift2);
-			__m128i q_int2 = _mm_sub_epi8(q_vec2, _mm_set1_epi8(32));
-			__m256 q2_vec = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q_int2));
-			__m256 scale_vec2 = _mm256_set1_ps((float)sc_half[is + 2]);
-			__m256 w2_vec = _mm256_mul_ps(d_vec, _mm256_mul_ps(scale_vec2, q2_vec));
-			sum_vec = _mm256_fmadd_ps(w2_vec, x2, sum_vec);
-
-			// q3
-			__m128i ql_high = _mm_and_si128(_mm_srli_epi16(ql_vec, 4), _mm_set1_epi8(0x0F));
-			__m128i qh_45 = _mm_and_si128(_mm_srli_epi16(qh_vec, 4), _mm_set1_epi8(3));
-			__m128i qh_shift3 = _mm_slli_epi16(qh_45, 4);
-			__m128i q_vec3 = _mm_or_si128(ql_high, qh_shift3);
-			__m128i q_int3 = _mm_sub_epi8(q_vec3, _mm_set1_epi8(32));
-			__m256 q3_vec = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q_int3));
-			__m256 scale_vec3 = _mm256_set1_ps((float)sc_half[is + 4]);
-			__m256 w3_vec = _mm256_mul_ps(d_vec, _mm256_mul_ps(scale_vec3, q3_vec));
-			sum_vec = _mm256_fmadd_ps(w3_vec, x3, sum_vec);
-
-			// q4
-			__m128i ql_high2 = _mm_and_si128(_mm_srli_epi16(ql_vec32, 4), _mm_set1_epi8(0x0F));
-			__m128i qh_67 = _mm_and_si128(_mm_srli_epi16(qh_vec, 6), _mm_set1_epi8(3));
-			__m128i qh_shift4 = _mm_slli_epi16(qh_67, 4);
-			__m128i q_vec4 = _mm_or_si128(ql_high2, qh_shift4);
-			__m128i q_int4 = _mm_sub_epi8(q_vec4, _mm_set1_epi8(32));
-			__m256 q4_vec = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q_int4));
-			__m256 scale_vec4 = _mm256_set1_ps((float)sc_half[is + 6]);
-			__m256 w4_vec = _mm256_mul_ps(d_vec, _mm256_mul_ps(scale_vec4, q4_vec));
-			sum_vec = _mm256_fmadd_ps(w4_vec, x4, sum_vec);
-		}
-	}
-
-	// Horizontal reduce sum_vec → scalar
-	__m128 sum_low = _mm256_castps256_ps128(sum_vec);
-	__m128 sum_high = _mm256_extractf128_ps(sum_vec, 1);
-	__m128 sum_4 = _mm_add_ps(sum_low, sum_high);
-	__m128 sum_2 = _mm_hadd_ps(sum_4, sum_4);
-	__m128 sum_1 = _mm_hadd_ps(sum_2, sum_2);
-	float sum = _mm_cvtss_f32(sum_1);
-
-	return sum;
+    return hsum_f32_avx2(acc);
 }
+
 
 __attribute__((target("avx2"))) void mat_vec_row_bf16_q4k_f32_avx2(const void *X, const void *w_void, void *O,
 								   int in_dim, int start_row, int end_row)
@@ -1565,7 +1461,10 @@ __attribute__((target("avx2"))) void get_embedding_row_q6k_bf16_avx2(const Tenso
 
 inline float gelu_fast(float x)
 {
-	return 0.5f * x * (1.0f + tanhf(0.79788456f * x * (1.0f + 0.044715f * x * x)));
+    const float a = 0.7978845608028654f;   // sqrt(2/pi)
+    const float b = 0.044715f;
+    float t = tanhf(a * x * (1.0f + b * x * x));
+    return 0.5f * x * (1.0f + t);
 }
 
 void geglu_activation_f32_f32_avx2(void *gate, const void *up, int size)
@@ -1590,8 +1489,6 @@ void geglu_activation_f32_f32_avx2(void *gate, const void *up, int size)
 	const __m256 v_9 = _mm256_set1_ps(9.0f);
 
 	// clamp range for t to avoid extreme values (optional but stabilizes approx)
-	//    const __m256 v_t_max = _mm256_set1_ps(10.0f);
-	//    const __m256 v_t_min = _mm256_set1_ps(-10.0f);
 	const __m256 v_t_max = _mm256_set1_ps(4.0f);
 	const __m256 v_t_min = _mm256_set1_ps(-4.0f);
 

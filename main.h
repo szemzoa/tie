@@ -66,9 +66,6 @@ struct TIEContext {
 	uint32_t kv_pos;
 	LayerKVCache *kv_cache;
 
-	unsigned int utf8_state;
-	unsigned int utf8_codepoint;
-
 	Tokenizer tokenizer;
 };
 

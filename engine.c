@@ -11,7 +11,6 @@
 
 float silu_table[SILU_TABLE_SIZE];
 
-
 #define DEBUG_MEMTYPE_NUM 10
 void debug_memtype_f32(MemType *mem, char *name, int layer_idx, int debug_offset)
 {
@@ -65,7 +64,8 @@ static void debug_check_tensor(const char *name, MemType *mem, int len, int laye
 	}
 }
 
-int compare_tensor_with_file(const char *ref_filename, const float *your_c_tensor, long num_elements, float tolerance, int debug_offset)
+int compare_tensor_with_file(const char *ref_filename, const float *your_c_tensor, long num_elements, float tolerance,
+			     int debug_offset)
 {
 	FILE *file = fopen(ref_filename, "rb");
 	if (file == NULL) {
@@ -316,7 +316,6 @@ static void apply_interleaved_mrope(float *freqs_t, const float *freqs_h, const 
 }
 
 /* Builds the M-RoPE cos/sin tables */
-// void text_rope_cache_init(struct TIEContext *ctx, int seq_len)
 void text_rope_cache_init(struct TIEContext *ctx, int seq_len, int start_pos)
 {
 	Model *lm = ctx->model;
@@ -455,6 +454,7 @@ void text_rope_cache_extend(struct TIEContext *ctx, int pos)
 }
 
 /* Fills the 3D M-RoPE position ID buffer based on the final token sequence */
+#if 0
 void build_mrope_position_ids(struct TIEContext *ctx, const int *prompt_tokens, size_t prompt_len, bool has_image,
 			      int start_pos)
 {
@@ -503,6 +503,71 @@ void build_mrope_position_ids(struct TIEContext *ctx, const int *prompt_tokens, 
 		} else {
 			// This is a normal text token
 			// The position is copied to all 3 dims.
+			pos_t[i] = text_pos_counter;
+			pos_h[i] = text_pos_counter;
+			pos_w[i] = text_pos_counter;
+
+			text_pos_counter++;
+		}
+	}
+
+	if (has_image && image_patch_counter != num_image_patches) {
+		fprintf(stderr, "WARNING: M-RoPE position mismatch. Expected %d patches, counted %d\n",
+			num_image_patches, image_patch_counter);
+	}
+}
+#endif
+void build_mrope_position_ids(struct TIEContext *ctx, const int *prompt_tokens, size_t prompt_len, bool has_image,
+			      int start_pos, int h_patches_in, int w_patches_in)
+{
+	MemType *pos_id_buf = &ctx->mem.pos_ids;
+	memset((void *)pos_id_buf->data, 0, pos_id_buf->n_bytes);
+
+	// Get base pointers for each dimension (T, H, W)
+	const int max_len = ctx->model->seq_length;
+	int *pos_t = (int *)pos_id_buf->data;
+	int *pos_h = pos_t + max_len;
+	int *pos_w = pos_h + max_len;
+
+	int text_pos_counter = start_pos;
+	int image_patch_counter = 0;
+
+	// Use Passed-In Dimensions
+	int h_patches = 0;
+	int w_patches = 0;
+	int num_image_patches = 0;
+
+	if (has_image && ctx->model_vision) {
+		// Calculate the *merged* grid size, which is what the LLM sees.
+		// h_patches_in/w_patches_in are the raw patch counts (e.g., 50x37).
+		// The LLM sees them reduced by spatial_merge_size (e.g., 2).
+		h_patches = h_patches_in / ctx->model_vision->spatial_merge_size;
+		w_patches = w_patches_in / ctx->model_vision->spatial_merge_size;
+
+		// Calculate total expected patches
+		num_image_patches = h_patches * w_patches;
+	}
+
+	// Loop over the final token list
+	for (int i = 0; i < prompt_len; i++) {
+		int token = prompt_tokens[i];
+
+		// Check for the <vision_pad> token
+		if (has_image && token == ctx->model->vision_embed_token_id) {
+			// This is an image patch token
+			int h = image_patch_counter / w_patches; // Use dynamic width
+			int w = image_patch_counter % w_patches;
+
+			// We use the text_pos_counter as the base for all.
+			pos_t[i] = text_pos_counter; // T is 0 + counter
+			pos_h[i] = h + text_pos_counter;
+			pos_w[i] = w + text_pos_counter;
+
+			image_patch_counter++;
+			text_pos_counter++;
+
+		} else {
+			// This is a normal text token
 			pos_t[i] = text_pos_counter;
 			pos_h[i] = text_pos_counter;
 			pos_w[i] = text_pos_counter;

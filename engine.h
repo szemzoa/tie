@@ -11,6 +11,9 @@
 #define SILU_X_MIN -10.0f
 #define SILU_X_MAX 10.0f
 
+#define MIN(a,b) ((a)<(b)?(a):(b))
+#define MAX(a,b) ((a)>(b)?(a):(b))
+
 typedef struct {
 	int index;
 	float score;
@@ -157,13 +160,13 @@ typedef struct {
 	MemType *altup_predicted_states;
 	MemType per_layer_inputs;
 
-/*
-	MemType rope_sin_global;
-	MemType rope_cos_global;
+	/*
+		MemType rope_sin_global;
+		MemType rope_cos_global;
 
-	MemType rope_sin_local;
-	MemType rope_cos_local;
-*/
+		MemType rope_sin_local;
+		MemType rope_cos_local;
+	*/
 	/* QWEN3-VL */
 	MemType pos_ids;
 } MemLayout;
@@ -187,12 +190,15 @@ typedef struct {
 	MemType pooled_embeddings;    // After downsampling: [256, 1152]
 	MemType projected_embeddings; // Final output for the LLM: [256, 2560]
 
+	int image_raw_width;
+	int image_raw_height;
+
 	/* QWEN3-VL */
-	MemType merger_norm_buf;   // Holds output of LayerNorm
-        MemType merger_fc1_buf;    // Holds output of FC1 + GELU
-        // Storage for DeepStack outputs
-        // Size: [merged_seq_len, proj_dim] = [576, 2048]
-        MemType *deepstack_features;
+	MemType merger_norm_buf; // Holds output of LayerNorm
+	MemType merger_fc1_buf;	 // Holds output of FC1 + GELU
+	// Storage for DeepStack outputs
+	// Size: [merged_seq_len, proj_dim] = [576, 2048]
+	MemType *deepstack_features;
 } MemLayoutVision;
 
 typedef struct {
@@ -272,7 +278,8 @@ extern int compare_tensor_with_file(const char *ref_filename, const float *your_
 extern void debug_memtype_f32(MemType *mem, char *name, int layer_idx, int debug_offset);
 
 extern void build_mrope_position_ids(struct TIEContext *ctx, const int *prompt_tokens, size_t prompt_len,
-				     bool has_image, int start_pos);
+				     bool has_image, int start_pos, int h_patches_in, int w_patches_in);
+
 extern void text_rope_cache_init(struct TIEContext *ctx, int seq_len, int start_pos);
 
 #endif

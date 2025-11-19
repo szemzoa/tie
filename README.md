@@ -11,7 +11,7 @@ Not breaking any speed records (~4.5 TPS for 4B model (Q4_K_M), ~10 for 1.7B Qwe
 -  Runs Gemma3 GGUF model (Gemma-3 270m/1b/4b/12b-it tested)
 -  Runs Gemma-3n GGUF model (Gemma-3n-E2B/E4B-it tested)
 -  Minimal Gemma3 clip vision support
--  Minimal Qwen3-VL vision support
+-  Minimal Qwen3-VL vision support with dynamic resolution
 -  Implements tokenizer, RMS norm, RoPE, attention, FFN
 -  Interactive chat with multi-turn memory
 -  Minimal tool call support

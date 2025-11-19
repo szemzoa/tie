@@ -950,21 +950,36 @@ int model_vision_init(struct TIEContext *ctx, VisionModel *model_vision, const M
 	} break;
 
 	case VISION_PROJECTOR_QWEN3VL: {
+                MRopeCacheType *cache = &vm->mrope_cache;
 
-		const int num_patches_side = vm->image_size / vm->patch_size; // 48
-		const int num_heads = vm->num_heads;			      // 16
-		const int head_dim = vm->embed_dim / num_heads;		      // 64
+                // This defines the MAXIMUM buffer size (e.g., 48x48 = 2304 patches)
+                const int num_patches_side = vm->image_size / vm->patch_size;
+                const int num_heads = vm->num_heads;
+                const int head_dim = vm->embed_dim / num_heads;
 
-		bool *is_deepstack = (bool *)vm->is_deepstack_layers.data;
-		for (int i = 0; i < vm->num_layers; i++) {
-			if (is_deepstack[i] == true)
-			    vm->num_deepstack_layers++;
-		}
+                // Count DeepStack layers
+                bool *is_deepstack = (bool *)vm->is_deepstack_layers.data;
+                for (int i = 0; i < vm->num_layers; i++) {
+                        if (is_deepstack[i] == true)
+                            vm->num_deepstack_layers++;
+                }
 
-		vision_mrope_cache_init(&vm->mrope_cache, num_patches_side, num_patches_side, head_dim, 10000.0f);
-		printf("Vision M-RoPE cache init, num elements: %zu\n", vm->mrope_cache.num_elements);
+                // Build tables for the MAX sequence length
+                const int max_seq_len = num_patches_side * num_patches_side;
+                cache->num_elements = (size_t)max_seq_len * head_dim;
 
-	} break;
+                // Use aligned allocation for future SIMD optimizations
+                size_t size_bytes = cache->num_elements * sizeof(float);
+                cache->cos_table = (float *)aligned_alloc(32, size_bytes);
+                cache->sin_table = (float *)aligned_alloc(32, size_bytes);
+
+                // Check for allocation failure
+                if (!cache->cos_table || !cache->sin_table) {
+                    fprintf(stderr, "Failed to allocate Vision RoPE cache\n");
+                    exit(1);
+                }
+
+        } break;
 	default:
 		printf("%s %s model not defined?\n", __FUNCTION__, def->name);
 		return -1;
