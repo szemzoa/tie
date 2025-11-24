@@ -99,15 +99,6 @@ inline void get_scale_min_k4(int j, const uint8_t *scales, uint8_t *scale, uint8
 	}
 }
 
-void convert_f32_bf16_scalar(const void *src, void *dest, int size)
-{
-	float *S = (float *)src;
-	uint16_t *D = (uint16_t *)dest;
-
-	for (int i = 0; i < size; i++) {
-		D[i] = fp32_to_bf16(S[i]);
-	}
-}
 
 void convert_bf16_f32_scalar(const void *src, void *dest, int size)
 {
@@ -117,11 +108,6 @@ void convert_bf16_f32_scalar(const void *src, void *dest, int size)
 	for (int i = 0; i < size; i++) {
 		D[i] = bf16_to_fp32(S[i]);
 	}
-}
-
-void convert_bf16_bf16_scalar(const void *src, void *dest, int size)
-{
-	memcpy(dest, src, size * sizeof(uint16_t));
 }
 
 void convert_f32_f32_scalar(const void *src, void *dest, int size)
@@ -603,6 +589,92 @@ void store_KV_cache_f32_f32_scalar(struct TIEContext *ctx, int layer_idx, int st
 	}
 }
 
+#if 0
+void store_KV_cache_f32_bf16_scalar(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len)
+{
+	LayerKVCache *cache = &ctx->kv_cache[layer_idx];
+	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
+
+	// The "Ring" size is the model context length
+        int ring_size = ctx->model->seq_length;
+
+	int tokens_written = 0;
+
+	while (tokens_written < batch_len) {
+    		// Calculate where we are logically and physically
+	        int current_logical_pos = start_pos + tokens_written;
+	        int current_physical_pos = current_logical_pos % ring_size; // The Ring Logic
+
+	        // Calculate contiguous chunk size
+	        // How many tokens can we write before hitting the end of the physical buffer?
+	        int space_at_end = ring_size - current_physical_pos;
+	        int tokens_remaining = batch_len - tokens_written;
+
+	        // We write the smaller of the two: either the rest of the batch, or up to the cliff edge
+    		int chunk_len = (tokens_remaining < space_at_end) ? tokens_remaining : space_at_end;
+
+		// Perform the copy for this chunk
+	        long long dest_offset = (long long)current_physical_pos * kv_dim;
+	        long long src_offset = (long long)tokens_written * kv_dim; // Source is always linear [0..batch]
+	        long long num_elements = (long long)chunk_len * kv_dim;
+
+		// Get the raw data pointers from the MemType structs
+		uint16_t *k_cache_data = (uint16_t *)cache->k.data;
+		uint16_t *v_cache_data = (uint16_t *)cache->v.data;
+		float *K_src = (float *)ctx->mem.K.data;
+		float *V_src = (float *)ctx->mem.V.data;
+
+		for (long long i = 0; i < num_elements; i++) {
+			k_cache_data[dest_offset + i] = fp32_to_bf16(K_src[src_offset + i]);
+			v_cache_data[dest_offset + i] = fp32_to_bf16(V_src[src_offset + i]);
+		}
+
+		tokens_written += chunk_len;
+	}
+}
+
+void store_KV_cache_f32_f32_scalar(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len)
+{
+	LayerKVCache *cache = &ctx->kv_cache[layer_idx];
+	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
+
+        // The "Ring" size is the model context length
+        int ring_size = ctx->model->seq_length;
+
+        int tokens_written = 0;
+
+        while (tokens_written < batch_len) {
+                // Calculate where we are logically and physically
+                int current_logical_pos = start_pos + tokens_written;
+                int current_physical_pos = current_logical_pos % ring_size; // The Ring Logic
+
+                // Calculate contiguous chunk size
+                // How many tokens can we write before hitting the end of the physical buffer?
+                int space_at_end = ring_size - current_physical_pos;
+                int tokens_remaining = batch_len - tokens_written;
+
+                // We write the smaller of the two: either the rest of the batch, or up to the cliff edge
+                int chunk_len = (tokens_remaining < space_at_end) ? tokens_remaining : space_at_end;
+
+                // Perform the copy for this chunk
+                long long dest_offset = (long long)current_physical_pos * kv_dim;
+                long long src_offset = (long long)tokens_written * kv_dim; // Source is always linear [0..batch]
+                long long num_elements = (long long)chunk_len * kv_dim;
+
+                // Get the raw data pointers from the MemType structs
+                float *k_cache_data = (float *)cache->k.data;
+                float *v_cache_data = (float *)cache->v.data;
+                float *K_src = (float *)ctx->mem.K.data;
+                float *V_src = (float *)ctx->mem.V.data;
+
+		memcpy(k_cache_data + dest_offset, K_src + src_offset, num_elements * sizeof(float));
+	        memcpy(v_cache_data + dest_offset, V_src + src_offset, num_elements * sizeof(float));
+
+		tokens_written += chunk_len;
+        }
+}
+#endif
+
 // SwiGLU activation FP32, FP32
 void swiglu_activation_f32_f32_scalar(void *gate, const void *up, int size)
 {
@@ -614,55 +686,15 @@ void swiglu_activation_f32_f32_scalar(void *gate, const void *up, int size)
 	}
 }
 
-void get_embedding_row_bf16_bf16_scalar(const Tensor *W, int row_index, void *dest, int embed_dim)
+void swiglu_activation_bf16_bf16_scalar(void *gate_void, const void *up_void, int size)
 {
-	uint16_t *src = (uint16_t *)W->mem.data;
-	long long row_offset = (long long)row_index * embed_dim;
-	uint16_t *d_u16 = (uint16_t *)dest;
+	uint16_t *gate = (uint16_t *)gate_void;
+	const uint16_t *up = (const uint16_t *)up_void;
 
-	for (int i = 0; i < embed_dim; i++) {
-		d_u16[i] = src[row_offset + i];
-	}
-}
-
-void rms_norm_bf16_f32_bf16_scalar(void *O, const void *X, const Tensor *W, int size, float eps)
-{
-	const float *weight = (const float *)W->mem.data;
-	const uint16_t *x_bf16 = (const uint16_t *)X;
-	uint16_t *o_bf16 = (uint16_t *)O;
-
-	// First pass: accumulate sum of squares
-	float ss = 0.0f;
 	for (int i = 0; i < size; i++) {
-		float x = bf16_to_fp32(x_bf16[i]);
-		ss += x * x;
-	}
-
-	float inv_rms = 1.0f / sqrtf(ss / size + eps);
-
-	// Second pass: normalize, apply weight, convert back to bf16
-	for (int i = 0; i < size; i++) {
-		float x = bf16_to_fp32(x_bf16[i]);
-		float o = x * inv_rms * weight[i];
-		o_bf16[i] = fp32_to_bf16_rne(o);
-	}
-}
-
-void rms_norm_bf16_f32_f32_scalar(void *O, const void *X, const Tensor *W, int size, float eps)
-{
-	float *weight = (float *)W->mem.data;
-	uint16_t *x_bf16 = (uint16_t *)X;
-	float *o_f32 = (float *)O;
-	float sum = 0.0f;
-	for (int i = 0; i < size; i++) {
-		float x = bf16_to_fp32(x_bf16[i]);
-		sum += x * x;
-	}
-	//	float rms = sqrtf(sum / size + eps);
-	float inv_rms = 1.0f / sqrtf(sum / size + eps);
-	for (int i = 0; i < size; i++) {
-		//		o_f32[i] = bf16_to_fp32(x_bf16[i]) / rms * weight[i];
-		o_f32[i] = bf16_to_fp32(x_bf16[i]) * inv_rms * weight[i];
+		float gate_f32 = bf16_to_fp32(gate[i]);
+		float up_f32 = bf16_to_fp32(up[i]);
+		gate[i] = fp32_to_bf16_rne(silu_lookup(gate_f32) * up_f32);
 	}
 }
 
@@ -713,41 +745,6 @@ void mat_vec_row_bf16_q4k_f32_scalar(const void *X, const void *w_void, void *O,
 			sum += dot_product_bf16_q4k_scalar(x + j * QK_K, &w_row[j]);
 		}
 		o[i] = sum;
-	}
-}
-
-void mat_vec_row_bf16_q4k_bf16_scalar(const void *X, const void *w_void, void *O, int in_dim, int start_row,
-				      int end_row)
-{
-	const block_q4_k *w = (const block_q4_k *)w_void;
-	const int nb = in_dim / QK_K;
-	const uint16_t *x = (const uint16_t *)X;
-	uint16_t *o = (uint16_t *)O;
-
-	for (int i = start_row; i < end_row; i++) {
-		const block_q4_k *w_row = w + (long long)i * nb;
-		float sum = 0.0f;
-		for (int j = 0; j < nb; j++) {
-			sum += dot_product_bf16_q4k_scalar(x + j * QK_K, &w_row[j]);
-		}
-		o[i] = fp32_to_bf16_rne(sum);
-	}
-}
-
-void mat_vec_row_f32_q4k_bf16_scalar(const void *X, const void *w_void, void *O, int in_dim, int start_row, int end_row)
-{
-	const block_q4_k *w = (const block_q4_k *)w_void;
-	const int nb = in_dim / QK_K;
-	const float *x = (const float *)X;
-	uint16_t *o = (uint16_t *)O;
-
-	for (int i = start_row; i < end_row; i++) {
-		const block_q4_k *w_row = w + (long long)i * nb;
-		float sum = 0.0f;
-		for (int j = 0; j < nb; j++) {
-			sum += dot_product_f32_q4k_scalar(x + j * QK_K, &w_row[j]);
-		}
-		o[i] = fp32_to_bf16_rne(sum);
 	}
 }
 
@@ -830,30 +827,6 @@ void mat_vec_row_bf16_q6k_f32_scalar(const void *X, const void *w_void, void *O,
 	}
 }
 
-void mat_vec_row_bf16_bf16_bf16_scalar(const void *X, const void *w_void, void *O, int in_dim, int start_row,
-				       int end_row)
-{
-	uint16_t *x = (uint16_t *)X;
-	uint16_t *o = (uint16_t *)O;
-	uint16_t *w = (uint16_t *)w_void;
-
-	for (int i = start_row; i < end_row; i++) {
-		float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
-		int j = 0;
-		for (; j <= in_dim - 4; j += 4) {
-			sum0 += bf16_to_fp32(x[j]) * bf16_to_fp32(w[i * in_dim + j]);
-			sum1 += bf16_to_fp32(x[j + 1]) * bf16_to_fp32(w[i * in_dim + j + 1]);
-			sum2 += bf16_to_fp32(x[j + 2]) * bf16_to_fp32(w[i * in_dim + j + 2]);
-			sum3 += bf16_to_fp32(x[j + 3]) * bf16_to_fp32(w[i * in_dim + j + 3]);
-		}
-
-		float sum = sum0 + sum1 + sum2 + sum3;
-		for (; j < in_dim; j++) {
-			sum = fmaf(bf16_to_fp32(x[j]), bf16_to_fp32(w[i * in_dim + j]), sum);
-		}
-		o[i] = fp32_to_bf16_rne(sum);
-	}
-}
 
 void mat_vec_row_bf16_bf16_f32_scalar(const void *X, const void *w_void, void *O, int in_dim, int start_row,
 				      int end_row)
@@ -880,38 +853,18 @@ void mat_vec_row_bf16_bf16_f32_scalar(const void *X, const void *w_void, void *O
 	}
 }
 
-void mat_vec_row_bf16_q6k_bf16_scalar(const void *X, const void *w_void, void *O, int in_dim, int start_row,
-				      int end_row)
+void mat_vec_row_f32_q4k_bf16_scalar(const void *X, const void *w_void, void *O, int in_dim, int start_row, int end_row)
 {
-	const block_q6_k *w = (const block_q6_k *)w_void;
-	const int nb = in_dim / QK_K;
-	const uint16_t *x = (const uint16_t *)X;
-	uint16_t *o = (uint16_t *)O;
-
-	for (int i = start_row; i < end_row; i++) {
-		const block_q6_k *w_row = w + (long long)i * nb;
-		float sum = 0.0f;
-		for (int j = 0; j < nb; j++) {
-			// Explicitly call the scalar version of the dot product
-			sum += dot_product_bf16_q6k_scalar(x + j * QK_K, &w_row[j]);
-		}
-		o[i] = fp32_to_bf16_rne(sum);
-	}
-}
-
-void mat_vec_row_f32_q6k_bf16_scalar(const void *X, const void *w_void, void *O, int in_dim, int start_row, int end_row)
-{
-	const block_q6_k *w = (const block_q6_k *)w_void;
+	const block_q4_k *w = (const block_q4_k *)w_void;
 	const int nb = in_dim / QK_K;
 	const float *x = (const float *)X;
 	uint16_t *o = (uint16_t *)O;
 
 	for (int i = start_row; i < end_row; i++) {
-		const block_q6_k *w_row = w + (long long)i * nb;
+		const block_q4_k *w_row = w + (long long)i * nb;
 		float sum = 0.0f;
 		for (int j = 0; j < nb; j++) {
-			// Explicitly call the scalar version of the dot product
-			sum += dot_product_f32_q6k_scalar(x + j * QK_K, &w_row[j]);
+			sum += dot_product_f32_q4k_scalar(x + j * QK_K, &w_row[j]);
 		}
 		o[i] = fp32_to_bf16_rne(sum);
 	}
@@ -990,50 +943,6 @@ void dequantize_row_q6_k_bf16_scalar(const void *__restrict__ q_void, uint16_t *
 	}
 }
 
-void get_embedding_row_q4k_bf16_scalar(const Tensor *W, int row_index, void *dest, int embed_dim)
-{
-	int blocks_per_row = embed_dim / QK_K;
-	block_q4_k *src = (block_q4_k *)W->mem.data;
-	long long row_block_offset = (long long)row_index * blocks_per_row;
-
-	for (int block_idx = 0; block_idx < blocks_per_row; block_idx++)
-		dequantize_row_q4_k_bf16_scalar(&src[row_block_offset + block_idx], (uint16_t *)dest + block_idx * QK_K,
-						QK_K);
-}
-
-void get_embedding_row_q6k_bf16_scalar(const Tensor *W, int row_index, void *dest, int embed_dim)
-{
-	int blocks_per_row = embed_dim / QK_K;
-
-	block_q6_k *src = (block_q6_k *)W->mem.data;
-	long long row_block_offset = (long long)row_index * blocks_per_row;
-
-	for (int block_idx = 0; block_idx < blocks_per_row; block_idx++) {
-		dequantize_row_q6_k_bf16_scalar(&src[row_block_offset + block_idx], (uint16_t *)dest + block_idx * QK_K,
-						QK_K);
-	}
-}
-
-void apply_residual_bf16_f32_scalar(void *acc_void, const void *residual_void, int size)
-{
-	float *acc = (float *)acc_void;
-	uint16_t *residual = (uint16_t *)residual_void;
-
-	for (int i = 0; i < size; i++) {
-		acc[i] = fmaf(bf16_to_fp32(residual[i]), 1.0f, acc[i]);
-	}
-}
-
-void apply_residual_bf16_bf16_scalar(void *acc_void, const void *residual_void, int size)
-{
-	uint16_t *acc = (uint16_t *)acc_void;
-	uint16_t *residual = (uint16_t *)residual_void;
-
-	for (int i = 0; i < size; i++) {
-		acc[i] = fp32_to_bf16_rne(fmaf(bf16_to_fp32(residual[i]), 1.0f, bf16_to_fp32(acc[i])));
-	}
-}
-
 void apply_residual_f32_bf16_scalar(void *acc_void, const void *residual_void, int size)
 {
 	uint16_t *acc = (uint16_t *)acc_void;
@@ -1043,69 +952,6 @@ void apply_residual_f32_bf16_scalar(void *acc_void, const void *residual_void, i
 	for (int i = 0; i < size; i++) {
 		acc_32 = fmaf(residual[i], 1.0f, bf16_to_fp32(acc[i]));
 		acc[i] = fp32_to_bf16_rne(acc_32);
-	}
-}
-
-void accumulate_weighted_V_bf16_bf16_scalar(void *O, float weight, const void *V, int size)
-{
-	uint16_t *out = (uint16_t *)O;
-	uint16_t *v = (uint16_t *)V;
-
-	for (int i = 0; i < size; i++) {
-		out[i] = fp32_to_bf16_rne(fmaf(weight, bf16_to_fp32(v[i]), bf16_to_fp32(out[i])));
-	}
-}
-
-void swiglu_activation_bf16_bf16_scalar(void *gate_void, const void *up_void, int size)
-{
-	uint16_t *gate = (uint16_t *)gate_void;
-	const uint16_t *up = (const uint16_t *)up_void;
-
-	for (int i = 0; i < size; i++) {
-		float gate_f32 = bf16_to_fp32(gate[i]);
-		float up_f32 = bf16_to_fp32(up[i]);
-		gate[i] = fp32_to_bf16_rne(silu_lookup(gate_f32) * up_f32);
-	}
-}
-
-void store_KV_cache_bf16_bf16_scalar(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len)
-{
-	LayerKVCache *cache = &ctx->kv_cache[layer_idx];
-	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
-	long long cache_offset = (long long)start_pos * kv_dim;
-	long long batch_size_elements = (long long)batch_len * kv_dim;
-
-	// Get the raw data pointers from the MemType structs
-	uint16_t *k_cache_data = (uint16_t *)cache->k.data;
-	uint16_t *v_cache_data = (uint16_t *)cache->v.data;
-	uint16_t *K_mem_data = (uint16_t *)ctx->mem.K.data;
-	uint16_t *V_mem_data = (uint16_t *)ctx->mem.V.data;
-
-	for (long long i = 0; i < batch_size_elements; i++) {
-		k_cache_data[cache_offset + i] = K_mem_data[i];
-		v_cache_data[cache_offset + i] = V_mem_data[i];
-	}
-}
-
-void apply_rope_cache_bf16_scalar(RopeCacheType *rope_cache, void *X, int pos, int head_dim)
-{
-	int h_dim_half = head_dim / 2;
-	uint16_t *x = (uint16_t *)X;
-
-	const float *sin_vals = rope_cache->sin + pos * h_dim_half;
-	const float *cos_vals = rope_cache->cos + pos * h_dim_half;
-
-	for (int i = 0; i < h_dim_half; ++i) {
-		float x_real = bf16_to_fp32(x[i]);
-		float x_imag = bf16_to_fp32(x[i + h_dim_half]);
-		float sin_val = sin_vals[i];
-		float cos_val = cos_vals[i];
-
-		float new_real = x_real * cos_val - x_imag * sin_val;
-		float new_imag = x_real * sin_val + x_imag * cos_val;
-
-		x[i] = fp32_to_bf16_rne(new_real);
-		x[i + h_dim_half] = fp32_to_bf16_rne(new_imag);
 	}
 }
 
@@ -1219,37 +1065,62 @@ void dispatch_conv_2d_scalar(MemType *dest, const MemType *src_image, const Tens
 
 void apply_mrope_cache_f32_scalar(RopeCacheType *rope_cache, void *X, int pos, int head_dim)
 {
-    float *x = (float *)X;
-    int h_dim_half = head_dim / 2; // e.g., 64
+	float *x = (float *)X;
+	int h_dim_half = head_dim / 2;
 
-    if (pos >= rope_cache->max_pos) {
-        fprintf(stderr, "Position %d exceeds rope cache max_pos %d\n", pos, rope_cache->max_pos);
-        return;
-    }
+	if (pos >= rope_cache->max_pos) {
+		fprintf(stderr, "Position %d exceeds rope cache max_pos %d\n", pos, rope_cache->max_pos);
+		return;
+	}
 
-    // --- START FIX ---
-    // Read from the head_dim-wide table, not head_dim/2
-    const float *cos_vals = (const float *)rope_cache->cos + (size_t)pos * head_dim;
-    const float *sin_vals = (const float *)rope_cache->sin + (size_t)pos * head_dim;
-    // --- END FIX ---
+	// Read from the head_dim-wide table
+	const float *cos_vals = (const float *)rope_cache->cos + (size_t)pos * head_dim;
+	const float *sin_vals = (const float *)rope_cache->sin + (size_t)pos * head_dim;
 
-    // This loop implements: q_embed = (q * cos) + (rotate_half(q) * sin)
-    //
-    for (int i = 0; i < h_dim_half; i++) {
-        float x_real = x[i];
-        float x_imag = x[i + h_dim_half];
+	// This loop implements: q_embed = (q * cos) + (rotate_half(q) * sin)
+	for (int i = 0; i < h_dim_half; i++) {
+		float x_real = x[i];
+		float x_imag = x[i + h_dim_half];
 
-        // cos_vals[i] is from the first half of the table
-        // cos_vals[i + h_dim_half] is from the second half
-        float cos_real = cos_vals[i];
-        float cos_imag = cos_vals[i + h_dim_half];
-        float sin_real = sin_vals[i];
-        float sin_imag = sin_vals[i + h_dim_half];
+		// cos_vals[i] is from the first half of the table
+		// cos_vals[i + h_dim_half] is from the second half
+		float cos_real = cos_vals[i];
+		float cos_imag = cos_vals[i + h_dim_half];
+		float sin_real = sin_vals[i];
+		float sin_imag = sin_vals[i + h_dim_half];
 
-        // x[i] = (x_real * cos_real) + ((-x_imag) * sin_real)
-        x[i] = fmaf(-x_imag, sin_real, x_real * cos_real);
-        
-        // x[i + h_dim_half] = (x_imag * cos_imag) + (x_real * sin_imag)
-        x[i + h_dim_half] = fmaf(x_real, sin_imag, x_imag * cos_imag);
-    }
+		// x[i] = (x_real * cos_real) + ((-x_imag) * sin_real)
+		x[i] = fmaf(-x_imag, sin_real, x_real * cos_real);
+
+		// x[i + h_dim_half] = (x_imag * cos_imag) + (x_real * sin_imag)
+		x[i + h_dim_half] = fmaf(x_real, sin_imag, x_imag * cos_imag);
+	}
+}
+
+void layer_norm_f32_f32_f32_f32_scalar(MemType *dest, const MemType *src, const Tensor *weight, const Tensor *bias, int size, float eps)
+{
+	const float *src_data = (const float *)src->data;
+	float *dest_data = (float *)dest->data;
+
+	float sum = 0.0;
+	for (int i = 0; i < size; ++i) {
+		sum += src_data[i];
+	}
+	const float mean = sum / size;
+
+	float sum_sq_diff = 0.0;
+	for (int i = 0; i < size; ++i) {
+		float diff = src_data[i] - mean;
+		sum_sq_diff = fmaf(diff, diff, sum_sq_diff);
+	}
+	const float variance = sum_sq_diff / size;
+	const float inv_std = 1.0f / sqrtf(variance + eps);
+
+	const float *weight_data = (const float *)weight->mem.data;
+	const float *bias_data = (const float *)bias->mem.data;
+
+	for (int i = 0; i < size; ++i) {
+		float normalized_val = (src_data[i] - mean) * inv_std;
+		dest_data[i] = fmaf(normalized_val, weight_data[i], bias_data[i]);
+	}
 }

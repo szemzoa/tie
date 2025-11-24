@@ -20,6 +20,8 @@ typedef void (*swiglu_fn)(void *gate, const void *up, int size);
 typedef void (*geglu_fn)(void *gate, const void *up, int size);
 typedef void (*convert_fn)(const void *src, void *dest, int size);
 typedef float (*dot_product_fn)(const void *vec_a, const void *vec_b, int size);
+typedef void (*layer_norm_fn)(MemType *dest, const MemType *src, const Tensor *weight, const Tensor *bias, int size, float eps);
+
 
 typedef struct {
 	GGMLType input_type;
@@ -35,6 +37,15 @@ typedef struct {
 	rms_norm_fn func;
 	int accel;
 } rms_norm_dispatch_t;
+
+typedef struct {
+	GGMLType input_type;
+	GGMLType output_type;
+	GGMLType tensor_type;
+	GGMLType bias_type;
+	layer_norm_fn func;
+	int accel;
+} layer_norm_dispatch_t;
 
 typedef struct {
 	const void *X;
@@ -164,5 +175,7 @@ extern void dispatch_geglu_activation(MemType *gate, MemType *up, int size);
 extern void dispatch_convert(const MemType *src, MemType *dest, int size);
 
 extern float dispatch_dot_product(const MemType *vec_a, const MemType *vec_b, int size);
+
+extern void dispatch_layer_norm(MemType *dest, const MemType *src, const Tensor *weight, const Tensor *bias, int size, float eps);
 
 #endif

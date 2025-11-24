@@ -8,6 +8,7 @@
 #include "vision.h"
 #include "tokenize.h"
 #include "threadpool.h"
+#include "tools.h"
 
 
 static const TensorDef QWEN3_GLOBAL_TENSORS[] = {
@@ -67,9 +68,6 @@ static const BufferDef QWEN3_BUFFERS[] = {
 	{offsetof(MemLayout, ffn_down_output), SIZE_EMBED_DIM, INTERNAL_MEMORY_TYPE, FLAG_NONE},
 	{offsetof(MemLayout, logits), SIZE_VOCAB_SIZE, GGML_TYPE_F32, FLAG_NONE},
 	{offsetof(MemLayout, pos_ids), SIZE_POS_IDS, GGML_TYPE_I32, FLAG_NONE},
-
-//	{offsetof(MemLayout, rope_sin_global), SIZE_ROPE_SIN, GGML_TYPE_F32, FLAG_NONE},
-//	{offsetof(MemLayout, rope_cos_global), SIZE_ROPE_COS, GGML_TYPE_F32, FLAG_NONE},
 };
 
 static const TokenizeDef QWEN3_TOKENIZE_DEF = {
@@ -89,7 +87,6 @@ ModelDef QWEN3_DEF = {
 			.newline_token_id = 198,
 			.role_user_token_id = 872,
 			.role_model_token_id = 77091,
-
 			.vision_start_token_id = -1,
 		        .vision_end_token_id   = -1,
 		        .vision_embed_token_id = -1,
@@ -97,9 +94,9 @@ ModelDef QWEN3_DEF = {
 		},
 	.interface =
 		{
+//			.build_system_prompt = build_system_prompt_qwen3,
 			.tokenize_prompt = tokenize_bpe,
-			.process_prompt = process_prompt_standard,
-			.token_out = token_out_utf8_stream,
+			.decode_token = decode_token_bpe,
 			.prepare_next_token = prepare_next_token_standard,
 			.embedding_scale = NULL,
 			.transformer_layer = transformer_layer_qwen3,
@@ -120,16 +117,15 @@ ModelDef QWEN3_MOE_DEF = {
 			.newline_token_id = 198,
 			.role_user_token_id = 872,
 			.role_model_token_id = 77091,
-
 			.vision_start_token_id = -1,
 		        .vision_end_token_id   = -1,
 		        .vision_embed_token_id = -1,
 		},
 	.interface =
 		{
+//			.build_system_prompt = build_system_prompt_qwen3,
 			.tokenize_prompt = tokenize_bpe,
-			.process_prompt = process_prompt_standard,
-			.token_out = token_out_utf8_stream,
+			.decode_token = decode_token_bpe,
 			.prepare_next_token = prepare_next_token_standard,
 			.embedding_scale = NULL,
 			.transformer_layer = transformer_layer_qwen3,
@@ -149,19 +145,18 @@ ModelDef QWEN3VL_DEF = {
 			.newline_token_id = 198,
 			.role_user_token_id = 872,
 			.role_model_token_id = 77091,
-
 			.vision_start_token_id = 151652, // <|vision_start|>
 		        .vision_end_token_id   = 151653, // <|vision_end|>
 		        .vision_embed_token_id = 151654, // <|vision_pad|>
 		},
 	.interface =
 		{
+//			.build_system_prompt = build_system_prompt_qwen3,
 			.tokenize_prompt = tokenize_bpe,
-			.process_prompt = process_prompt_standard,
-			.token_out = token_out_utf8_stream,
+			.decode_token = decode_token_bpe,
 			.prepare_next_token = prepare_next_token_standard,
 			.embedding_scale = NULL,
-			.transformer_layer = transformer_layer_qwen3vl,
+			.transformer_layer = transformer_layer_qwen3,
 			.build_vision_tokens = build_vision_tokens_qwen3vl,
 			.process_image_vision = process_image_vision_qwen3vl,
 			.build_rope_cache = build_rope_cache_dynamic,
@@ -181,19 +176,18 @@ ModelDef QWEN3VL_MOE_DEF = {
 			.newline_token_id = 198,
 			.role_user_token_id = 872,
 			.role_model_token_id = 77091,
-
 			.vision_start_token_id = 151652, // <|vision_start|>
 		        .vision_end_token_id   = 151653, // <|vision_end|>
 		        .vision_embed_token_id = 151654, // <|vision_pad|>
 		},
 	.interface =
 		{
+//			.build_system_prompt = build_system_prompt_qwen3,
 			.tokenize_prompt = tokenize_bpe,
-			.process_prompt = process_prompt_standard,
-			.token_out = token_out_utf8_stream,
+			.decode_token = decode_token_bpe,
 			.prepare_next_token = prepare_next_token_standard,
 			.embedding_scale = NULL,
-			.transformer_layer = transformer_layer_qwen3vl,
+			.transformer_layer = transformer_layer_qwen3,
 			.build_vision_tokens = build_vision_tokens_qwen3vl,
 			.process_image_vision = process_image_vision_qwen3vl,
 			.build_rope_cache = build_rope_cache_dynamic,
@@ -241,11 +235,6 @@ static const BufferDef GEMMA3_BUFFERS[] = {
 	{offsetof(MemLayout, ffn_down_output), SIZE_EMBED_DIM, INTERNAL_MEMORY_TYPE, FLAG_NONE},
 	{offsetof(MemLayout, logits), SIZE_VOCAB_SIZE, GGML_TYPE_F32, FLAG_NONE},
 	{offsetof(MemLayout, residual_stratch), SIZE_EMBED_DIM, GGML_TYPE_F32, FLAG_NONE},
-
-//	{offsetof(MemLayout, rope_sin_global), SIZE_ROPE_SIN, GGML_TYPE_F32, FLAG_NONE},
-//	{offsetof(MemLayout, rope_cos_global), SIZE_ROPE_COS, GGML_TYPE_F32, FLAG_NONE},
-//	{offsetof(MemLayout, rope_sin_local), SIZE_ROPE_SIN, GGML_TYPE_F32, FLAG_NONE},
-//	{offsetof(MemLayout, rope_cos_local), SIZE_ROPE_COS, GGML_TYPE_F32, FLAG_NONE},
 };
 
 static const TokenizeDef GEMMA3_TOKENIZE_DEF = {
@@ -265,7 +254,6 @@ ModelDef GEMMA3_DEF = {
 			.newline_token_id = 107,
 			.role_user_token_id = 2364,
 			.role_model_token_id = 4368,
-
 			.double_newline_token_id = 108,
 			.vision_start_token_id = 255999,
 			.vision_end_token_id = 256000,
@@ -274,8 +262,7 @@ ModelDef GEMMA3_DEF = {
 	.interface =
 		{
 			.tokenize_prompt = tokenize_sp,
-			.process_prompt = process_prompt_standard,
-			.token_out = token_out_sp,
+			.decode_token = decode_token_sp,
 			.prepare_next_token = prepare_next_token_standard,
 			.embedding_scale = embedding_scale_gemma3,
 			.transformer_layer = transformer_layer_gemma3,
@@ -353,11 +340,6 @@ static const BufferDef GEMMA3N_BUFFERS[] = {
 	{offsetof(MemLayout, logits), SIZE_VOCAB_SIZE, GGML_TYPE_F32, FLAG_NONE},
 	{offsetof(MemLayout, residual_stratch), SIZE_EMBED_DIM, GGML_TYPE_F32, FLAG_NONE},
 	{offsetof(MemLayout, per_layer_inputs), SIZE_NUM_LAYERS_X_PLI_DIM, GGML_TYPE_F32, FLAG_NONE},
-
-//	{offsetof(MemLayout, rope_sin_global), SIZE_ROPE_SIN, GGML_TYPE_F32, FLAG_NONE},
-//	{offsetof(MemLayout, rope_cos_global), SIZE_ROPE_COS, GGML_TYPE_F32, FLAG_NONE},
-//	{offsetof(MemLayout, rope_sin_local), SIZE_ROPE_SIN, GGML_TYPE_F32, FLAG_NONE},
-//	{offsetof(MemLayout, rope_cos_local), SIZE_ROPE_COS, GGML_TYPE_F32, FLAG_NONE},
 };
 
 static const TokenizeDef GEMMA3N_TOKENIZE_DEF = {
@@ -378,7 +360,6 @@ ModelDef GEMMA3N_DEF = {
 			.role_user_token_id = 2364,
 			.role_model_token_id = 4368,
 			.final_logit_softcap = 30.0,
-
 			.vision_start_token_id = -1,
 		        .vision_end_token_id   = -1,
 		        .vision_embed_token_id = -1,
@@ -387,7 +368,7 @@ ModelDef GEMMA3N_DEF = {
 		{
 			.tokenize_prompt = tokenize_sp,
 			.process_prompt = process_prompt_gemma3n,
-			.token_out = token_out_sp,
+			.decode_token = decode_token_sp,
 			.prepare_next_token = prepare_next_token_gemma3n,
 			.embedding_scale = embedding_scale_gemma3,
 			.transformer_layer = transformer_layer_gemma3n,
@@ -531,7 +512,7 @@ ModelDef QWEN3VL_CLIP_DEF = {
 	.name = "Qwen3-VL-clip",
 	.params =
 		{
-			.proj_scale_factor = 1,
+//			.proj_scale_factor = 1,
 		},
 	.interface = {},
 	DECLARE_VISION_MODEL_DEF(QWEN3VL_CLIP)

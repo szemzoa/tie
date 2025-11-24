@@ -22,11 +22,6 @@ enum {
 	VISION_PROJECTOR_QWEN3VL,
 };
 
-struct arch_t {
-	const char *name;
-	int id;
-};
-
 typedef enum {
 	FLAG_NONE = 0,
 	FLAG_OPTIONAL = 1 << 0,
@@ -87,6 +82,7 @@ typedef struct {
 
 typedef struct {
 	uint8_t is_moe;
+
 	int sot_token_id;
 	int eot_token_id;
 	int eos_token_id;
@@ -108,16 +104,19 @@ typedef struct {
 } ModelParams;
 
 typedef struct {
+	char *(*build_system_prompt)(struct TIEContext *ctx);
+
 	int *(*tokenize_prompt)(struct TIEContext *ctx, const char *prompt, size_t *num_tokens);
 	void (*process_prompt)(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len);
-	void (*token_out)(struct TIEContext *ctx, int token_id);
+
+	int (*decode_token)(struct TIEContext *ctx, int token, char *buf, int buf_size);
+
 	void (*prepare_next_token)(struct TIEContext *ctx, int next_token);
 	void (*embedding_scale)(struct TIEContext *ctx, MemType *hidden_state_slice);
 	int (*transformer_layer)(struct TIEContext *ctx, int layer_idx, int batch_len);
 
 	int (*build_vision_tokens)(struct TIEContext *ctx, int *token_buf, int buf_pos);
 	MemType *(*process_image_vision)(struct TIEContext *ctx);
-
 	void (*build_rope_cache)(struct TIEContext *ctx, size_t seq_len);
 } ModelInterface;
 
@@ -126,7 +125,6 @@ typedef struct {
 	int token_load_merges;
 	int token_load_scores;
 } TokenizeDef;
-
 
 typedef struct {
 	int arch;
@@ -176,20 +174,10 @@ typedef struct {
 	uint64_t merges_size;
 	int seq_length;
 
-	int sot_token_id; /* start of turn */
-	int eot_token_id; /* end of turn */
-	int eos_token_id; /* end of seq */
 	int bos_token_id; /* begin of seq */
 	int unk_token_id;
 	int pad_token_id;
-	int role_user_token_id;
-	int role_model_token_id;
-	int newline_token_id;
-
-	int double_newline_token_id;
-	int vision_start_token_id;
-	int vision_end_token_id;
-	int vision_embed_token_id;
+	int eos_token_id; /* end of seq */
 
 	int add_bos_token;
 	int add_eos_token;
@@ -238,27 +226,19 @@ typedef struct {
 
 typedef struct {
 	ModelDef *def;
-
 	ModelInterface interface;
 	int has_vision_encoder;
 
 	int projection_dim;
 	int image_size;
 	int patch_size;
-
 	int embed_dim;
 	int ffn_dim;
 	int num_layers;
 	int num_heads;
 	float norm_eps;
 
-	int proj_scale_factor;	/* Gemma-3 */
 	int spatial_merge_size; /* Qwen3-VL */
-
-	int soi_token_id;
-	int eoi_token_id;
-	int image_soft_token_id;
-
 	int num_deepstack_layers;	/* Qwen3-VL */
 	ModelArray is_deepstack_layers; /* Qwen3-VL */
 
@@ -275,7 +255,6 @@ typedef struct {
 	Tensor position_embd;
 	Tensor post_ln_bias;
 	Tensor post_ln;
-
 	/* Qwen3-VL */
 	Tensor mm_0_bias;
 	Tensor mm_0_weight;
@@ -287,6 +266,12 @@ typedef struct {
 
 	MRopeCacheType mrope_cache;
 } VisionModel;
+
+typedef struct {
+	const char	*name;
+	int 		id;
+	ModelDef 	*def;
+} ModelArch;
 
 extern ModelDef *find_model_def(struct GGUFModel *gguf_model);
 

@@ -8,160 +8,32 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 #include <locale.h>
 
 #include "main.h"
 #include "threadpool.h"
-#include "math_dispatch.h"
 #include "model.h"
 #include "engine.h"
 #include "predict.h"
 #include "tokenize.h"
 #include "version.h"
 #include "vision.h"
-
-#ifdef CONFIG_ENABLE_AVX2
-#include <immintrin.h>
-#endif
-
-const char *system_prompt_with_tools =
-	"<|im_start|>system\n"
-	"You may call one or more functions to assist with the user query.\n"
-	"You are provided with function signatures within <tools></tools> XML tags:\n"
-	"<tools>\n"
-	"{\n"
-	"\"name\": \"set_lamp_state\",\n"
-	"\"description\": \"Control a smart lamp\",\n"
-	"\"parameters\": {\n"
-	"\"type\": \"object\",\n"
-	"\"properties\": {\n"
-	"\"state\": {\n"
-	"\"type\": \"string\",\n"
-	"\"enum\": [\"on\", \"off\"],\n"
-	"\"description\": \"Turn the lamp on or off\"\n"
-	"}\n"
-	"},\n"
-	"\"required\": [\"state\"]\n"
-	"}\n"
-	"}\n"
-	"</tools>\n"
-	"For each function call, return a json object with function name and arguments "
-	"within <tool_call></tool_call> XML tags:\n"
-	"<tool_call>\n"
-	"{\"name\": <function-name>, \"arguments\": <args-json-object>}\n"
-	"</tool_call>\n"
-	"<|im_end|>\n";
-
-static char *set_lamp_state(const char *location);
-
-struct tool_entry_t tool_calls[] = {{
-					    .name = "set_lamp_state",
-					    .func = set_lamp_state,
-				    },
-				    {.name = NULL, .func = NULL}};
+#include "math_dispatch.h"
+#include "tools.h"
 
 
-static char *set_lamp_state(const char *state)
+// Architecture Helpers
+static void handle_model_specific_post_step(struct TIEContext *ctx, int step, size_t prompt_len)
 {
-	static char tool_result[256];
-	snprintf(tool_result, sizeof(tool_result), "{\"state\": \"%s\"}", state);
-	return tool_result;
-}
-
-int tool_call_init(struct TIEContext *ctx, struct tool_call_t *tool_call)
-{
-	tool_call->token_start = vocab_lookup_token_id(ctx->tokenizer.root, "<tool_call>", 11);
-	tool_call->token_end = vocab_lookup_token_id(ctx->tokenizer.root, "</tool_call>", 12);
-	tool_call->len = 0;
-	tool_call->buffer[0] = '\0';
-	tool_call->state = TOOL_CALL_STATE_IDLE;
-	tool_call->result = NULL;
-
-	return 0;
-}
-
-char *execute_tool_from_buffer(char *tool_call_buffer)
-{
-	printf("--- Tool Call Detected ---\n");
-	replace_g_spaces(tool_call_buffer);
-	printf("Raw Call: %s\n", tool_call_buffer);
-
-	const char *name_field = "\"name\": \"";
-	const char *args_field = "\"state\": \"";
-
-	char function_name[64] = {0};
-	char state[128] = {0};
-
-	const char *name_start = strstr(tool_call_buffer, name_field);
-	if (name_start) {
-		sscanf(name_start + strlen(name_field), "%[^\"]", function_name);
+	if (ctx->gguf_text->arch == ARCH_GEMMA3N) {
+		// For the first generation step, process the LAST token of the prompt.
+		// For subsequent steps, buffer contains 1 token.
+		size_t n_tokens_in_buffer = (step == 0) ? prompt_len : 1;
+		post_process_altup_states(ctx, &ctx->mem.hidden_state, ctx->mem.altup_hidden_states,
+					  n_tokens_in_buffer);
 	}
-
-	const char *args_start = strstr(tool_call_buffer, args_field);
-	if (args_start) {
-		sscanf(args_start + strlen(args_field), "%[^\"]", state);
-	}
-
-	printf("Function: '%s', State: '%s'\n", function_name, state);
-
-	char *tool_result = NULL;
-	for (int i = 0; tool_calls[i].name != NULL; i++) {
-		if (strcmp(tool_calls[i].name, function_name) == 0) {
-			tool_result = tool_calls[i].func(state);
-			goto _tool_call_found;
-		}
-	}
-	tool_result = "{\"error\": \"Unknown tool requested.\"}";
-
-_tool_call_found:
-	printf("Tool Result: %s\n", tool_result);
-	return tool_result;
-}
-
-int tool_call_handler(struct TIEContext *ctx, struct tool_call_t *tool_call, int token)
-{
-	switch (tool_call->state) {
-	case TOOL_CALL_STATE_UNINITIALIZED:
-		break;
-
-	case TOOL_CALL_STATE_IDLE:
-		if (token != tool_call->token_start)
-			break;
-
-		tool_call->state = TOOL_CALL_STATE_PROCESSING;
-		break;
-
-	case TOOL_CALL_STATE_PROCESSING:
-		if (token != tool_call->token_end) {
-			const char *token_str = get_token_string(ctx, token);
-			int token_len = get_token_string_length(ctx, token);
-			if (tool_call->len + token_len < TOOL_CALL_BUFFER_SIZE) {
-				memcpy(tool_call->buffer + tool_call->len, token_str, token_len);
-				tool_call->len += token_len;
-			}
-			break;
-		}
-
-		tool_call->buffer[tool_call->len] = '\0';
-		tool_call->state = TOOL_CALL_STATE_END;
-		break;
-
-	case TOOL_CALL_STATE_END:
-		if (token == ctx->model->eos_token_id) {
-			tool_call->result = execute_tool_from_buffer(tool_call->buffer);
-		}
-		tool_call->len = 0;
-		tool_call->buffer[0] = '\0';
-		tool_call->state = TOOL_CALL_STATE_IDLE;
-		break;
-	}
-
-	return 0;
 }
 
 int64_t elapsed_time_us(const struct timespec after, const struct timespec before)
@@ -172,23 +44,24 @@ int64_t elapsed_time_us(const struct timespec after, const struct timespec befor
 
 void generate_output(struct TIEContext *ctx, int current_token)
 {
-	if (current_token != ctx->model->eos_token_id)
-		ctx->model->interface.token_out(ctx, current_token);
+	ModelDef *def = ctx->model->def;
 
-	fflush(stdout);
-}
+	if (current_token == def->params.eos_token_id)
+		return;
 
-void read_user_input(char *input_buf, size_t buf_size)
-{
-	printf("You: ");
-	if (!fgets(input_buf, buf_size, stdin)) {
-		input_buf[0] = '\0';
+	char piece[256]; // Sufficient for one token
+
+	int len = ctx->model->interface.decode_token(ctx, current_token, piece, sizeof(piece));
+
+	if (len > 0) {
+		fwrite(piece, 1, len, stdout);
+		fflush(stdout);
 	}
-	input_buf[strcspn(input_buf, "\n")] = 0;
 }
 
 int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf, bool has_image, size_t *num_tokens)
 {
+	ModelDef *def = ctx->model->def;
 	size_t user_text_token_count = 0;
 
 	// Tokenize the actual user input text
@@ -211,9 +84,9 @@ int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf,
 	}
 
 	// Start of User Turn
-	prompt_tokens[prompt_len++] = ctx->model->sot_token_id;
-	prompt_tokens[prompt_len++] = ctx->model->role_user_token_id;
-	prompt_tokens[prompt_len++] = ctx->model->newline_token_id;
+	prompt_tokens[prompt_len++] = def->params.sot_token_id;
+	prompt_tokens[prompt_len++] = def->params.role_user_token_id;
+	prompt_tokens[prompt_len++] = def->params.newline_token_id;
 
 	// User's Text Message
 	memcpy(&prompt_tokens[prompt_len], user_text_tokens, user_text_token_count * sizeof(int));
@@ -235,11 +108,11 @@ int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf,
 	}
 
 	// End of User Turn & Start of Model Turn
-	prompt_tokens[prompt_len++] = ctx->model->eot_token_id;
-	prompt_tokens[prompt_len++] = ctx->model->newline_token_id;
-	prompt_tokens[prompt_len++] = ctx->model->sot_token_id;
-	prompt_tokens[prompt_len++] = ctx->model->role_model_token_id;
-	prompt_tokens[prompt_len++] = ctx->model->newline_token_id;
+	prompt_tokens[prompt_len++] = def->params.eot_token_id;
+	prompt_tokens[prompt_len++] = def->params.newline_token_id;
+	prompt_tokens[prompt_len++] = def->params.sot_token_id;
+	prompt_tokens[prompt_len++] = def->params.role_model_token_id;
+	prompt_tokens[prompt_len++] = def->params.newline_token_id;
 
 	free(user_text_tokens);
 	*num_tokens = prompt_len;
@@ -263,406 +136,367 @@ int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf,
 	return prompt_tokens;
 }
 
-void run_multimodal_prompt(struct TIEContext *ctx, int *prompt_tokens, int prompt_len, int has_image)
+// Prefill (Process Prompt & Image)
+int engine_prefill(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len, bool has_image)
 {
+	struct timespec start, end;
+	clock_gettime(CLOCK_REALTIME, &start);
+
+	ModelDef *def = ctx->model->def;
 	const int embed_dim = ctx->model->embed_dim;
 	size_t current_pos = 0;
 	size_t image_embed_idx = 0;
 	MemType *image_embeddings = NULL;
-	void (*embedding_scale_func)(struct TIEContext *, MemType *) = ctx->model->interface.embedding_scale;
 
-	// TODO
-	if (ctx->gguf_text->arch == ARCH_GEMMA3N) {
-		process_prompt_gemma3n(ctx, prompt_tokens, prompt_len);
-		return;
+	printf("--- Prefill Start: pos %u, len %zu ---\n", ctx->kv_pos, prompt_len);
+
+	// Custom Prompt Processor (if defined)
+	if (ctx->model->interface.process_prompt) {
+		ctx->model->interface.process_prompt(ctx, prompt_tokens, prompt_len);
+		return 0;
 	}
 
-	if (has_image == 1) {
-
+	// Process Vision Encoder
+	if (has_image) {
+		printf("Processing image");
+		fflush(stdout);
 		if (ctx->model->interface.process_image_vision) {
-			// Call the model-specific function
 			image_embeddings = ctx->model->interface.process_image_vision(ctx);
-		} else {
-			fprintf(stderr, "ERROR: Model does not support vision, but an image was provided.\n");
-			return;
 		}
-
-		if (image_embeddings == NULL)
-			return;
+		if (!image_embeddings) {
+			fprintf(stderr, " [Failed]\n");
+			return -1;
+		}
+		printf(" [Done]\n");
 	}
 
+	// Embedding Lookup Loop
 	for (size_t i = 0; i < prompt_len; ++i) {
 		int token_id = prompt_tokens[i];
-
 		MemType dest_slice = mem_slice(&ctx->mem.hidden_state, current_pos * embed_dim);
 
-		if (token_id == ctx->model->vision_embed_token_id) {
-			// This is an image placeholder, copy the corresponding embedding slice
+		if (has_image && token_id == def->params.vision_embed_token_id) {
+			// Copy image embedding
 			MemType image_src_slice = mem_slice(image_embeddings, image_embed_idx * embed_dim);
 			memcpy(dest_slice.data, image_src_slice.data, embed_dim * sizeof(float));
 			image_embed_idx++;
 		} else {
-
-			// This is a normal text token, look it up and scale it
+			// Standard text embedding
 			dispatch_embedding_row(&ctx->model->token_embd, token_id, &dest_slice, embed_dim);
-
-			if (embedding_scale_func) {
-				embedding_scale_func(ctx, &dest_slice);
+			if (ctx->model->interface.embedding_scale) {
+				ctx->model->interface.embedding_scale(ctx, &dest_slice);
 			}
 		}
-
 		current_pos++;
 	}
 
-	printf("--- Multimodal Prompt Processing at pos: %u (%zu tokens) ---\n", ctx->kv_pos, current_pos);
+	// Run Transformer Layers (Batch Processing)
 	process_embeddings(ctx, &ctx->mem.hidden_state, current_pos);
-	printf("--- Multimodal Prompt Processing Complete ---\n");
+
+	clock_gettime(CLOCK_REALTIME, &end);
+	printf("--- Prefill Complete: %llu ms ---\n", elapsed_time_us(end, start) / 1000);
+	return 0;
 }
 
-void generate_interactive(struct TIEContext *ctx, int max_new_tokens, int has_image)
+// Decode (Generate Tokens)
+// Returns the number of tokens generated
+int engine_decode(struct TIEContext *ctx, int max_new_tokens, int *out_tokens, size_t prompt_len)
 {
-	char input_buf[2048];
-	char prompt_buf[4096];
 	struct timespec start, end;
-	int gen_len;
-	struct tool_call_t tool_call;
+	int gen_len = 0;
 	Tensor *output_tensor = ctx->model->output.mem.data == NULL ? &ctx->model->token_embd : &ctx->model->output;
-	ctx->model->bos_token_sent = 0;
-	int *prompt_tokens;
 
+	printf("\n--- Generation Start ---\n");
+	clock_gettime(CLOCK_REALTIME, &start);
 
-	// Initialize tool call handling
-	tool_call_init(ctx, &tool_call);
+	for (int step = 0; step < max_new_tokens; step++) {
+		if (ctx->kv_pos >= ctx->model->seq_length) {
+			printf("\n[Context Limit Reached]\n");
+			break;
+		}
 
-#if 0
-	if (ctx->gguf_text->arch == ARCH_QWEN3 || ctx->gguf_text->arch == ARCH_QWEN3_MOE || ctx->gguf_text->arch == ARCH_QWEN3VL || ctx->gguf_text->arch == ARCH_QWEN3VL_MOE) {
-	    // Process system prompt immediately at start
-	    size_t system_prompt_len = 0;
+		// Architecture Specific Post-Processing (e.g., Gemma3N AltUp)
+		handle_model_specific_post_step(ctx, step, prompt_len);
 
-	    int *system_prompt_tokens = tokenize_bpe(ctx, system_prompt_with_tools, &system_prompt_len);
+		// Output Norm & Head
+		dispatch_rms_norm(&ctx->mem.hidden_state, &ctx->model->output_norm, &ctx->mem.normed_ffn_input,
+				  ctx->model->embed_dim, ctx->model->norm_eps);
 
-	    printf("--- Processing System Prompt: %zu tokens ---\n", system_prompt_len);
-	    clock_gettime(CLOCK_REALTIME, &start);
+		dispatch_mat_vec(ctx, &ctx->mem.normed_ffn_input, output_tensor, &ctx->mem.logits,
+				 ctx->model->embed_dim, ctx->model->vocab_size, true);
 
-	    ctx->model->interface.process_prompt(ctx, system_prompt_tokens, system_prompt_len);
+		// Logit Softcap (Gemma3)
+		if (ctx->model->final_logit_softcap > 0.0f) {
+			dispatch_softcap_logits(&ctx->mem.logits, ctx->model->vocab_size,
+						ctx->model->final_logit_softcap);
+		}
 
-	    clock_gettime(CLOCK_REALTIME, &end);
-	    printf("--- System Prompt Processed, time: %llu msec ---\n", elapsed_time_us(end, start) / 1000);
-	    free(system_prompt_tokens);
+		// Sampling
+		int next_token =
+			predict_next_token((float *)ctx->mem.logits.data, ctx->model->vocab_size, "temperature", 0.7f,
+					   20, 0.95f, NULL, 0, out_tokens, gen_len, ctx->model->repetition_penalty);
+
+		/* tools process */
+		bool token_consumed = tools_process_token(ctx, next_token);
+
+		// If NOT consumed, print it normally
+		if (!token_consumed) {
+			generate_output(ctx, next_token);
+		}
+
+		// Check if a tool just finished executing
+		if (ctx->tool_context.state == TOOL_STATE_RESULT_READY) {
+			// We need to return to the main loop to insert the tool result.
+			printf("\n[System] Tool execution complete. Returning control.\n");
+			break;
+		}
+
+		if (gen_len < max_new_tokens) {
+			out_tokens[gen_len++] = next_token;
+		}
+
+		// Run Next Token through Transformer
+		ctx->model->interface.prepare_next_token(ctx, next_token);
+
+		for (int l = 0; l < ctx->model->num_layers; l++) {
+			ctx->model->interface.transformer_layer(ctx, l, 1);
+		}
+
+		if (next_token == ctx->model->eos_token_id) {
+			printf("\n--- EOS ---\n");
+			break;
+		}
+
+		// Advance KV Position
+		ctx->kv_pos++;
+
 	}
-#endif
+
+	clock_gettime(CLOCK_REALTIME, &end);
+	float tps = (float)gen_len / (elapsed_time_us(end, start) / 1000000.0f);
+	printf("\n--- Generation End: %d tokens, %.2f tps ---\n", gen_len, tps);
+
+	return gen_len;
+}
+
+void read_user_input(char *input_buf, size_t buf_size)
+{
+	printf("\nYou: ");
+	if (!fgets(input_buf, buf_size, stdin)) {
+		input_buf[0] = '\0';
+	}
+	input_buf[strcspn(input_buf, "\n")] = 0;
+}
+
+// Main Chat Loop
+void run_chat_session(struct TIEContext *ctx, int max_new_tokens, bool initial_has_image)
+{
+	char input_buf[MAX_PROMPT_BATCH_SIZE];
+	struct timespec start, end;
+	int *prompt_tokens = NULL;
+	int *generated_tokens = calloc(max_new_tokens, sizeof(int));
+	bool current_has_image = initial_has_image;
+	ctx->model->bos_token_sent = 0;
+	size_t system_prompt_len = 0;
+	char *system_prompt = NULL;
+
+
+	/* Init tool call handler */
+	if (tools_init(ctx) == 0 && ctx->model->interface.build_system_prompt) {
+
+		// Process system prompt immediately at start
+		system_prompt = ctx->model->interface.build_system_prompt(ctx);
+
+		int *system_prompt_tokens =
+			ctx->model->interface.tokenize_prompt(ctx, system_prompt, &system_prompt_len);
+
+		// If the model needs a BOS token, and it hasn't been sent, prepend it to the system prompt.
+    		if (ctx->model->add_bos_token == 1 && ctx->model->bos_token_sent == 0)
+        		ctx->model->bos_token_sent = 1;
+
+
+		printf("--- Processing System Prompt: %zu tokens ---\n", system_prompt_len);
+		clock_gettime(CLOCK_REALTIME, &start);
+
+		if (ctx->model->use_mrope == 1) {
+        		// System prompt is text-only, so h_patches=0, w_patches=0
+	                // start_pos is ctx->kv_pos (usually 0 here)
+        		build_mrope_position_ids(ctx, system_prompt_tokens, system_prompt_len,
+                                     false, ctx->kv_pos, 0, 0);
+
+        		text_rope_cache_init(ctx, system_prompt_len, ctx->kv_pos);
+    		}
+
+		engine_prefill(ctx, system_prompt_tokens, system_prompt_len, false);
+
+		clock_gettime(CLOCK_REALTIME, &end);
+		printf("--- System Prompt Processed, time: %llu msec ---\n", elapsed_time_us(end, start) / 1000);
+
+		free(system_prompt);
+		free(system_prompt_tokens);
+	}
 
 	while (1) {
-		if (!tool_call.result) {
+		const char *input_ptr;
 
+		// Check if we have a pending tool result
+		if (ctx->tool_context.state == TOOL_STATE_RESULT_READY) {
+			input_ptr = ctx->tool_context.result_prompt;
+
+			// Reset state logic
+			ctx->tool_context.state = TOOL_STATE_IDLE;
+
+		} else {
+			// Normal User Input
 			read_user_input(input_buf, sizeof(input_buf));
-
 			if (strncmp(input_buf, "/exit", 5) == 0)
 				break;
-		} else {
-
-			if (ctx->gguf_text->arch == ARCH_QWEN3 || ctx->gguf_text->arch == ARCH_QWEN3_MOE
-			    || ctx->gguf_text->arch == ARCH_QWEN3VL || ctx->gguf_text->arch == ARCH_QWEN3VL_MOE) {
-				snprintf(
-					prompt_buf, sizeof(prompt_buf),
-					"<|im_start|>user\n<tool_response>%s</tool_response><|im_end|>\n<|im_start|>assistant\n",
-					tool_call.result);
-			}
-			tool_call.result = NULL;
+			input_ptr = input_buf;
 		}
 
-		int *generated_tokens = calloc(max_new_tokens, sizeof(int));
-		if (!generated_tokens) {
-			fprintf(stderr, "Buffer allocation failed in generate()\n");
-			free(generated_tokens);
-			return;
-		}
-
+		// Build Tokens (Includes M-RoPE calculation inside)
 		size_t prompt_len = 0;
+		if (prompt_tokens)
+			free(prompt_tokens); // Free previous turn
 
-		prompt_tokens = build_multimodal_turn_tokens(ctx, input_buf, has_image, &prompt_len);
+		prompt_tokens = build_multimodal_turn_tokens(ctx, input_ptr, current_has_image, &prompt_len);
 
-		if (prompt_tokens == NULL || prompt_len == 0) {
-			printf("Build prompt failed\n");
+		if (!prompt_tokens || prompt_len == 0) {
+			printf("Error: Failed to build prompt.\n");
 			continue;
 		}
 
-		printf("--- Prompt Processing at pos: %u (Matrix Mode) %zu tokens ---\n", ctx->kv_pos, prompt_len);
-		clock_gettime(CLOCK_REALTIME, &start);
-
-		/* prompt processing */
-		run_multimodal_prompt(ctx, prompt_tokens, prompt_len, has_image);
-
-		has_image = 0;
-
-		clock_gettime(CLOCK_REALTIME, &end);
-		printf("--- Prompt Processing Complete %zu tokens, time: %llu msec ---\n", prompt_len,
-		       elapsed_time_us(end, start) / 1000);
-
-
-		printf("\n--- Generation Start (Max %d new tokens) ---\n", max_new_tokens);
-		clock_gettime(CLOCK_REALTIME, &start);
-		gen_len = 0;
-
-		for (int step = 0; step < max_new_tokens; step++) {
-
-			if (ctx->kv_pos >= ctx->model->seq_length) {
-				printf("\nReached max sequence length.\n");
-				break;
-			}
-
-			if (ctx->gguf_text->arch == ARCH_GEMMA3N) {
-				// For the first generation step (step == 0), the altup_hidden_states buffer
-				// contains `prompt_len` tokens. We need to process the LAST one.
-				// For all subsequent steps, the buffer only contains 1 token.
-				size_t n_tokens_in_buffer = (step == 0) ? prompt_len : 1;
-
-				post_process_altup_states(ctx, &ctx->mem.hidden_state, ctx->mem.altup_hidden_states,
-							  n_tokens_in_buffer);
-			}
-
-			dispatch_rms_norm(&ctx->mem.hidden_state, &ctx->model->output_norm, &ctx->mem.normed_ffn_input,
-					  ctx->model->embed_dim, ctx->model->norm_eps);
-
-			dispatch_mat_vec(ctx, &ctx->mem.normed_ffn_input, output_tensor, &ctx->mem.logits,
-					 ctx->model->embed_dim, ctx->model->vocab_size, true);
-
-			if (ctx->model->final_logit_softcap > 0.0f) {
-				dispatch_softcap_logits(&ctx->mem.logits, ctx->model->vocab_size,
-							ctx->model->final_logit_softcap);
-			}
-
-			int next_token = predict_next_token((float *)ctx->mem.logits.data, ctx->model->vocab_size,
-							    "temperature", 0.7f, 20, 0.95f, prompt_tokens, prompt_len,
-							    generated_tokens, gen_len, ctx->model->repetition_penalty);
-
-			generate_output(ctx, next_token);
-
-			tool_call_handler(ctx, &tool_call, next_token);
-
-			if (gen_len < max_new_tokens)
-				generated_tokens[gen_len++] = next_token;
-
-			if (next_token == ctx->model->eos_token_id) {
-				printf("\n--- EOS token reached ---\n");
-				tool_call_handler(ctx, &tool_call, next_token);
-				ctx->kv_pos++;
-				break;
-			}
-
-			ctx->model->interface.prepare_next_token(ctx, next_token);
-
-			for (int l = 0; l < ctx->model->num_layers; l++) {
-				ctx->model->interface.transformer_layer(ctx, l, 1);
-			}
-
-			ctx->kv_pos++;
+		// If we used a tool result, free it now
+		if (ctx->tool_context.result_prompt && input_ptr == ctx->tool_context.result_prompt) {
+			free(ctx->tool_context.result_prompt);
+			ctx->tool_context.result_prompt = NULL;
 		}
 
-		if (!tool_call.result) {
-			clock_gettime(CLOCK_REALTIME, &end);
-			printf("\n--- Generation End --- %u tokens, %llu msec, tps: %.01f ---\n", gen_len,
-			       elapsed_time_us(end, start) / 1000,
-			       (float)(((float)gen_len) / (float)(elapsed_time_us(end, start) / 1000.0 / 1000.0)));
+		// Run Prefill
+		if (engine_prefill(ctx, prompt_tokens, prompt_len, current_has_image) != 0) {
+			continue;
 		}
 
+		// Image is consumed after the first turn
+		current_has_image = false;
+
+		// Run Decode
+		engine_decode(ctx, max_new_tokens, generated_tokens, prompt_len);
+	}
+
+	free(generated_tokens);
+	if (prompt_tokens)
 		free(prompt_tokens);
-		free(generated_tokens);
+}
+
+AppConfig parse_args(int argc, char *argv[])
+{
+	AppConfig config = {0};
+	config.num_threads = 1;
+
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "-m") == 0 || strcmp(argv[i], "--model") == 0)
+			config.model_path = argv[++i];
+		else if (strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--threads") == 0)
+			config.num_threads = atoi(argv[++i]);
+		else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--mmproj") == 0)
+			config.mmproj_path = argv[++i];
+		else if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--image") == 0)
+			config.image_path = argv[++i];
+		else if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--context") == 0)
+			config.context_length = atoi(argv[++i]);
+		else if (strcmp(argv[i], "--use-mmap") == 0)
+			config.use_mmap = 1;
+		else {
+			printf("Unknown option: %s\n", argv[i]);
+			exit(1);
+		}
 	}
-}
-
-static void print_usage(void)
-{
-	printf("Usage:\n");
-	printf("\t -h, --help                     Show this help message\n");
-	printf("\t -m, --model <file>             Model file path\n");
-	printf("\t -c, --context <length>         Context length\n");
-	printf("\t -t, --threads <num>            Number of threads\n");
-	printf("\t -v, --mmproj <file>            Multi-modal vision projection file\n");
-	printf("\t -i, --image <file>             Multi-modal vision image file\n");
-	printf("\t --use-mmap                     Enable mmap for model loading\n");
-}
-
-void context_release(struct TIEContext *ctx)
-{
-	thread_pool_destroy(thread_pool);
-	free(ctx);
-}
-
-int engine_alloc(struct TIEContext *ctx, int num_threads)
-{
-	printf("Create thread_pool: %u threads\n", num_threads);
-	if ((thread_pool = thread_pool_create(num_threads)) == NULL) {
-		free(ctx);
-		exit(EXIT_FAILURE);
-	}
-
-	ctx->tokenizer.root = create_node();
-	ctx->tokenizer.pool = create_string_pool(1024 * 1024 * 4);
-
-	// Initialize SiLU lookup table
-	printf("init: SiLU table\n");
-	silu_table_init();
-
-	return 0;
+	return config;
 }
 
 int main(int argc, char *argv[])
 {
-	struct TIEContext *ctx = NULL;
-	int num_threads = 1;
-	char *model_path;
-	char *mmproj_path = NULL;
-	char *image_path = NULL;
-	int context_length = 0;
-	int use_mmap = 0;
-	int has_image = 0;
-	ModelDef *text_def = NULL;
-	ModelDef *vision_def = NULL;
-
-
 	printf("Toy Inference Engine v%u.%u\n", VERSION_MAJOR, VERSION_MINOR);
-	if (argc < 4) {
-		print_usage();
-		exit(EXIT_SUCCESS);
+	if (argc < 2) {
+		printf("Usage: %s -m <model.gguf> [-v <mmproj.gguf> -i <image.bmp>]\n", argv[0]);
+		return 0;
 	}
-
-	for (int i = 1; i < argc; i++) {
-		if (strcmp(argv[i], "-m") == 0 || strcmp(argv[i], "--model") == 0) {
-			model_path = argv[++i];
-		} else if (strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--threads") == 0) {
-			num_threads = atoi(argv[++i]);
-		} else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--mmproj") == 0) {
-			mmproj_path = argv[++i];
-		} else if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--image") == 0) {
-			image_path = argv[++i];
-		} else if (strcmp(argv[i], "--use-mmap") == 0) {
-			use_mmap = 1;
-		} else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-			print_usage();
-			exit(EXIT_SUCCESS);
-		} else if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--context") == 0) {
-			context_length = atoi(argv[++i]);
-		} else {
-			fprintf(stderr, "Unknown option: %s\n", argv[i]);
-			print_usage();
-			exit(EXIT_FAILURE);
-		}
-	}
-
-	printf("Model: %s\n", model_path);
-	printf("MMProj: %s\n", mmproj_path ? mmproj_path : "(none)");
-	printf("Threads: %d\n", num_threads);
-	printf("Context length: %d\n", context_length);
-	printf("Use mmap: %d\n", use_mmap);
 
 	setlocale(LC_ALL, "en_US.UTF-8");
-	srand(time(NULL));
 
-#ifdef CONFIG_ENABLE_AVX2
-	__builtin_cpu_init();
-	if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma")) {
-		printf("AVX2 and FMA supported\n");
-	} else {
-		printf("Error: AVX2 and FMA not supported, but enabled\n");
+	struct TIEContext *ctx = malloc(sizeof(struct TIEContext));
+	if (!ctx)
 		exit(EXIT_FAILURE);
-	}
-#endif
 
-	if ((ctx = malloc(sizeof(struct TIEContext))) == NULL) {
-		perror("Failed to create context\n");
+	ctx->config = parse_args(argc, argv);
+
+	// Init Engine
+	engine_alloc(ctx, ctx->config.num_threads);
+
+	// Load Models
+	ctx->gguf_text = gguf_model_parse(ctx->config.model_path);
+	if (!ctx->gguf_text)
 		exit(EXIT_FAILURE);
-	}
 
-	/* Alloc engine */
-	engine_alloc(ctx, num_threads);
-
-	/* Parse language model GGUF file */
-	ctx->gguf_text = gguf_model_parse(model_path);
-	if (ctx->gguf_text == NULL) {
-		printf("Failed to detect model\n");
-		exit(EXIT_FAILURE);
+	if (ctx->config.mmproj_path) {
+		ctx->gguf_vision = gguf_model_parse(ctx->config.mmproj_path);
 	}
 
-	/* Parse optional vision model GGUF file */
-	if (mmproj_path != NULL)
-		ctx->gguf_vision = gguf_model_parse(mmproj_path);
+	ModelDef *text_def = find_model_def(ctx->gguf_text);
+	ModelDef *vision_def = ctx->gguf_vision ? find_model_def(ctx->gguf_vision) : NULL;
 
-	/* Load the language Model */
-	if ((text_def = find_model_def(ctx->gguf_text)) == NULL) {
-		printf("Failed to detect model def\n");
-		exit(EXIT_FAILURE);
-	}
-	if (model_load(ctx, ctx->gguf_text, (void **)&ctx->model, (const ModelDef *)text_def, use_mmap) != 0) {
-		printf("Failed to load model %s\n", vision_def->name);
-		exit(EXIT_FAILURE);
-	}
+	model_load(ctx, ctx->gguf_text, (void **)&ctx->model, text_def, ctx->config.use_mmap);
 	ctx->model->def = text_def;
 
-	/* Load the vision Model */
 	if (ctx->gguf_vision) {
-		if ((vision_def = find_model_def(ctx->gguf_vision)) == NULL) {
-			printf("Failed to detect vision model def\n");
-			exit(EXIT_FAILURE);
-		}
-		if (model_load(ctx, ctx->gguf_vision, (void **)&ctx->model_vision, (const ModelDef *)vision_def,
-			       use_mmap)
-		    != 0) {
-			printf("Failed to load model %s\n", vision_def->name);
-			exit(EXIT_FAILURE);
-		}
+		model_load(ctx, ctx->gguf_vision, (void **)&ctx->model_vision, vision_def, ctx->config.use_mmap);
 		ctx->model_vision->def = vision_def;
 	}
 
-	/* Init language model defaults */
-	ctx->model->shared_kv_layers = 0;
-	ctx->model->final_logit_softcap = 0;
-	ctx->model->weight_layout = LAYOUT_ROW_MAJOR;
-
-	/* Fallbacks */
-	if (ctx->model->rope_scale_factor == 0.0f)
-		ctx->model->rope_scale_factor = 1.0f;
-
-	if (context_length != 0)
-		ctx->model->seq_length = context_length;
-
-
-	/* Init language model */
+	// Allocate Memory & Init Weights
 	model_language_init(ctx, (void *)ctx->model, text_def, 1.0f, 1.0f);
 	language_model_info(ctx);
 
-
-	/* Init vision model */
 	if (ctx->model_vision) {
 		model_vision_init(ctx, (void *)ctx->model_vision, vision_def);
 		vision_model_info(ctx);
 	}
 
-	if (ctx->model_vision && image_path != NULL) {
-		if (load_bmp_clip(image_path, ctx) == 0) {
-			has_image = 1;
-			printf("Succesfully loaded %s image for vision process\n", image_path);
-		} else {
-			printf("Error loading image for vision process\n");
+	// Load Image (if any)
+	bool has_image = false;
+	if (ctx->model_vision && ctx->config.image_path) {
+		if (load_bmp_clip(ctx->config.image_path, ctx) == 0) {
+			has_image = true;
+			printf("Loaded image: %s\n", ctx->config.image_path);
 		}
 	}
+/*
+	printf("sot_token_id: %d\n", ctx->model->def->params.sot_token_id);
+	printf("eot_token_id: %d\n", ctx->model->def->params.eot_token_id);
+	printf("eos_token_id: %d\n", ctx->model->def->params.eos_token_id);
+	printf("newline_token_id: %d\n", ctx->model->def->params.newline_token_id);
+	printf("role_user_token_id: %d\n", ctx->model->def->params.role_user_token_id);
+	printf("role_model_token_id: %d\n", ctx->model->def->params.role_model_token_id);
+	printf("double_newline_token_id: %d\n", ctx->model->def->params.double_newline_token_id);
+	printf("vision_start_token_id: %d\n", ctx->model->def->params.vision_start_token_id);
+	printf("vision_end_token_id: %d\n", ctx->model->def->params.vision_end_token_id);
+	printf("vision_embed_token_id: %d\n", ctx->model->def->params.vision_embed_token_id);
 
-	/* start generation loop */
-	printf("\nWelcome to interactive chat. Type '/exit' to quit.\n");
-	generate_interactive(ctx, 8192, has_image);
+	printf("bos_token_id: %d\n", ctx->model->bos_token_id);
+	printf("unk_token_id: %d\n", ctx->model->unk_token_id);
+	printf("pad_token_id: %d\n", ctx->model->pad_token_id);
+	printf("eos_token_id: %d\n", ctx->model->eos_token_id);
+*/
 
-_cleanup:
-	gguf_model_close(ctx->gguf_text);
+	// Run Chat
+	run_chat_session(ctx, 8192, has_image);
 
-	model_language_cleanup(ctx, ctx->gguf_text, text_def, use_mmap);
-
-	if (ctx->gguf_vision != NULL) {
-		gguf_model_close(ctx->gguf_vision);
-		model_vision_cleanup(ctx, ctx->gguf_vision, vision_def, use_mmap);
-	}
-
-	context_release(ctx);
+	// Cleanup
+	engine_release(ctx);
 	printf("Done.\n");
 
 	exit(EXIT_SUCCESS);
+
+	return 0;
 }

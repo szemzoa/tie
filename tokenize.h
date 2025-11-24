@@ -102,8 +102,8 @@ extern int vocab_lookup_token_id(TrieNode *root, const char *token, size_t len);
 extern int *tokenize_bpe(struct TIEContext *ctx, const char *text, size_t *num_tokens);
 extern int *tokenize_sp(struct TIEContext *ctx, const char *text, size_t *num_tokens);
 
-extern void token_out_utf8_stream(struct TIEContext *ctx, int token_id);
-extern void token_out_sp(struct TIEContext *ctx, int token_id);
+extern int decode_token_sp(struct TIEContext *ctx, int token_id, char *buf, int buf_len);
+extern int decode_token_bpe(struct TIEContext *ctx, int token_id, char *buf, int buf_len);
 
 extern int init_token_table(struct TIEContext *ctx, int num_tokens);
 

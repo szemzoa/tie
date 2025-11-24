@@ -19,17 +19,11 @@ typedef struct {
 	float score;
 } ExpertChoice;
 
-enum {
-	ROPE_TYPE_STATIC = 0,
-	ROPE_TYPE_DYNAMIC,
-};
-
 typedef struct {
 	float *sin; // [max_pos][head_dim]
 	float *cos;
 	int max_pos;
 	int head_dim;
-	int type;
 } RopeCacheType;
 
 typedef struct {
@@ -69,23 +63,18 @@ typedef struct {
 	Tensor attn_k_norm;
 	Tensor attn_out;
 	Tensor ffn_norm;
-
-	/* dense */
 	Tensor ffn_gate;
 	Tensor ffn_up;
 	Tensor ffn_down;
-
 	/* MoE */
 	Tensor ffn_gate_inp;
 	Tensor ffn_gate_exps;
 	Tensor ffn_up_exps;
 	Tensor ffn_down_exps;
-
-	/* gemma3 */
+	/* Gemma3 */
 	Tensor post_attn_norm;
 	Tensor post_ffw_norm;
-
-	/* gemma3n */
+	/* Gemma-3n */
 	Tensor altup_correct_coef;
 	Tensor altup_correct_scale;
 	Tensor altup_predict_coef;
@@ -104,26 +93,21 @@ typedef struct {
 	Tensor ln1;
 	Tensor ln2_bias;
 	Tensor ln2;
-
 	Tensor ffn_up_bias;
 	Tensor ffn_up;
 	Tensor ffn_down_bias;
 	Tensor ffn_down;
-
 	Tensor attn_k_bias;
 	Tensor attn_k;
 	Tensor attn_q_bias;
 	Tensor attn_q;
 	Tensor attn_v_bias;
 	Tensor attn_v;
-
 	Tensor attn_out_bias;
 	Tensor attn_out;
-
-	/* QWEN3VL */
+	/* Qwen3-VL */
 	Tensor attn_qkv_bias;
 	Tensor attn_qkv;
-
 	Tensor ds_fc1_bias;
 	Tensor ds_fc1_weight;
 	Tensor ds_fc2_bias;
@@ -148,28 +132,28 @@ typedef struct {
 	MemType *q_head_fp32_scratch;
 	float *attn_scores_buffer[MAX_THREADS];
 	MemType residual_stratch;
-
 	// MoE
 	MemType expert_scores;
 	MemType *ffn_hidden1_scratch;
 	MemType *ffn_hidden2_scratch;
 	MemType *expert_outputs;
 	MemType expert_out_fp32;
-
+	/* Gemma-3n */
 	MemType *altup_hidden_states;
 	MemType *altup_predicted_states;
 	MemType per_layer_inputs;
-
-	/*
-		MemType rope_sin_global;
-		MemType rope_cos_global;
-
-		MemType rope_sin_local;
-		MemType rope_cos_local;
-	*/
-	/* QWEN3-VL */
+	/* Qwen3-VL */
 	MemType pos_ids;
 } MemLayout;
+
+typedef struct {
+    MemType q_head;
+    MemType k_head;
+    MemType v_head;
+    MemType v_head_t;
+    MemType scores;
+    MemType output_head;
+} VisionAttnScratch;
 
 typedef struct {
 	MemType image_raw;	  // Input: The normalized 896x896x3 image
@@ -190,10 +174,12 @@ typedef struct {
 	MemType pooled_embeddings;    // After downsampling: [256, 1152]
 	MemType projected_embeddings; // Final output for the LLM: [256, 2560]
 
+	VisionAttnScratch *attn_scratch;
+
 	int image_raw_width;
 	int image_raw_height;
 
-	/* QWEN3-VL */
+	/* Qwen3-VL */
 	MemType merger_norm_buf; // Holds output of LayerNorm
 	MemType merger_fc1_buf;	 // Holds output of FC1 + GELU
 	// Storage for DeepStack outputs
@@ -225,6 +211,10 @@ typedef struct {
 } expert_task_t;
 
 typedef void (*attention_fn)(void *args);
+
+
+extern void engine_alloc(struct TIEContext *ctx, int num_threads);
+extern void engine_release(struct TIEContext *ctx);
 
 extern float silu_table[SILU_TABLE_SIZE];
 
@@ -261,7 +251,6 @@ extern void prepare_next_token_gemma3n(struct TIEContext *ctx, int next_token);
 
 extern void process_embeddings(struct TIEContext *ctx, MemType *embeddings, size_t n_tokens);
 
-extern void process_prompt_standard(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len);
 extern void process_prompt_gemma3n(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len);
 
 extern void calculate_per_token_magnitude(float *magnitudes, const MemType *state, size_t num_tokens, int dim);

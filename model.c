@@ -15,20 +15,19 @@
 
 extern void build_rope_cache_dynamic(struct TIEContext *ctx, size_t seq_len);
 
-
-const struct arch_t known_archs[] = {
-	{"qwen3", ARCH_QWEN3},
-	{"qwen3moe", ARCH_QWEN3_MOE},
-	{"gemma3", ARCH_GEMMA3},
-	{"gemma3n", ARCH_GEMMA3N},
-	{"clip", ARCH_CLIP_VISION},
-	{"qwen3vl", ARCH_QWEN3VL},
-	{"qwen3vlmoe", ARCH_QWEN3VL_MOE},
+const ModelArch known_archs[] = {
+	{"qwen3", 	ARCH_QWEN3, 		&QWEN3_DEF},
+	{"qwen3moe", 	ARCH_QWEN3_MOE,		&QWEN3_MOE_DEF},
+	{"gemma3", 	ARCH_GEMMA3,		&GEMMA3_DEF},
+	{"gemma3n", 	ARCH_GEMMA3N,		&GEMMA3N_DEF},
+	{"clip", 	ARCH_CLIP_VISION,	NULL},
+	{"qwen3vl", 	ARCH_QWEN3VL,		&QWEN3VL_DEF},
+	{"qwen3vlmoe", 	ARCH_QWEN3VL_MOE,	&QWEN3VL_MOE_DEF},
 };
 
-const struct arch_t known_projectors[] = {
-	{"gemma3", VISION_PROJECTOR_GEMMA3},
-	{"qwen3vl_merger", VISION_PROJECTOR_QWEN3VL}
+const ModelArch known_projectors[] = {
+	{"gemma3", 	VISION_PROJECTOR_GEMMA3, 	&GEMMA3_CLIP_DEF},
+	{"qwen3vl_merger", VISION_PROJECTOR_QWEN3VL, 	&QWEN3VL_CLIP_DEF}
 };
 
 #define MAX_CHUNK_SIZE (1LL << 30) // 1073741824 bytes
@@ -61,11 +60,11 @@ static ssize_t safe_pread(int fd, void *buf, uint64_t count, off_t offset)
 
 int detect_architecture(const char *model_name)
 {
-	const struct arch_t *best_match = NULL;
+	const ModelArch *best_match = NULL;
 	size_t best_len = 0;
 
 	for (int i = 0; i < ARRAY_SIZE(known_archs); i++) {
-		const struct arch_t *current_arch = &known_archs[i];
+		const ModelArch *current_arch = &known_archs[i];
 
 		if (strstr(model_name, current_arch->name)) {
 			size_t current_len = strlen(current_arch->name);
@@ -86,11 +85,11 @@ int detect_architecture(const char *model_name)
 
 int detect_projector(const char *model_name)
 {
-	const struct arch_t *best_match = NULL;
+	const ModelArch *best_match = NULL;
 	size_t best_len = 0;
 
 	for (int i = 0; i < ARRAY_SIZE(known_projectors); i++) {
-		const struct arch_t *current_projector = &known_projectors[i];
+		const ModelArch *current_projector = &known_projectors[i];
 
 		if (strstr(model_name, current_projector->name)) {
 			size_t current_len = strlen(current_projector->name);
@@ -111,57 +110,29 @@ int detect_projector(const char *model_name)
 
 ModelDef *find_projector_def(struct GGUFModel *gguf_model)
 {
-	ModelDef *def = NULL;
-	int projector;
+	int projector = detect_projector(gguf_metadata_get_string(gguf_model, "clip.projector_type"));
 
-	projector = detect_projector(gguf_metadata_get_string(gguf_model, "clip.projector_type"));
-
-	switch (projector) {
-
-	case VISION_PROJECTOR_GEMMA3:
-		def = &GEMMA3_CLIP_DEF;
-		break;
-	case VISION_PROJECTOR_QWEN3VL:
-		def = &QWEN3VL_CLIP_DEF;
-		break;
-	default:
-		fprintf(stderr, "Failed to detect vision model\n");
+	for (int i = 0; i < ARRAY_SIZE(known_projectors); i++) {
+		if (projector == known_projectors[i].id)
+			return known_projectors[i].def;
 	}
 
-	return def;
+	return NULL;
 }
 
 ModelDef *find_model_def(struct GGUFModel *gguf_model)
 {
-	ModelDef *def = NULL;
+	for (int i = 0; i < ARRAY_SIZE(known_archs); i++) {
+		if (gguf_model->arch == known_archs[i].id) {
 
-	switch (gguf_model->arch) {
-	case ARCH_QWEN3:
-		def = &QWEN3_DEF;
-		break;
-	case ARCH_QWEN3_MOE:
-		def = &QWEN3_MOE_DEF;
-		break;
-	case ARCH_QWEN3VL:
-		def = &QWEN3VL_DEF;
-		break;
-	case ARCH_QWEN3VL_MOE:
-		def = &QWEN3VL_MOE_DEF;
-		break;
-	case ARCH_GEMMA3:
-		def = &GEMMA3_DEF;
-		break;
-	case ARCH_GEMMA3N:
-		def = &GEMMA3N_DEF;
-		break;
-	case ARCH_CLIP_VISION:
-		return find_projector_def(gguf_model);
-		break;
-	default:
-		fprintf(stderr, "Failed to detect model\n");
+		    if (gguf_model->arch == ARCH_CLIP_VISION)
+			    return find_projector_def(gguf_model);
+
+		    return known_archs[i].def;
+		}
 	}
 
-	return def;
+	return NULL;
 }
 
 int init_KV_cache(struct TIEContext *ctx)
@@ -318,7 +289,7 @@ int model_load_metadata(struct GGUFModel *gguf, void *model, const ModelDef *def
 			snprintf(key_buffer, sizeof(key_buffer), mdef->key_fmt, NULL);
 		}
 
-		// Calculate the destination pointer relative to the NEWLY allocated struct
+		// Calculate the destination pointer relative to the allocated struct
 		void *dest_ptr = (uint8_t *)model + mdef->offset;
 
 		if (mdef->is_array) {
@@ -335,9 +306,9 @@ int model_load_metadata(struct GGUFModel *gguf, void *model, const ModelDef *def
 				size_t element_size = gguf_get_type_size(mdef->type);
 				size_t total_bytes = element_size * array_size;
 
-				// Allocate memory and copy the data to take ownership
+				// Allocate memory and copy the data
 				target_array->data = malloc(total_bytes);
-				if (!target_array->data) { /* handle error */
+				if (!target_array->data) {
 					fprintf(stderr, "Failed to load required metadata key: %s\n", key_buffer);
 					return -1;
 				}
@@ -376,7 +347,6 @@ int model_init_mem_language(struct TIEContext *ctx, const ModelDef *def)
 		const BufferDef *bdef = &def->buffer_defs[i];
 
 		MemType *dest_buffer = (MemType *)((uint8_t *)&ctx->mem + bdef->offset);
-//		size_t size_multiplier = 0;
 		size_t alloc_size = 0;
 
 		// Resolve size type to runtime value
@@ -464,14 +434,13 @@ int model_init_mem_language(struct TIEContext *ctx, const ModelDef *def)
 
 int model_load(struct TIEContext *ctx, struct GGUFModel *gguf, void **model, const ModelDef *def, int use_mmap)
 {
-	// Allocate the destination model struct (e.g., sizeof(Model) or sizeof(VisionModel))
+	// Allocate the destination model struct
 	void *model_struct = calloc(1, def->struct_size);
 	if (!model_struct) {
 		perror("Failed to allocate model struct");
 		return -1;
 	}
 
-	// Assign the newly created and populated struct back to the caller's pointer
 	*model = model_struct;
 
 	if (model_load_metadata(gguf, *model, def) != 0) {
@@ -531,7 +500,6 @@ int model_load(struct TIEContext *ctx, struct GGUFModel *gguf, void **model, con
 void build_rope_cache_global(struct TIEContext *ctx, size_t seq_len)
 {
 	ctx->model->rope_cache_global = malloc(sizeof(RopeCacheType));
-
 // TODO
 	if (!ctx->model->rope_cache_global) {
 		perror("Failed to allocate rope_cache");
@@ -562,26 +530,31 @@ void build_rope_cache_shared(struct TIEContext *ctx, size_t seq_len)
 int model_language_init(struct TIEContext *ctx, Model *model, const ModelDef *def, float yarn_scale_factor,
 			float repetiton_penality)
 {
-
-	printf("\n[%s] init\n", def->name);
-
 	ctx->model->yarn_scale_factor = yarn_scale_factor;
 	ctx->model->repetition_penalty = repetiton_penality;
 
+	printf("\n[%s] init\n", def->name);
+
+	/* Init language model defaults */
+//	ctx->model->shared_kv_layers = 0;
+//	ctx->model->final_logit_softcap = 0;
+//	ctx->model->weight_layout = LAYOUT_ROW_MAJOR;
+//	ctx->model->sot_token_id = def->params.sot_token_id;
+//	ctx->model->eot_token_id = def->params.eot_token_id;
+	ctx->model->eos_token_id = def->params.eos_token_id;
+
+	/* Fallbacks */
+	if (ctx->model->rope_scale_factor == 0.0f)
+		ctx->model->rope_scale_factor = 1.0f;
+
+	if (ctx->config.context_length != 0)
+		ctx->model->seq_length = ctx->config.context_length;
+
 	ctx->model->interface = def->interface;
 	ctx->model->is_moe = def->params.is_moe;
-	ctx->model->sot_token_id = def->params.sot_token_id;
-	ctx->model->eot_token_id = def->params.eot_token_id;
-	ctx->model->eos_token_id = def->params.eos_token_id;
-	ctx->model->newline_token_id = def->params.newline_token_id;
-	ctx->model->role_user_token_id = def->params.role_user_token_id;
-	ctx->model->role_model_token_id = def->params.role_model_token_id;
-	ctx->model->shared_kv_layers = def->params.shared_kv_layers;
+
+//	ctx->model->shared_kv_layers = def->params.shared_kv_layers;
 	ctx->model->final_logit_softcap = def->params.final_logit_softcap;
-	ctx->model->double_newline_token_id = def->params.double_newline_token_id;
-	ctx->model->vision_start_token_id = def->params.vision_start_token_id;
-	ctx->model->vision_end_token_id = def->params.vision_end_token_id;
-	ctx->model->vision_embed_token_id = def->params.vision_embed_token_id;
 
 	switch (def->arch) {
 	case ARCH_QWEN3:
@@ -608,13 +581,11 @@ int model_language_init(struct TIEContext *ctx, Model *model, const ModelDef *de
 	case ARCH_QWEN3VL:
 		ctx->model->attn_scale = 1.0f / sqrtf((float)ctx->model->head_dim);
 		ctx->model->use_mrope = 1;
-// TODO
 		break;
 
 	case ARCH_QWEN3VL_MOE:
 		ctx->model->attn_scale = 1.0f / sqrtf((float)ctx->model->head_dim);
 		ctx->model->use_mrope = 1;
-// TODO
 		break;
 
 	default:
@@ -756,25 +727,35 @@ void model_language_cleanup(struct TIEContext *ctx, struct GGUFModel *model, Mod
 int model_init_mem_vision(struct TIEContext *ctx, const ModelDef *def)
 {
 	VisionModel *vm = ctx->model_vision;
-	// Number of patches along one side of the image
+	MemLayoutVision *mem = &ctx->vision_mem;
+
 	const int num_patches_side = vm->image_size / vm->patch_size;
-	// Total number of patches from the image
 	const int num_patches = num_patches_side * num_patches_side;
-	// The full sequence length for the ViT
 	const int vision_seq_len = num_patches;
 	// The final sequence length after downsampling/pooling
-	const int pooled_patches_side = num_patches_side / vm->proj_scale_factor;
+	const int pooled_patches_side = vm->def->params.proj_scale_factor == 0 ? num_patches_side : num_patches_side / vm->def->params.proj_scale_factor;
 	const int pooled_seq_len = pooled_patches_side * pooled_patches_side;
+	const int embed_dim = vm->embed_dim;
 
-	const int embed_dim = vm->embed_dim; // 1024
-	// This is 2*2 = 4
-	const int merge_factor = vm->spatial_merge_size * vm->spatial_merge_size;
-	// This is 2304 / 4 = 576
-	const int merged_seq_len = vision_seq_len / merge_factor;
-	// This is 1024 * 4 = 4096
-	const int merged_dim = embed_dim * merge_factor;
+        int max_head_dim = vm->embed_dim / vm->num_heads;
+        int num_threads = thread_pool->num_threads;
 
 	printf("Initializing vision memory buffers...\n");
+
+	// Allocate the array of structs
+        mem->attn_scratch = calloc(num_threads, sizeof(VisionAttnScratch));
+
+	for (int t = 0; t < num_threads; t++) {
+    	    VisionAttnScratch *s = &mem->attn_scratch[t];
+
+    	    // Allocate max possible size for each buffer
+    	    alloc_memtype(&s->q_head,      GGML_TYPE_F32, num_patches * max_head_dim);
+    	    alloc_memtype(&s->k_head,      GGML_TYPE_F32, num_patches * max_head_dim);
+    	    alloc_memtype(&s->v_head,      GGML_TYPE_F32, num_patches * max_head_dim);
+    	    alloc_memtype(&s->v_head_t,    GGML_TYPE_F32, num_patches * num_patches);
+    	    alloc_memtype(&s->scores,      GGML_TYPE_F32, num_patches * num_patches);
+    	    alloc_memtype(&s->output_head, GGML_TYPE_F32, num_patches * max_head_dim);
+	}
 
 	// Standard Buffers
 	for (size_t i = 0; i < def->num_buffer_defs; i++) {
@@ -813,9 +794,13 @@ int model_init_mem_vision(struct TIEContext *ctx, const ModelDef *def)
 			size_multiplier = pooled_seq_len * vm->projection_dim;
 			break;
 
-		case SIZE_VISION_MERGER_TEMP:
-			size_multiplier = (size_t)merged_seq_len * merged_dim;
-			;
+		case SIZE_VISION_MERGER_TEMP: {
+			const int merge_factor = vm->spatial_merge_size * vm->spatial_merge_size;
+			const int merged_seq_len = vision_seq_len / merge_factor;
+			const int merged_dim = embed_dim * merge_factor;
+
+			    size_multiplier = (size_t)merged_seq_len * merged_dim;
+			}
 			break;
 
 		default:
@@ -857,7 +842,24 @@ int model_init_mem_vision(struct TIEContext *ctx, const ModelDef *def)
 
 void model_vision_cleanup(struct TIEContext *ctx, struct GGUFModel *model, ModelDef *def, int use_mmap)
 {
+	MemLayoutVision *mem = &ctx->vision_mem;
+        int num_threads = thread_pool->num_threads;
+
 	printf("cleanup vision model.\n");
+
+	for (int t = 0; t < num_threads; t++) {
+    	    VisionAttnScratch *s = &mem->attn_scratch[t];
+
+    	    // Allocate max possible size for each buffer
+    	    free_memtype(&s->q_head);
+    	    free_memtype(&s->k_head);
+    	    free_memtype(&s->v_head);
+    	    free_memtype(&s->v_head_t);
+    	    free_memtype(&s->scores);
+    	    free_memtype(&s->output_head);
+	}
+
+        free(mem->attn_scratch);
 
 	// Standard Buffers
 	for (size_t i = 0; i < def->num_buffer_defs; i++) {
@@ -927,12 +929,7 @@ int model_vision_init(struct TIEContext *ctx, VisionModel *model_vision, const M
 {
 	VisionModel *vm = model_vision;
 	vm->interface = def->interface;
-	vm->proj_scale_factor = def->params.proj_scale_factor;
-	vm->num_deepstack_layers = 0;
-//	vm->spatial_merge_size = 1;
-	float *mean = (float *)vm->image_mean.data;
-	float *std = (float *)vm->image_std.data;
-
+//	vm->proj_scale_factor = def->params.proj_scale_factor;
 
 	if (vm->has_vision_encoder != 1) {
 		printf("%s %s model has no vision encoder...\n", __FUNCTION__, def->name);
@@ -943,10 +940,7 @@ int model_vision_init(struct TIEContext *ctx, VisionModel *model_vision, const M
 
 	switch (def->projector) {
 	case VISION_PROJECTOR_GEMMA3: {
-		vm->soi_token_id = 255999;
-		vm->eoi_token_id = 256000;
-		vm->image_soft_token_id = 262144;
-		vm->spatial_merge_size = 1;
+//		vm->spatial_merge_size = 1;
 	} break;
 
 	case VISION_PROJECTOR_QWEN3VL: {
@@ -959,6 +953,8 @@ int model_vision_init(struct TIEContext *ctx, VisionModel *model_vision, const M
 
                 // Count DeepStack layers
                 bool *is_deepstack = (bool *)vm->is_deepstack_layers.data;
+		vm->num_deepstack_layers = 0;
+
                 for (int i = 0; i < vm->num_layers; i++) {
                         if (is_deepstack[i] == true)
                             vm->num_deepstack_layers++;
@@ -986,6 +982,10 @@ int model_vision_init(struct TIEContext *ctx, VisionModel *model_vision, const M
 	}
 
 	model_vision->meta.image_size = vm->image_size;
+
+	float *mean = (float *)vm->image_mean.data;
+	float *std = (float *)vm->image_std.data;
+
 	for (int i = 0; i < 3; i++) {
 		model_vision->meta.image_mean[i] = mean[i];
 		model_vision->meta.image_std[i] = std[i];
@@ -1056,6 +1056,6 @@ void vision_model_info(struct TIEContext *ctx)
 	printf("Embed Dim: %d, FFN Dim: %d, Layers: %d, Heads: %d, eps: %f\n", ctx->model_vision->embed_dim,
 	       ctx->model_vision->ffn_dim, ctx->model_vision->num_layers, ctx->model_vision->num_heads,
 	       ctx->model_vision->norm_eps);
-	printf("Proj Scale Factor: %d, Deepstack layers: %u\n", ctx->model_vision->proj_scale_factor, 
+	printf("Proj Scale Factor: %d, Deepstack layers: %u\n", ctx->model_vision->def->params.proj_scale_factor, 
 	       ctx->model_vision->num_deepstack_layers);
 }

@@ -7,34 +7,22 @@
 #include "gguf.h"
 #include "engine.h"
 #include "model.h"
+#include "tools.h"
+
 
 typedef enum {
 	MODEL_TYPE_TEXT,
 	MODEL_TYPE_VISION,
 } ModelType;
 
-enum {
-	TOOL_CALL_STATE_UNINITIALIZED = 0,
-	TOOL_CALL_STATE_IDLE,
-	TOOL_CALL_STATE_PROCESSING,
-	TOOL_CALL_STATE_END,
-};
-
-struct tool_call_t {
-	int state;
-	int token_start;
-	int token_end;
-	char buffer[TOOL_CALL_BUFFER_SIZE];
-	int len;
-	char *result;
-};
-
-typedef char *(*tool_func_t)(const char *);
-
-struct tool_entry_t {
-	const char *name;
-	tool_func_t func;
-};
+typedef struct {
+	char *model_path;
+	char *mmproj_path;
+	char *image_path;
+	int context_length;
+	int num_threads;
+	int use_mmap;
+} AppConfig;
 
 struct GGUFModel {
 	int fd;
@@ -54,6 +42,8 @@ struct GGUFModel {
 };
 
 struct TIEContext {
+	AppConfig config;
+
 	struct GGUFModel *gguf_text;   // Container for the main text model GGUF
 	struct GGUFModel *gguf_vision; // Container for the mmproj GGUF (can be NULL)
 
@@ -67,6 +57,8 @@ struct TIEContext {
 	LayerKVCache *kv_cache;
 
 	Tokenizer tokenizer;
+
+	ToolContext tool_context;
 };
 
 #endif

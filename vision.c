@@ -13,6 +13,26 @@
 
 void dispatch_memcpy(MemType *dest, MemType *src, size_t src_element_offset, size_t element_count);
 
+// Task structure for the worker
+typedef struct {
+	struct TIEContext *ctx;
+	int seq_len;
+	int embed_dim;
+	int head_dim;
+	int head_start;
+	int head_end;
+	float attn_scale;
+
+	// Scratch buffers (Thread-local)
+	MemType q_head;
+	MemType k_head;
+	MemType v_head;
+	MemType v_head_t;
+	MemType scores;
+	MemType output_head;
+} vision_attn_task_t;
+
+
 typedef struct __attribute__((packed)) {
 	uint16_t bfType;
 	uint32_t bfSize;
@@ -34,7 +54,6 @@ typedef struct __attribute__((packed)) {
 	uint32_t biClrUsed;
 	uint32_t biClrImportant;
 } DIBHeader;
-
 
 int load_bmp_clip(const char *filename, struct TIEContext *ctx)
 {
@@ -145,35 +164,6 @@ void dispatch_add_and_store(MemType *dest, const MemType *src1, const MemType *s
 	}
 }
 
-void dispatch_layer_norm(MemType *dest, const MemType *src, const Tensor *weight, const Tensor *bias, int size,
-			 float eps)
-{
-	const float *src_data = (const float *)src->data;
-	float *dest_data = (float *)dest->data;
-
-	float sum = 0.0;
-	for (int i = 0; i < size; ++i) {
-		sum += src_data[i];
-	}
-	const float mean = sum / size;
-
-	float sum_sq_diff = 0.0;
-	for (int i = 0; i < size; ++i) {
-		float diff = src_data[i] - mean;
-		sum_sq_diff = fmaf(diff, diff, sum_sq_diff);
-	}
-	const float variance = sum_sq_diff / size;
-	const float inv_std = 1.0f / sqrtf(variance + eps);
-
-	const float *weight_data = (const float *)weight->mem.data;
-	const float *bias_data = (const float *)bias->mem.data;
-
-	for (int i = 0; i < size; ++i) {
-		float normalized_val = (src_data[i] - mean) * inv_std;
-		dest_data[i] = fmaf(normalized_val, weight_data[i], bias_data[i]);
-	}
-}
-
 void dispatch_transpose(MemType *dest, const MemType *src, int rows, int cols)
 {
 	// Don't transpose between different types
@@ -184,14 +174,7 @@ void dispatch_transpose(MemType *dest, const MemType *src, int rows, int cols)
 
 	switch (src->type) {
 	case GGML_TYPE_F32: {
-		const float *src_data = (const float *)src->data;
-		float *dest_data = (float *)dest->data;
-
-		for (int i = 0; i < rows; ++i) {
-			for (int j = 0; j < cols; ++j) {
-				dest_data[j * rows + i] = src_data[i * cols + j];
-			}
-		}
+		transpose_f32_avx2(dest, src, rows, cols);
 		break;
 	}
 
@@ -248,91 +231,124 @@ void dispatch_memcpy(MemType *dest, MemType *src, size_t src_element_offset, siz
 	memcpy((void *)dest->data, (void *)src->data + src_byte_offset, total_bytes_to_copy);
 }
 
-static void vision_attention(struct TIEContext *ctx, int seq_len)
+// Worker function running in a thread
+void vision_attention_worker(void *arg)
 {
-	VisionModel *vm = ctx->model_vision;
+	vision_attn_task_t *task = (vision_attn_task_t *)arg;
+	struct TIEContext *ctx = task->ctx;
+	int seq_len = task->seq_len;
+	int head_dim = task->head_dim;
+	int embed_dim = task->embed_dim;
+
 	MemLayoutVision *mem = &ctx->vision_mem;
-
-	const int embed_dim = vm->embed_dim;	    // 1152
-	const int num_heads = vm->num_heads;	    // 16
-	const int head_dim = embed_dim / num_heads; // 72
-	const float attn_scale = 1.0f / sqrtf((float)head_dim);
-
 	const float *Q_data = (const float *)mem->Q.data;
 	const float *K_data = (const float *)mem->K.data;
 	const float *V_data = (const float *)mem->V.data;
 	float *attn_output_data = (float *)mem->attn_output.data;
 
-	// Allocate buffers for ONE head
-	MemType q_head, k_head, v_head, v_head_t, q_head_t, scores, output_head;
+	float *q_data = (float *)task->q_head.data;
+	float *k_data = (float *)task->k_head.data;
+	float *v_data = (float *)task->v_head.data;
+	float *scores_data = (float *)task->scores.data;
+	float *out_data = (float *)task->output_head.data;
 
-	alloc_memtype(&q_head, GGML_TYPE_F32, seq_len * head_dim);
-	alloc_memtype(&k_head, GGML_TYPE_F32, seq_len * head_dim);
-	alloc_memtype(&v_head, GGML_TYPE_F32, seq_len * head_dim);
-	alloc_memtype(&q_head_t, GGML_TYPE_F32, head_dim * seq_len);
-	alloc_memtype(&scores, GGML_TYPE_F32, seq_len * seq_len);
-	alloc_memtype(&output_head, GGML_TYPE_F32, seq_len * head_dim);
-	alloc_memtype(&v_head_t, GGML_TYPE_F32, head_dim * seq_len);
+	size_t head_bytes = head_dim * sizeof(float);
 
-	float *q_head_data = (float *)q_head.data;
-	float *k_head_data = (float *)k_head.data;
-	float *v_head_data = (float *)v_head.data;
-	float *scores_data = (float *)scores.data;
-	float *output_head_data = (float *)output_head.data;
+	for (int h = task->head_start; h < task->head_end; ++h) {
 
-	memset(attn_output_data, 0, seq_len * embed_dim * sizeof(float));
-
-	for (int h = 0; h < num_heads; ++h) {
-		// Extract Q, K, V for the current head
+		// Extract Q, K, V
 		for (int i = 0; i < seq_len; ++i) {
-			for (int j = 0; j < head_dim; ++j) {
-				int src_idx = i * embed_dim + h * head_dim + j;
-				int dst_idx = i * head_dim + j;
-				q_head_data[dst_idx] = Q_data[src_idx];
-				k_head_data[dst_idx] = K_data[src_idx];
-				v_head_data[dst_idx] = V_data[src_idx];
-			}
+			int src_offset = i * embed_dim + h * head_dim;
+			int dst_offset = i * head_dim;
+
+			memcpy(q_data + dst_offset, Q_data + src_offset, head_bytes);
+			memcpy(k_data + dst_offset, K_data + src_offset, head_bytes);
+			memcpy(v_data + dst_offset, V_data + src_offset, head_bytes);
 		}
 
-		// Transpose Q: q_head_t = Q^T
-		// Input q_head is [seq_len, head_dim]. Output q_head_t is [head_dim, seq_len]
-		dispatch_transpose(&q_head_t, &q_head, seq_len, head_dim);
+		// Scores = Q @ K^T
+		Tensor k_tensor = {.mem = task->k_head};
+		dispatch_mat_mat(ctx, &task->q_head, &k_tensor, &task->scores, seq_len, head_dim, seq_len, 0);
 
-		// Calculate scores = Q @ K^T
-		Tensor k_head_tensor = {.mem = k_head};
-		dispatch_mat_mat(ctx, &q_head, &k_head_tensor, &scores, seq_len, head_dim, seq_len, 0);
-
-		// Apply scaling and softmax
-		for (int i = 0; i < seq_len * seq_len; ++i)
-			scores_data[i] *= attn_scale;
-
-		for (int i = 0; i < seq_len; ++i)
-			softmax(scores_data + i * seq_len, seq_len);
-
-		// Transpose V: v_head_t = V^T
-		dispatch_transpose(&v_head_t, &v_head, seq_len, head_dim);
-
-		// Calculate output_head = scores @ V
-		Tensor v_head_t_tensor = {.mem = v_head_t};
-		dispatch_mat_mat(ctx, &scores, &v_head_t_tensor, &output_head, seq_len, seq_len, head_dim, 0);
-
-		// Scatter result back
+		// Scale and Softmax
+		int total_scores = seq_len * seq_len;
+		for (int i = 0; i < total_scores; ++i) {
+			scores_data[i] *= task->attn_scale;
+		}
 		for (int i = 0; i < seq_len; ++i) {
-			for (int j = 0; j < head_dim; ++j) {
-				int src_idx = i * head_dim + j;
-				int dst_idx = i * embed_dim + h * head_dim + j;
-				attn_output_data[dst_idx] = output_head_data[src_idx];
-			}
+			softmax(scores_data + i * seq_len, seq_len);
+		}
+
+		// Transpose V -> V^T
+		dispatch_transpose(&task->v_head_t, &task->v_head, seq_len, head_dim);
+
+		// Output = Scores @ V
+		Tensor v_t_tensor = {.mem = task->v_head_t};
+		dispatch_mat_mat(ctx, &task->scores, &v_t_tensor, &task->output_head, seq_len, seq_len, head_dim, 0);
+
+		// Scatter result
+		for (int i = 0; i < seq_len; ++i) {
+			int src_offset = i * head_dim;
+			int dst_offset = i * embed_dim + h * head_dim;
+			memcpy(attn_output_data + dst_offset, out_data + src_offset, head_bytes);
 		}
 	}
 
-	free_memtype(&q_head);
-	free_memtype(&k_head);
-	free_memtype(&v_head);
-	free_memtype(&q_head_t);
-	free_memtype(&v_head_t);
-	free_memtype(&scores);
-	free_memtype(&output_head);
+	free(task);
+}
+
+static void vision_attention(struct TIEContext *ctx, int seq_len)
+{
+	VisionModel *vm = ctx->model_vision;
+	MemLayoutVision *mem = &ctx->vision_mem;
+
+	const int embed_dim = vm->embed_dim;
+	const int num_heads = vm->num_heads;
+	const int head_dim = embed_dim / num_heads;
+	const float attn_scale = 1.0f / sqrtf((float)head_dim);
+
+	// Configure Threads
+	int num_threads = thread_pool->num_threads;
+	if (num_threads > num_heads)
+		num_threads = num_heads;
+
+	int heads_per_thread = (num_heads + num_threads - 1) / num_threads;
+
+	// Clear output buffer
+	memset(mem->attn_output.data, 0, seq_len * embed_dim * sizeof(float));
+
+	for (int t = 0; t < num_threads; ++t) {
+		int head_start = t * heads_per_thread;
+		int head_end = head_start + heads_per_thread;
+		if (head_end > num_heads)
+			head_end = num_heads;
+		if (head_start >= head_end)
+			break;
+
+		// Use Pre-allocated Buffers
+		VisionAttnScratch *scratch = &mem->attn_scratch[t];
+
+		// Create Task
+		vision_attn_task_t *task = malloc(sizeof(vision_attn_task_t));
+		*task = (vision_attn_task_t){.ctx = ctx,
+					     .seq_len = seq_len,
+					     .embed_dim = embed_dim,
+					     .head_dim = head_dim,
+					     .head_start = head_start,
+					     .head_end = head_end,
+					     .attn_scale = attn_scale,
+					     // Point to the persistent buffers
+					     .q_head = scratch->q_head,
+					     .k_head = scratch->k_head,
+					     .v_head = scratch->v_head,
+					     .v_head_t = scratch->v_head_t,
+					     .scores = scratch->scores,
+					     .output_head = scratch->output_head};
+
+		thread_pool_submit(thread_pool, vision_attention_worker, task);
+	}
+
+	thread_pool_wait(thread_pool);
 }
 
 
@@ -508,11 +524,13 @@ void vision_create_embeddings_qwen3vl(struct TIEContext *ctx, int h_patches, int
 	alloc_memtype(&pos_embeds_mem, GGML_TYPE_F32, (size_t)embed_dim * num_patches);
 
 	// 3. Run Conv2D (Kernel T=0 & T=1) using Dynamic Sizes
-	dispatch_conv_2d_scalar(&conv_output_mem_t0, &mem->image_raw, &vm->patch_embd, NULL, img_h, img_w, patch_size,
-				0);
-	dispatch_conv_2d_scalar(&conv_output_mem_t1, &mem->image_raw, &vm->patch_embd_1, NULL, img_h, img_w, patch_size,
-				0);
-
+	conv_2d_f32_avx2(&conv_output_mem_t0, &mem->image_raw, &vm->patch_embd, NULL, img_h, img_w, patch_size, 0);
+	conv_2d_f32_avx2(&conv_output_mem_t1, &mem->image_raw, &vm->patch_embd_1, NULL, img_h, img_w, patch_size, 0);
+	/*
+		dispatch_conv_2d_avx2(&conv_output_mem_t0, &mem->image_raw, &vm->patch_embd, NULL, img_h, img_w,
+	   patch_size, 0); dispatch_conv_2d_avx2(&conv_output_mem_t1, &mem->image_raw, &vm->patch_embd_1, NULL, img_h,
+	   img_w, patch_size, 0);
+	*/
 	// Sum T=0, T=1
 	dispatch_add_and_store(&conv_output_mem_t0, &conv_output_mem_t0, &conv_output_mem_t1, embed_dim * num_patches);
 	free_memtype(&conv_output_mem_t1);
@@ -726,6 +744,7 @@ void vision_transformer_layer_qwen3vl(struct TIEContext *ctx, int layer_idx, int
 	for (int i = 0; i < seq_len; ++i) {
 		MemType dest_slice = mem_slice(&mem->normed_input, i * embed_dim);
 		MemType src_slice = mem_slice(&mem->hidden_state, i * embed_dim);
+
 		dispatch_layer_norm(&dest_slice, &src_slice, &l->ln1, &l->ln1_bias, embed_dim, vm->norm_eps);
 	}
 
@@ -802,6 +821,7 @@ void vision_transformer_layer_qwen3vl(struct TIEContext *ctx, int layer_idx, int
 	for (int i = 0; i < seq_len; ++i) {
 		MemType dest_slice = mem_slice(&mem->normed_input, i * embed_dim);
 		MemType src_slice = mem_slice(&mem->hidden_state, i * embed_dim);
+
 		dispatch_layer_norm(&dest_slice, &src_slice, &l->ln2, &l->ln2_bias, embed_dim, vm->norm_eps);
 	}
 
@@ -827,8 +847,6 @@ MemType *process_image_vision_qwen3vl(struct TIEContext *ctx)
 	int deepstack_merger_index = -1;
 	int h_patches, w_patches;
 
-
-	printf("Processing image QWEN3-VL\n");
 
 	if (ctx->vision_mem.image_raw_width > vm->image_size || ctx->vision_mem.image_raw_height > vm->image_size) {
 		printf("invalid image size, supports max %u x %u\n", vm->image_size, vm->image_size);
@@ -878,9 +896,6 @@ MemType *process_image_vision_qwen3vl(struct TIEContext *ctx)
 	// Final merger
 	vision_run_patch_merger(ctx, &mem->projected_embeddings, &mem->hidden_state, 0, seq_len, false);
 
-	printf("done\n");
-	fflush(stdout);
-
 	return &mem->projected_embeddings;
 }
 
@@ -910,14 +925,23 @@ void vision_create_embeddings_gemma3(struct TIEContext *ctx)
 	}
 
 	//	printf("Running Conv2D patch embedding\n");
-	dispatch_conv_2d_scalar(&conv_output_mem,     // Dest: [1152, 64, 64]
-				&mem->image_raw,      // Src: [3, 896, 896]
-				&vm->patch_embd,      // Kernel: [1152, 3, 14, 14]
-				&vm->patch_embd_bias, // Bias: [1152]
-				image_size,	      // H_in
-				image_size,	      // W_in
-				patch_size,	      // Stride (14)
-				0);		      // Padding (0)
+	/*	dispatch_conv_2d_scalar(&conv_output_mem,     // Dest: [1152, 64, 64]
+					&mem->image_raw,      // Src: [3, 896, 896]
+					&vm->patch_embd,      // Kernel: [1152, 3, 14, 14]
+					&vm->patch_embd_bias, // Bias: [1152]
+					image_size,	      // H_in
+					image_size,	      // W_in
+					patch_size,	      // Stride (14)
+					0);		      // Padding (0)
+	*/
+	conv_2d_f32_avx2(&conv_output_mem,     // Dest: [1152, 64, 64]
+			 &mem->image_raw,      // Src: [3, 896, 896]
+			 &vm->patch_embd,      // Kernel: [1152, 3, 14, 14]
+			 &vm->patch_embd_bias, // Bias: [1152]
+			 image_size,	       // H_in
+			 image_size,	       // W_in
+			 patch_size,	       // Stride (14)
+			 0);		       // Padding (0)
 
 	// Permute and flatten the result
 	// The output of conv is [C_out, H_out, W_out] = [1152, 64, 64] (planar)
@@ -960,7 +984,8 @@ static void vision_downsample_and_project(struct TIEContext *ctx)
 	const int patch_size = vm->patch_size;
 	const int embed_dim = vm->embed_dim;
 	const int proj_dim = vm->projection_dim;
-	const int scale_factor = vm->proj_scale_factor;
+//	const int scale_factor = vm->proj_scale_factor;
+	const int scale_factor = vm->def->params.proj_scale_factor;
 
 	const int num_patches_side = image_size / patch_size;
 	const int num_patches = num_patches_side * num_patches_side;
@@ -972,6 +997,7 @@ static void vision_downsample_and_project(struct TIEContext *ctx)
 	// The ViT has one last normalization the final layer
 	for (int i = 0; i < num_patches; ++i) {
 		MemType slice = mem_slice(&mem->hidden_state, i * embed_dim);
+
 		dispatch_layer_norm(&slice, &slice, &vm->post_ln, &vm->post_ln_bias, embed_dim, vm->norm_eps);
 	}
 
@@ -1036,6 +1062,7 @@ void vision_transformer_layer_gemma3(struct TIEContext *ctx, int layer_idx)
 	for (int i = 0; i < seq_len; ++i) {
 		MemType dest_slice = mem_slice(&mem->normed_input, i * embed_dim);
 		MemType src_slice = mem_slice(&mem->hidden_state, i * embed_dim);
+
 		dispatch_layer_norm(&dest_slice, &src_slice, &l->ln1, &l->ln1_bias, embed_dim, vm->norm_eps);
 	}
 
@@ -1065,6 +1092,7 @@ void vision_transformer_layer_gemma3(struct TIEContext *ctx, int layer_idx)
 	for (int i = 0; i < seq_len; ++i) {
 		MemType dest_slice = mem_slice(&mem->normed_input, i * embed_dim);
 		MemType src_slice = mem_slice(&mem->hidden_state, i * embed_dim);
+
 		dispatch_layer_norm(&dest_slice, &src_slice, &l->ln2, &l->ln2_bias, embed_dim, vm->norm_eps);
 	}
 
@@ -1088,8 +1116,6 @@ MemType *process_image_vision_gemma3(struct TIEContext *ctx)
 	VisionModel *vm = ctx->model_vision;
 	MemLayoutVision *mem = &ctx->vision_mem;
 
-	printf("Processing image Gemma3");
-
 	if (ctx->vision_mem.image_raw_width != vm->image_size || ctx->vision_mem.image_raw_height != vm->image_size) {
 		printf("invalid image size, supports %u x %u only\n", vm->image_size, vm->image_size);
 		return NULL;
@@ -1109,9 +1135,6 @@ MemType *process_image_vision_gemma3(struct TIEContext *ctx)
 
 	// Final downsampling
 	vision_downsample_and_project(ctx);
-
-	printf("done\n");
-	fflush(stdout);
 
 	return &mem->projected_embeddings;
 }

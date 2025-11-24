@@ -101,6 +101,13 @@ void free_string_pool(StringPool *pool)
 	}
 }
 
+static inline void buf_write_byte(char *buf, int *pos, int max_len, unsigned char byte)
+{
+	if (*pos < max_len - 1) { // Leave room for null terminator
+		buf[(*pos)++] = (char)byte;
+	}
+}
+
 void replace_g_spaces(char *s)
 {
 	for (char *p = s; *p;) {
@@ -212,15 +219,15 @@ void encode_cp_to_utf8(uint32_t cp, char *dest_buf, size_t *len)
 		*len = 2;
 	} else if (cp < 0x10000) { // 3 bytes
 		dest_buf[0] = (char)(0xE0 | (cp >> 12));
-	dest_buf[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
-	dest_buf[2] = (char)(0x80 | (cp & 0x3F));
-	*len = 3;
+		dest_buf[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+		dest_buf[2] = (char)(0x80 | (cp & 0x3F));
+		*len = 3;
 	} else if (cp <= 0x10FFFF) { // 4 bytes
 		dest_buf[0] = (char)(0xF0 | (cp >> 18));
-	dest_buf[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
-	dest_buf[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
-	dest_buf[3] = (char)(0x80 | (cp & 0x3F));
-	*len = 4;
+		dest_buf[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+		dest_buf[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+		dest_buf[3] = (char)(0x80 | (cp & 0x3F));
+		*len = 4;
 	} else {
 		// Error or 0xFFFD
 		dest_buf[0] = '?';
@@ -480,91 +487,77 @@ unsigned int decode_utf8(unsigned int *state, unsigned int *codep, unsigned char
 	return 0;
 }
 
-void print_codepoint_as_utf8(unsigned int cp)
+static void write_codepoint_to_buf(unsigned int cp, char *buf, int *pos, int max_len)
 {
-	if (cp == 0xFFFD) { // Handle replacement character
-		printf("\xEF\xBF\xBD");
+	if (cp == 0xFFFD) {
+		// Replacement char EF BF BD
+		buf_write_byte(buf, pos, max_len, 0xEF);
+		buf_write_byte(buf, pos, max_len, 0xBF);
+		buf_write_byte(buf, pos, max_len, 0xBD);
 		return;
 	}
-
-	if (cp < 0x80) { // 1 byte
-		printf("%c", (char)cp);
-	} else if (cp < 0x800) { // 2 bytes
-		printf("%c", (char)(0xC0 | (cp >> 6)));
-		printf("%c", (char)(0x80 | (cp & 0x3F)));
-	} else if (cp < 0x10000) { // 3 bytes
-		printf("%c", (char)(0xE0 | (cp >> 12)));
-		printf("%c", (char)(0x80 | ((cp >> 6) & 0x3F)));
-		printf("%c", (char)(0x80 | (cp & 0x3F)));
-	} else if (cp <= 0x10FFFF) { // 4 bytes
-		printf("%c", (char)(0xF0 | (cp >> 18)));
-		printf("%c", (char)(0x80 | ((cp >> 12) & 0x3F)));
-		printf("%c", (char)(0x80 | ((cp >> 6) & 0x3F)));
-		printf("%c", (char)(0x80 | (cp & 0x3F)));
+	if (cp < 0x80) {
+		buf_write_byte(buf, pos, max_len, (unsigned char)cp);
+	} else if (cp < 0x800) {
+		buf_write_byte(buf, pos, max_len, (0xC0 | (cp >> 6)));
+		buf_write_byte(buf, pos, max_len, (0x80 | (cp & 0x3F)));
+	} else if (cp < 0x10000) {
+		buf_write_byte(buf, pos, max_len, (0xE0 | (cp >> 12)));
+		buf_write_byte(buf, pos, max_len, (0x80 | ((cp >> 6) & 0x3F)));
+		buf_write_byte(buf, pos, max_len, (0x80 | (cp & 0x3F)));
+	} else if (cp <= 0x10FFFF) {
+		buf_write_byte(buf, pos, max_len, (0xF0 | (cp >> 18)));
+		buf_write_byte(buf, pos, max_len, (0x80 | ((cp >> 12) & 0x3F)));
+		buf_write_byte(buf, pos, max_len, (0x80 | ((cp >> 6) & 0x3F)));
+		buf_write_byte(buf, pos, max_len, (0x80 | (cp & 0x3F)));
 	}
 }
 
-void token_out_utf8_stream(struct TIEContext *ctx, int token_id)
+int decode_token_bpe(struct TIEContext *ctx, int token_id, char *buf, int buf_len)
 {
 	const char *p = (const char *)get_token_string(ctx, token_id);
 	if (p == NULL)
-		return;
+		return 0;
 
 	int len = get_token_string_length(ctx, token_id);
 	int token_type = ctx->tokenizer.token_types[token_id];
-
-	ctx->tokenizer.utf8_state = 0;
+	int written = 0;
 
 	if (token_type == GGUF_TOKEN_TYPE_NORMAL) {
-		// We convert these keys back to their *real bytes* using our O(1) map.
-		unsigned char byte_buffer[64];
-		int b_idx = 0;
-
 		for (int i = 0; i < len; i++) {
-			unsigned int cp = decode_utf8(&ctx->tokenizer.utf8_state, &ctx->tokenizer.utf8_codepoint, (unsigned char)p[i]);
+			unsigned int cp = decode_utf8(&ctx->tokenizer.utf8_state, &ctx->tokenizer.utf8_codepoint,
+						      (unsigned char)p[i]);
 
 			if (cp == 0)
-				continue;
+				continue; // Partial UTF-8 byte
+
 			if (cp == 0xFFFD || cp > 511) {
-				if (b_idx < 63)
-					byte_buffer[b_idx++] = '?';
+				buf_write_byte(buf, &written, buf_len, '?');
 				continue;
 			}
 
-			// Get the real byte from map
 			int real_byte = ctx->tokenizer.bpe_decoder_map[cp];
-
 			if (real_byte != -1) {
-				if (b_idx < 64) {
-					byte_buffer[b_idx++] = (unsigned char)real_byte;
-				}
+				buf_write_byte(buf, &written, buf_len, (unsigned char)real_byte);
 			} else {
-				// This codepoint is not in the map (e.g., from a "broken"
-				// vocab token). We'll print '?' as a fallback.
-				if (b_idx < 63)
-					byte_buffer[b_idx++] = '?';
+				buf_write_byte(buf, &written, buf_len, '?');
 			}
 		}
-
-		// Print the entire resulting byte buffer at once
-		if (b_idx > 0) {
-			fwrite(byte_buffer, 1, b_idx, stdout);
-			fflush(stdout);
-		}
-
 	} else {
-		// Special Token
-		// The token string is literal text. Print it as-is.
+		// Special Token / User Defined -> Literal Output
 		for (int i = 0; i < len; i++) {
-			unsigned int cp = decode_utf8(&ctx->tokenizer.utf8_state, &ctx->tokenizer.utf8_codepoint, (unsigned char)p[i]);
+			unsigned int cp = decode_utf8(&ctx->tokenizer.utf8_state, &ctx->tokenizer.utf8_codepoint,
+						      (unsigned char)p[i]);
 			if (cp == 0)
-				continue; // In-progress UTF-8
-
-			print_codepoint_as_utf8(cp);
+				continue;
+			write_codepoint_to_buf(cp, buf, &written, buf_len);
 		}
-		fflush(stdout);
 	}
+
+	buf[written] = '\0';
+	return written;
 }
+
 
 // SentencePiece detokenization
 char *sp_preprocess_input(const char *text, size_t *out_len)
@@ -708,21 +701,25 @@ _tokenize_sp_error:
 	return NULL;
 }
 
-void token_out_sp(struct TIEContext *ctx, int token_id)
+int decode_token_sp(struct TIEContext *ctx, int token_id, char *buf, int buf_len)
 {
 	const char *p = get_token_string(ctx, token_id);
 	int len = get_token_string_length(ctx, token_id);
+	int written = 0;
 
 	for (int i = 0; i < len; i++) {
 		unsigned char ch = (unsigned char)p[i];
+		// Handle Lower One Eighth Block (U+2581) -> Space
 		if (ch == 0xE2 && i + 2 < len && (unsigned char)p[i + 1] == 0x96 && (unsigned char)p[i + 2] == 0x81) {
-			// UTF-8 for "▁" (U+2581)
-			putchar(' ');
-			i += 2; // skip extra bytes
+			buf_write_byte(buf, &written, buf_len, ' ');
+			i += 2;
 		} else {
-			putchar(ch);
+			buf_write_byte(buf, &written, buf_len, ch);
 		}
 	}
+
+	buf[written] = '\0';
+	return written;
 }
 
 void bpe_map_init_decoder(int *map)
@@ -803,89 +800,60 @@ int init_token_table(struct TIEContext *ctx, int num_tokens)
 
 int build_vision_tokens_gemma3(struct TIEContext *ctx, int *token_buf, int buf_pos)
 {
+	ModelDef *def = ctx->model->def;
 	int pos = buf_pos;
 
-	token_buf[pos++] = ctx->model->double_newline_token_id; // DOUBLE NEWLINE
-	token_buf[pos++] = ctx->model->vision_start_token_id;	// <start_of_image>
+	token_buf[pos++] = def->params.double_newline_token_id; // DOUBLE NEWLINE
+	token_buf[pos++] = def->params.vision_start_token_id;	// <start_of_image>
 
 	for (int i = 0; i < 256; ++i)
-		token_buf[pos++] = ctx->model->vision_embed_token_id;
+		token_buf[pos++] = def->params.vision_embed_token_id;
 
-	token_buf[pos++] = ctx->model->vision_end_token_id;	// <end_of_image>
-	token_buf[pos++] = ctx->model->double_newline_token_id; // DOUBLE NEWLINE
+	token_buf[pos++] = def->params.vision_end_token_id;	// <end_of_image>
+	token_buf[pos++] = def->params.double_newline_token_id; // DOUBLE NEWLINE
 
 	return pos - buf_pos;
 }
 
-#if 0
 int build_vision_tokens_qwen3vl(struct TIEContext *ctx, int *token_buf, int buf_pos)
 {
 	int pos = buf_pos;
+	VisionModel *vm = ctx->model_vision;
+	ModelDef *def = ctx->model->def;
 
-	int image_size = ctx->model_vision->image_size;
-	int patch_size = ctx->model_vision->patch_size;
-	int patches_per_side = image_size / patch_size;						// 768 / 16 = 48
-	int merged_patches_per_side = patches_per_side / ctx->model_vision->spatial_merge_size; // 48 / 2 = 24
-	int num_patches = merged_patches_per_side * merged_patches_per_side;			// 576
+	// Use Dynamic Dimensions from the loaded image
+	int raw_w = ctx->vision_mem.image_raw_width;
+	int raw_h = ctx->vision_mem.image_raw_height;
+
+	// Calculate patches
+	int w_patches = raw_w / vm->patch_size;
+	int h_patches = raw_h / vm->patch_size;
+
+	// Calculate merged grid size
+	// Qwen3-VL reduces resolution by spatial_merge_size
+	int merged_w = w_patches / vm->spatial_merge_size;
+	int merged_h = h_patches / vm->spatial_merge_size;
+
+	int num_patches = merged_w * merged_h;
+
+	printf("Dynamic Vision Tokens: %dx%d image -> %dx%d patches -> %d tokens\n", raw_w, raw_h, merged_w, merged_h,
+	       num_patches);
 
 	// Add <|vision_start|> token
-	token_buf[pos++] = ctx->model->vision_start_token_id;
+	token_buf[pos++] = def->params.vision_start_token_id;
 
 	// Add the *same* <|vision_pad|> token N times
-	int patch_token = ctx->model->vision_embed_token_id;
+	int patch_token = def->params.vision_embed_token_id;
 
 	for (int i = 0; i < num_patches; i++) {
 		token_buf[pos++] = patch_token;
 	}
 
 	// Add <|vision_end|> token
-	token_buf[pos++] = ctx->model->vision_end_token_id;
+	token_buf[pos++] = def->params.vision_end_token_id;
 
 	// Add the required newline
-	token_buf[pos++] = ctx->model->newline_token_id;
+	token_buf[pos++] = def->params.newline_token_id;
 
 	return pos - buf_pos;
-}
-#endif
-
-int build_vision_tokens_qwen3vl(struct TIEContext *ctx, int *token_buf, int buf_pos)
-{
-    int pos = buf_pos;
-    VisionModel *vm = ctx->model_vision;
-
-    // Use Dynamic Dimensions from the loaded image
-    int raw_w = ctx->vision_mem.image_raw_width;
-    int raw_h = ctx->vision_mem.image_raw_height;
-
-    // Calculate patches
-    int w_patches = raw_w / vm->patch_size;
-    int h_patches = raw_h / vm->patch_size;
-
-    // Calculate merged grid size
-    // Qwen3-VL reduces resolution by spatial_merge_size
-    int merged_w = w_patches / vm->spatial_merge_size;
-    int merged_h = h_patches / vm->spatial_merge_size;
-
-    int num_patches = merged_w * merged_h;
-
-    printf("Dynamic Vision Tokens: %dx%d image -> %dx%d patches -> %d tokens\n", 
-    	    raw_w, raw_h, merged_w, merged_h, num_patches);
-
-    // Add <|vision_start|> token
-    token_buf[pos++] = ctx->model->vision_start_token_id;
-
-    // Add the *same* <|vision_pad|> token N times
-    int patch_token = ctx->model->vision_embed_token_id;
-
-    for (int i = 0; i < num_patches; i++) {
-        token_buf[pos++] = patch_token;
-    }
-
-    // Add <|vision_end|> token
-    token_buf[pos++] = ctx->model->vision_end_token_id;
-
-    // Add the required newline
-    token_buf[pos++] = ctx->model->newline_token_id;
-
-    return pos - buf_pos;
 }
