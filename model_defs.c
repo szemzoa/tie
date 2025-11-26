@@ -105,6 +105,35 @@ ModelDef QWEN3_DEF = {
 	DECLARE_LANGUAGE_MODEL_DEF(QWEN3, QWEN3)
 };
 
+ModelDef DEEPSEEK_QWEN3_DEF = {
+	.arch = ARCH_DEEPSEEK_QWEN3,
+	.name = "Deepseek-R1-0528-Qwen3",
+	.params =
+		{
+			.sot_token_id = -1,
+			.eot_token_id = -1,
+			.eos_token_id = 151645,
+			.newline_token_id = -1,
+			.role_user_token_id = 151669,
+			.role_model_token_id = 151670,
+			.vision_start_token_id = -1,
+		        .vision_end_token_id   = -1,
+		        .vision_embed_token_id = -1,
+
+		},
+	.interface =
+		{
+//			.build_system_prompt = build_system_prompt_qwen3,
+			.tokenize_prompt = tokenize_bpe,
+			.decode_token = decode_token_bpe,
+			.prepare_next_token = prepare_next_token_standard,
+			.embedding_scale = NULL,
+			.transformer_layer = transformer_layer_qwen3,
+			.build_rope_cache = build_rope_cache_global,
+		},
+	DECLARE_LANGUAGE_MODEL_DEF(QWEN3, QWEN3)
+};
+
 ModelDef QWEN3_MOE_DEF = {
 	.arch = ARCH_QWEN3_MOE,
 	.name = "Qwen3-MoE",

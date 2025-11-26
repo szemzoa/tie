@@ -15,6 +15,7 @@ enum {
 	ARCH_GEMMA3,
 	ARCH_GEMMA3N,
 	ARCH_CLIP_VISION,
+	ARCH_DEEPSEEK_QWEN3,
 };
 
 enum {
@@ -173,6 +174,7 @@ typedef struct {
 	uint64_t vocab_size;
 	uint64_t merges_size;
 	int seq_length;
+	int context_size;
 
 	int bos_token_id; /* begin of seq */
 	int unk_token_id;
@@ -238,7 +240,7 @@ typedef struct {
 	int num_heads;
 	float norm_eps;
 
-	int spatial_merge_size; /* Qwen3-VL */
+	int spatial_merge_size;		/* Qwen3-VL */
 	int num_deepstack_layers;	/* Qwen3-VL */
 	ModelArray is_deepstack_layers; /* Qwen3-VL */
 
@@ -268,14 +270,15 @@ typedef struct {
 } VisionModel;
 
 typedef struct {
-	const char	*name;
-	int 		id;
-	ModelDef 	*def;
+	const char *name;
+	int id;
+	ModelDef *def;
+	char *base_name;
 } ModelArch;
 
 extern ModelDef *find_model_def(struct GGUFModel *gguf_model);
 
-extern int detect_architecture(const char *model_name);
+extern int detect_architecture(const char *model_name, const char *base_name);
 extern int detect_projector(const char *model_name);
 
 extern int model_load(struct TIEContext *ctx, struct GGUFModel *gguf, void **model, const ModelDef *def, int use_mmap);

@@ -108,16 +108,16 @@ bool tools_process_token(struct TIEContext *ctx, int token)
 		}
 
 		// Append token string to buffer
-	        char piece[256];
-	        int len = ctx->model->interface.decode_token(ctx, token, piece, sizeof(piece));
+		char piece[256];
+		int len = ctx->model->interface.decode_token(ctx, token, piece, sizeof(piece));
 
-	        if (tc->buf_len + len < TOOL_BUFFER_SIZE - 1) {
-	            memcpy(tc->buffer + tc->buf_len, piece, len);
-	            tc->buf_len += len;
-	            tc->buffer[tc->buf_len] = '\0';
-	        }
+		if (tc->buf_len + len < TOOL_BUFFER_SIZE - 1) {
+			memcpy(tc->buffer + tc->buf_len, piece, len);
+			tc->buf_len += len;
+			tc->buffer[tc->buf_len] = '\0';
+		}
 
-	        return true;
+		return true;
 	}
 
 	return false;
@@ -147,29 +147,28 @@ char *build_system_prompt_qwen3(struct TIEContext *ctx)
 char *build_system_prompt_gemma3(struct TIEContext *ctx)
 {
 	return strdup(
-            "<bos><start_of_turn>system\n"
-            "You have access to functions. If you decide to invoke any of the function(s), you MUST put it in the format of\n"
-            "{\"name\": function name, \"parameters\": dictionary of argument name and its value}\n"
-            "\n"
-	    "IMPORTANT: You must use the EXACT function names and parameter names defined below.\n"
-            "You SHOULD NOT include any other text in the response if you call a function\n"
-            "[\n"
-            "  {\n"
-            "    \"name\": \"set_lamp_state\",\n"
-            "    \"description\": \"Control a smart lamp\",\n"
-            "    \"parameters\": {\n"
-            "      \"type\": \"object\",\n"
-            "      \"properties\": {\n"
-            "        \"state\": {\n"
-            "          \"type\": \"string\",\n"
-            "          \"enum\": [\"on\", \"off\"],\n"
-            "          \"description\": \"Turn the lamp on or off\"\n"
-            "        }\n"
-            "      },\n"
-            "      \"required\": [\"state\"]\n"
-            "    }\n"
-            "  }\n"
-            "]\n"
-    	    "<end_of_turn>\n"
-        );
+		"<bos><start_of_turn>system\n"
+		"You have access to functions. If you decide to invoke any of the function(s), you MUST put it in the format of\n"
+		"{\"name\": function name, \"parameters\": dictionary of argument name and its value}\n"
+		"\n"
+		"IMPORTANT: You must use the EXACT function names and parameter names defined below.\n"
+		"You SHOULD NOT include any other text in the response if you call a function\n"
+		"[\n"
+		"  {\n"
+		"    \"name\": \"set_lamp_state\",\n"
+		"    \"description\": \"Control a smart lamp\",\n"
+		"    \"parameters\": {\n"
+		"      \"type\": \"object\",\n"
+		"      \"properties\": {\n"
+		"        \"state\": {\n"
+		"          \"type\": \"string\",\n"
+		"          \"enum\": [\"on\", \"off\"],\n"
+		"          \"description\": \"Turn the lamp on or off\"\n"
+		"        }\n"
+		"      },\n"
+		"      \"required\": [\"state\"]\n"
+		"    }\n"
+		"  }\n"
+		"]\n"
+		"<end_of_turn>\n");
 }

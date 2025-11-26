@@ -11,8 +11,8 @@
 #define SILU_X_MIN -10.0f
 #define SILU_X_MAX 10.0f
 
-#define MIN(a,b) ((a)<(b)?(a):(b))
-#define MAX(a,b) ((a)>(b)?(a):(b))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 typedef struct {
 	int index;
@@ -147,12 +147,12 @@ typedef struct {
 } MemLayout;
 
 typedef struct {
-    MemType q_head;
-    MemType k_head;
-    MemType v_head;
-    MemType v_head_t;
-    MemType scores;
-    MemType output_head;
+	MemType q_head;
+	MemType k_head;
+	MemType v_head;
+	MemType v_head_t;
+	MemType scores;
+	MemType output_head;
 } VisionAttnScratch;
 
 typedef struct {
@@ -200,6 +200,7 @@ typedef struct {
 	int token_end_idx;
 	int head_start;
 	int head_end;
+	int sink_len;
 } attention_worker_task_t;
 
 typedef struct {
@@ -235,11 +236,7 @@ extern void dispatch_gelu_inplace(MemType *tensor, int size);
 
 extern void softmax(float *x, int size);
 
-extern void attention_worker(void *arg);
-extern void attention_worker_gemma3n(void *arg);
-
 extern int transformer_layer_qwen3(struct TIEContext *ctx, int layer_idx, int batch_len);
-extern int transformer_layer_qwen3vl(struct TIEContext *ctx, int layer_idx, int batch_len);
 extern int transformer_layer_gemma3(struct TIEContext *ctx, int layer_idx, int batch_len);
 extern int transformer_layer_gemma3n(struct TIEContext *ctx, int layer_idx, int batch_len);
 

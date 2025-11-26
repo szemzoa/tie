@@ -16,18 +16,19 @@
 extern void build_rope_cache_dynamic(struct TIEContext *ctx, size_t seq_len);
 
 const ModelArch known_archs[] = {
-	{"qwen3", 	ARCH_QWEN3, 		&QWEN3_DEF},
-	{"qwen3moe", 	ARCH_QWEN3_MOE,		&QWEN3_MOE_DEF},
-	{"gemma3", 	ARCH_GEMMA3,		&GEMMA3_DEF},
-	{"gemma3n", 	ARCH_GEMMA3N,		&GEMMA3N_DEF},
-	{"clip", 	ARCH_CLIP_VISION,	NULL},
-	{"qwen3vl", 	ARCH_QWEN3VL,		&QWEN3VL_DEF},
-	{"qwen3vlmoe", 	ARCH_QWEN3VL_MOE,	&QWEN3VL_MOE_DEF},
+	{"qwen3", 	ARCH_QWEN3, 		&QWEN3_DEF, NULL},
+	{"qwen3moe", 	ARCH_QWEN3_MOE,		&QWEN3_MOE_DEF, NULL},
+	{"gemma3", 	ARCH_GEMMA3,		&GEMMA3_DEF, NULL},
+	{"gemma3n", 	ARCH_GEMMA3N,		&GEMMA3N_DEF, NULL},
+	{"clip", 	ARCH_CLIP_VISION,	NULL, NULL},
+	{"qwen3vl", 	ARCH_QWEN3VL,		&QWEN3VL_DEF, NULL},
+	{"qwen3vlmoe", 	ARCH_QWEN3VL_MOE,	&QWEN3VL_MOE_DEF, NULL},
+	{"qwen3", 	ARCH_DEEPSEEK_QWEN3, 	&DEEPSEEK_QWEN3_DEF, "DeepSeek"},
 };
 
 const ModelArch known_projectors[] = {
-	{"gemma3", 	VISION_PROJECTOR_GEMMA3, 	&GEMMA3_CLIP_DEF},
-	{"qwen3vl_merger", VISION_PROJECTOR_QWEN3VL, 	&QWEN3VL_CLIP_DEF}
+	{"gemma3", 	VISION_PROJECTOR_GEMMA3, 	&GEMMA3_CLIP_DEF, NULL},
+	{"qwen3vl_merger", VISION_PROJECTOR_QWEN3VL, 	&QWEN3VL_CLIP_DEF, NULL}
 };
 
 #define MAX_CHUNK_SIZE (1LL << 30) // 1073741824 bytes
@@ -58,7 +59,7 @@ static ssize_t safe_pread(int fd, void *buf, uint64_t count, off_t offset)
 	return total_read;
 }
 
-int detect_architecture(const char *model_name)
+int detect_architecture(const char *model_name, const char *base_name)
 {
 	const ModelArch *best_match = NULL;
 	size_t best_len = 0;
@@ -69,9 +70,17 @@ int detect_architecture(const char *model_name)
 		if (strstr(model_name, current_arch->name)) {
 			size_t current_len = strlen(current_arch->name);
 
-			if (current_len > best_len) {
-				best_len = current_len;
-				best_match = current_arch;
+			if (current_arch->base_name == NULL) {
+
+				if (current_len > best_len) {
+					best_len = current_len;
+					best_match = current_arch;
+				}
+
+			} else {
+
+				if (strstr(base_name, current_arch->base_name))
+				    return current_arch->id;
 			}
 		}
 	}
@@ -506,7 +515,7 @@ void build_rope_cache_global(struct TIEContext *ctx, size_t seq_len)
 		exit(EXIT_FAILURE);
 	}
 
-	rope_cache_init(ctx, ctx->model->rope_cache_global, ctx->model->seq_length, ctx->model->head_dim,
+	rope_cache_init(ctx, ctx->model->rope_cache_global, seq_len, ctx->model->head_dim,
 			ctx->model->rope_freq_base, ctx->model->yarn_scale_factor);
 }
 
@@ -520,10 +529,10 @@ void build_rope_cache_shared(struct TIEContext *ctx, size_t seq_len)
 		exit(EXIT_FAILURE);
 	}
 
-	rope_cache_init(ctx, ctx->model->rope_cache_global, ctx->model->seq_length, ctx->model->head_dim,
+	rope_cache_init(ctx, ctx->model->rope_cache_global, seq_len, ctx->model->head_dim,
 			ctx->model->rope_freq_base, ctx->model->rope_scale_factor);
 
-	rope_cache_init(ctx, ctx->model->rope_cache_local, ctx->model->seq_length, ctx->model->head_dim, 10000.0f,
+	rope_cache_init(ctx, ctx->model->rope_cache_local, seq_len, ctx->model->head_dim, 10000.0f,
 			1.0f);
 }
 
@@ -543,9 +552,13 @@ int model_language_init(struct TIEContext *ctx, Model *model, const ModelDef *de
 //	ctx->model->eot_token_id = def->params.eot_token_id;
 	ctx->model->eos_token_id = def->params.eos_token_id;
 
+
+
 	/* Fallbacks */
 	if (ctx->model->rope_scale_factor == 0.0f)
 		ctx->model->rope_scale_factor = 1.0f;
+
+	ctx->model->context_size = ctx->model->seq_length;
 
 	if (ctx->config.context_length != 0)
 		ctx->model->seq_length = ctx->config.context_length;
@@ -588,14 +601,19 @@ int model_language_init(struct TIEContext *ctx, Model *model, const ModelDef *de
 		ctx->model->use_mrope = 1;
 		break;
 
+	case ARCH_DEEPSEEK_QWEN3:
+		ctx->model->attn_scale = 1.0f / sqrtf((float)ctx->model->head_dim);
+		ctx->model->add_bos_token = 1;
+		break;
+
 	default:
 		printf("%s %s model not defined?\n", __FUNCTION__, def->name);
 		break;
 	}
 
 	// Initialize RoPE cache
-	printf("init: RoPE cache\n");
-	ctx->model->interface.build_rope_cache(ctx, ctx->model->seq_length);
+	printf("init: RoPE cache, length: %u\n", ctx->model->context_size);
+	ctx->model->interface.build_rope_cache(ctx, ctx->model->context_size);
 
 	init_KV_cache(ctx);
 

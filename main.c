@@ -23,6 +23,56 @@
 #include "math_dispatch.h"
 #include "tools.h"
 
+static void handle_model(AppConfig *cfg, const char *v)
+{
+	cfg->model_path = (char *)v;
+}
+static void handle_threads(AppConfig *cfg, const char *v)
+{
+	cfg->num_threads = atoi(v);
+}
+static void handle_mmproj(AppConfig *cfg, const char *v)
+{
+	cfg->mmproj_path = (char *)v;
+}
+static void handle_image(AppConfig *cfg, const char *v)
+{
+	cfg->image_path = (char *)v;
+}
+static void handle_context(AppConfig *cfg, const char *v)
+{
+	cfg->context_length = atoi(v);
+}
+static void handle_temp(AppConfig *cfg, const char *v)
+{
+	cfg->temperature = atof(v);
+}
+static void handle_top_p(AppConfig *cfg, const char *v)
+{
+	cfg->top_p = atof(v);
+}
+static void handle_top_k(AppConfig *cfg, const char *v)
+{
+	cfg->top_k = atoi(v);
+}
+static void handle_mmap(AppConfig *cfg, const char *v)
+{
+	cfg->use_mmap = 1;
+}
+
+static const ArgSpec arg_table[] = {
+	{"model", 'm', 1, handle_model, "Path to model GGUF file"},
+	{"threads", 't', 1, handle_threads, "Number of CPU threads"},
+	{"mmproj", 'p', 1, handle_mmproj, "Multimodal projection file"},
+	{"image", 'i', 1, handle_image, "Path to an input image"},
+	{"context", 'c', 1, handle_context, "Context window size"},
+	{"temperature", 'T', 1, handle_temp, "Sampling temperature"},
+	{"top-p", 'P', 1, handle_top_p, "Nucleus sampling (top-p)"},
+	{"top-k", 'K', 1, handle_top_k, "Top-k sampling"},
+	{"mmap", 'M', 0, handle_mmap, "Use mmap to load model"},
+	{"help", 'h', 0, NULL, "Show help message"},
+};
+static const int arg_table_count = sizeof(arg_table) / sizeof(arg_table[0]);
 
 // Architecture Helpers
 static void handle_model_specific_post_step(struct TIEContext *ctx, int step, size_t prompt_len)
@@ -84,9 +134,13 @@ int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf,
 	}
 
 	// Start of User Turn
-	prompt_tokens[prompt_len++] = def->params.sot_token_id;
+	if (def->params.sot_token_id != -1)
+		prompt_tokens[prompt_len++] = def->params.sot_token_id;
+
 	prompt_tokens[prompt_len++] = def->params.role_user_token_id;
-	prompt_tokens[prompt_len++] = def->params.newline_token_id;
+
+	if (def->params.newline_token_id != -1)
+		prompt_tokens[prompt_len++] = def->params.newline_token_id;
 
 	// User's Text Message
 	memcpy(&prompt_tokens[prompt_len], user_text_tokens, user_text_token_count * sizeof(int));
@@ -108,11 +162,19 @@ int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf,
 	}
 
 	// End of User Turn & Start of Model Turn
-	prompt_tokens[prompt_len++] = def->params.eot_token_id;
-	prompt_tokens[prompt_len++] = def->params.newline_token_id;
-	prompt_tokens[prompt_len++] = def->params.sot_token_id;
+	if (def->params.eot_token_id != -1)
+		prompt_tokens[prompt_len++] = def->params.eot_token_id;
+
+	if (def->params.newline_token_id != -1)
+		prompt_tokens[prompt_len++] = def->params.newline_token_id;
+
+	if (def->params.sot_token_id != -1)
+		prompt_tokens[prompt_len++] = def->params.sot_token_id;
+
 	prompt_tokens[prompt_len++] = def->params.role_model_token_id;
-	prompt_tokens[prompt_len++] = def->params.newline_token_id;
+
+	if (def->params.newline_token_id != -1)
+		prompt_tokens[prompt_len++] = def->params.newline_token_id;
 
 	free(user_text_tokens);
 	*num_tokens = prompt_len;
@@ -132,6 +194,20 @@ int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf,
 		build_mrope_position_ids(ctx, prompt_tokens, prompt_len, has_image, ctx->kv_pos, h_patches, w_patches);
 		text_rope_cache_init(ctx, prompt_len, ctx->kv_pos);
 	}
+
+#if 0
+	char buf[256];
+	for (int i = 0; i < prompt_len; i++) {
+
+		const unsigned char *token = get_token_string(ctx, prompt_tokens[i]);
+		int len = get_token_string_length(ctx, prompt_tokens[i]);
+
+		memset(buf, 0, 256);
+		memcpy(buf, token, len);
+
+		printf("prompt_token#%u=%u, [%s]\n", i, prompt_tokens[i], buf);
+	}
+#endif
 
 	return prompt_tokens;
 }
@@ -209,11 +285,9 @@ int engine_decode(struct TIEContext *ctx, int max_new_tokens, int *out_tokens, s
 	printf("\n--- Generation Start ---\n");
 	clock_gettime(CLOCK_REALTIME, &start);
 
+	printf(ASSISTANT_OUT);
+
 	for (int step = 0; step < max_new_tokens; step++) {
-		if (ctx->kv_pos >= ctx->model->seq_length) {
-			printf("\n[Context Limit Reached]\n");
-			break;
-		}
 
 		// Architecture Specific Post-Processing (e.g., Gemma3N AltUp)
 		handle_model_specific_post_step(ctx, step, prompt_len);
@@ -233,8 +307,9 @@ int engine_decode(struct TIEContext *ctx, int max_new_tokens, int *out_tokens, s
 
 		// Sampling
 		int next_token =
-			predict_next_token((float *)ctx->mem.logits.data, ctx->model->vocab_size, "temperature", 0.7f,
-					   20, 0.95f, NULL, 0, out_tokens, gen_len, ctx->model->repetition_penalty);
+			predict_next_token((float *)ctx->mem.logits.data, ctx->model->vocab_size, "temperature",
+					   ctx->config.temperature, ctx->config.top_k, ctx->config.top_p, NULL, 0,
+					   out_tokens, gen_len, ctx->model->repetition_penalty);
 
 		/* tools process */
 		bool token_consumed = tools_process_token(ctx, next_token);
@@ -263,13 +338,13 @@ int engine_decode(struct TIEContext *ctx, int max_new_tokens, int *out_tokens, s
 		}
 
 		if (next_token == ctx->model->eos_token_id) {
+			printf(CLR_RESET);
 			printf("\n--- EOS ---\n");
 			break;
 		}
 
 		// Advance KV Position
 		ctx->kv_pos++;
-
 	}
 
 	clock_gettime(CLOCK_REALTIME, &end);
@@ -281,11 +356,12 @@ int engine_decode(struct TIEContext *ctx, int max_new_tokens, int *out_tokens, s
 
 void read_user_input(char *input_buf, size_t buf_size)
 {
-	printf("\nYou: ");
+	printf("\nYou: " USER_PROMPT);
 	if (!fgets(input_buf, buf_size, stdin)) {
 		input_buf[0] = '\0';
 	}
 	input_buf[strcspn(input_buf, "\n")] = 0;
+	printf(CLR_RESET);
 }
 
 // Main Chat Loop
@@ -311,21 +387,21 @@ void run_chat_session(struct TIEContext *ctx, int max_new_tokens, bool initial_h
 			ctx->model->interface.tokenize_prompt(ctx, system_prompt, &system_prompt_len);
 
 		// If the model needs a BOS token, and it hasn't been sent, prepend it to the system prompt.
-    		if (ctx->model->add_bos_token == 1 && ctx->model->bos_token_sent == 0)
-        		ctx->model->bos_token_sent = 1;
+		if (ctx->model->add_bos_token == 1 && ctx->model->bos_token_sent == 0)
+			ctx->model->bos_token_sent = 1;
 
 
 		printf("--- Processing System Prompt: %zu tokens ---\n", system_prompt_len);
 		clock_gettime(CLOCK_REALTIME, &start);
 
 		if (ctx->model->use_mrope == 1) {
-        		// System prompt is text-only, so h_patches=0, w_patches=0
-	                // start_pos is ctx->kv_pos (usually 0 here)
-        		build_mrope_position_ids(ctx, system_prompt_tokens, system_prompt_len,
-                                     false, ctx->kv_pos, 0, 0);
+			// System prompt is text-only, so h_patches=0, w_patches=0
+			// start_pos is ctx->kv_pos (usually 0 here)
+			build_mrope_position_ids(ctx, system_prompt_tokens, system_prompt_len, false, ctx->kv_pos, 0,
+						 0);
 
-        		text_rope_cache_init(ctx, system_prompt_len, ctx->kv_pos);
-    		}
+			text_rope_cache_init(ctx, system_prompt_len, ctx->kv_pos);
+		}
 
 		engine_prefill(ctx, system_prompt_tokens, system_prompt_len, false);
 
@@ -380,6 +456,7 @@ void run_chat_session(struct TIEContext *ctx, int max_new_tokens, bool initial_h
 		// Image is consumed after the first turn
 		current_has_image = false;
 
+
 		// Run Decode
 		engine_decode(ctx, max_new_tokens, generated_tokens, prompt_len);
 	}
@@ -389,39 +466,129 @@ void run_chat_session(struct TIEContext *ctx, int max_new_tokens, bool initial_h
 		free(prompt_tokens);
 }
 
+static const ArgSpec *find_long_opt(const char *name)
+{
+	for (int i = 0; i < arg_table_count; i++)
+		if (strcmp(arg_table[i].long_opt, name) == 0)
+			return &arg_table[i];
+	return NULL;
+}
+
+static const ArgSpec *find_short_opt(char c)
+{
+	for (int i = 0; i < arg_table_count; i++)
+		if (arg_table[i].short_opt == c)
+			return &arg_table[i];
+	return NULL;
+}
+
+static void print_help(const char *progname)
+{
+	printf("Usage: %s [OPTIONS]\n\n", progname);
+	printf("Options:\n");
+
+	int max_len = 0;
+	for (int i = 0; i < arg_table_count; i++) {
+		int len = 2; // two spaces
+		if (arg_table[i].short_opt)
+			len += 2; // "-x"
+		if (arg_table[i].long_opt)
+			len += 2 + strlen(arg_table[i].long_opt); // ", --long"
+		if (arg_table[i].requires_value)
+			len += 6; // " <val>"
+		if (len > max_len)
+			max_len = len;
+	}
+
+	// Print options aligned
+	for (int i = 0; i < arg_table_count; i++) {
+		const ArgSpec *a = &arg_table[i];
+		char buf[128];
+
+		if (a->requires_value) {
+			snprintf(buf, sizeof(buf), "  -%c, --%s <val>", a->short_opt, a->long_opt);
+		} else {
+			snprintf(buf, sizeof(buf), "  -%c, --%s", a->short_opt, a->long_opt);
+		}
+
+		printf("  %-*s %s\n", max_len, buf, a->description);
+	}
+
+	printf("\n");
+}
+
+
 AppConfig parse_args(int argc, char *argv[])
 {
 	AppConfig config = {0};
-	config.num_threads = 1;
+	config.num_threads = 4;
+	config.temperature = 0.7f;
+	config.top_p = 0.95f;
+	config.top_k = 20;
+
+	if (argc == 1) {
+		print_help(argv[0]);
+		exit(0);
+	}
 
 	for (int i = 1; i < argc; i++) {
-		if (strcmp(argv[i], "-m") == 0 || strcmp(argv[i], "--model") == 0)
-			config.model_path = argv[++i];
-		else if (strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--threads") == 0)
-			config.num_threads = atoi(argv[++i]);
-		else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--mmproj") == 0)
-			config.mmproj_path = argv[++i];
-		else if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--image") == 0)
-			config.image_path = argv[++i];
-		else if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--context") == 0)
-			config.context_length = atoi(argv[++i]);
-		else if (strcmp(argv[i], "--use-mmap") == 0)
-			config.use_mmap = 1;
-		else {
-			printf("Unknown option: %s\n", argv[i]);
-			exit(1);
+		const char *arg = argv[i];
+
+		// Long option: --something
+		if (strncmp(arg, "--", 2) == 0) {
+			const char *name = arg + 2;
+			const ArgSpec *spec = find_long_opt(name);
+			if (!spec) {
+				fprintf(stderr, "Unknown option: %s\n", arg);
+				exit(1);
+			}
+
+			const char *value = NULL;
+			if (spec->requires_value) {
+				if (i + 1 >= argc) {
+					fprintf(stderr, "Option --%s requires a value\n", name);
+					exit(1);
+				}
+				value = argv[++i];
+			}
+
+			spec->handler(&config, value);
+			continue;
 		}
+
+		// Short option: -x
+		if (arg[0] == '-' && arg[1] != '\0') {
+			const ArgSpec *spec = find_short_opt(arg[1]);
+			if (!spec) {
+				fprintf(stderr, "Unknown option: %s\n", arg);
+				exit(1);
+			}
+
+			const char *value = NULL;
+			if (spec->requires_value) {
+				if (i + 1 >= argc) {
+					fprintf(stderr, "Option -%c requires a value\n", arg[1]);
+					exit(1);
+				}
+				value = argv[++i];
+			}
+
+			spec->handler(&config, value);
+			continue;
+		}
+
+		// Unknown non-option argument
+		fprintf(stderr, "Unknown argument: %s\n", arg);
+		exit(1);
 	}
+
 	return config;
 }
+
 
 int main(int argc, char *argv[])
 {
 	printf("Toy Inference Engine v%u.%u\n", VERSION_MAJOR, VERSION_MINOR);
-	if (argc < 2) {
-		printf("Usage: %s -m <model.gguf> [-v <mmproj.gguf> -i <image.bmp>]\n", argv[0]);
-		return 0;
-	}
 
 	setlocale(LC_ALL, "en_US.UTF-8");
 
@@ -471,7 +638,21 @@ int main(int argc, char *argv[])
 			printf("Loaded image: %s\n", ctx->config.image_path);
 		}
 	}
-/*
+
+#if 0
+	char buf[256];
+	for (int i=0; i < ctx->model->vocab_size; i++) {
+		const unsigned char *token = get_token_string(ctx, i);
+		int len = get_token_string_length(ctx, i);
+
+		memset(buf, 0, 256);
+		memcpy(buf, token, len);
+
+		printf("token #%u [%s]\n", i, buf);
+	}
+#endif
+
+#if 0
 	printf("sot_token_id: %d\n", ctx->model->def->params.sot_token_id);
 	printf("eot_token_id: %d\n", ctx->model->def->params.eot_token_id);
 	printf("eos_token_id: %d\n", ctx->model->def->params.eos_token_id);
@@ -487,7 +668,7 @@ int main(int argc, char *argv[])
 	printf("unk_token_id: %d\n", ctx->model->unk_token_id);
 	printf("pad_token_id: %d\n", ctx->model->pad_token_id);
 	printf("eos_token_id: %d\n", ctx->model->eos_token_id);
-*/
+#endif
 
 	// Run Chat
 	run_chat_session(ctx, 8192, has_image);

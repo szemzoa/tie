@@ -411,85 +411,88 @@ __attribute__((target("avx2"))) static void dequantize_row_q4k_f32_avx2(const vo
 
 __attribute__((target("avx2"))) float dot_product_f32_q6k_avx2(const float *x, const block_q6_k *block)
 {
-    // Two accumulators to hide FMA latency
-    __m256 acc0 = _mm256_setzero_ps();
-    __m256 acc1 = _mm256_setzero_ps();
+	// Two accumulators to hide FMA latency
+	__m256 acc0 = _mm256_setzero_ps();
+	__m256 acc1 = _mm256_setzero_ps();
 
-    const float d = fp16_to_fp32(block->d);
-    __m256 d_vec = _mm256_set1_ps(d);
+	const float d = fp16_to_fp32(block->d);
+	__m256 d_vec = _mm256_set1_ps(d);
 
-    const uint8_t *ql = block->ql;
-    const uint8_t *qh = block->qh;
-    const int8_t *sc = block->scales;
+	const uint8_t *ql = block->ql;
+	const uint8_t *qh = block->qh;
+	const int8_t *sc = block->scales;
 
-    // Loop over the two halves (0..127 and 128..255)
-    for (int n = 0; n < 2; n++) {
-        const float *x_ptr = x + n * 128;
-        const uint8_t *ql_ptr = ql + n * 64;
-        const uint8_t *qh_ptr = qh + n * 32;
-        const int8_t *sc_ptr = sc + n * 8;
+	// Loop over the two halves (0..127 and 128..255)
+	for (int n = 0; n < 2; n++) {
+		const float *x_ptr = x + n * 128;
+		const uint8_t *ql_ptr = ql + n * 64;
+		const uint8_t *qh_ptr = qh + n * 32;
+		const int8_t *sc_ptr = sc + n * 8;
 
-        // Process 32 elements (4 scales) per iteration
-        // We unroll the inner logic slightly to group loads
-        for (int l = 0; l < 32; l += 8) {
-            int is = (l >= 16) ? 1 : 0; // Scale index offset
+		// Process 32 elements (4 scales) per iteration
+		// We unroll the inner logic slightly to group loads
+		for (int l = 0; l < 32; l += 8) {
+			int is = (l >= 16) ? 1 : 0; // Scale index offset
 
-            // --- Load Scales ---
-            // We need scales for 4 groups: [is+0], [is+2], [is+4], [is+6]
-            __m256 sc0 = _mm256_set1_ps((float)sc_ptr[is + 0]);
-            __m256 sc1 = _mm256_set1_ps((float)sc_ptr[is + 2]);
-            __m256 sc2 = _mm256_set1_ps((float)sc_ptr[is + 4]);
-            __m256 sc3 = _mm256_set1_ps((float)sc_ptr[is + 6]);
+			// --- Load Scales ---
+			// We need scales for 4 groups: [is+0], [is+2], [is+4], [is+6]
+			__m256 sc0 = _mm256_set1_ps((float)sc_ptr[is + 0]);
+			__m256 sc1 = _mm256_set1_ps((float)sc_ptr[is + 2]);
+			__m256 sc2 = _mm256_set1_ps((float)sc_ptr[is + 4]);
+			__m256 sc3 = _mm256_set1_ps((float)sc_ptr[is + 6]);
 
-            __m256 w0 = _mm256_mul_ps(d_vec, sc0);
-            __m256 w1 = _mm256_mul_ps(d_vec, sc1);
-            __m256 w2 = _mm256_mul_ps(d_vec, sc2);
-            __m256 w3 = _mm256_mul_ps(d_vec, sc3);
+			__m256 w0 = _mm256_mul_ps(d_vec, sc0);
+			__m256 w1 = _mm256_mul_ps(d_vec, sc1);
+			__m256 w2 = _mm256_mul_ps(d_vec, sc2);
+			__m256 w3 = _mm256_mul_ps(d_vec, sc3);
 
-            // --- Load X ---
-            __m256 x0 = _mm256_loadu_ps(x_ptr + l + 0);
-            __m256 x1 = _mm256_loadu_ps(x_ptr + l + 32);
-            __m256 x2 = _mm256_loadu_ps(x_ptr + l + 64);
-            __m256 x3 = _mm256_loadu_ps(x_ptr + l + 96);
+			// --- Load X ---
+			__m256 x0 = _mm256_loadu_ps(x_ptr + l + 0);
+			__m256 x1 = _mm256_loadu_ps(x_ptr + l + 32);
+			__m256 x2 = _mm256_loadu_ps(x_ptr + l + 64);
+			__m256 x3 = _mm256_loadu_ps(x_ptr + l + 96);
 
-            // --- Load Quants ---
-            __m128i ql_v = _mm_loadu_si128((const __m128i *)(ql_ptr + l));
-            __m128i qh_v = _mm_loadu_si128((const __m128i *)(qh_ptr + l));
-            __m128i ql_v32 = _mm_loadu_si128((const __m128i *)(ql_ptr + l + 32));
+			// --- Load Quants ---
+			__m128i ql_v = _mm_loadu_si128((const __m128i *)(ql_ptr + l));
+			__m128i qh_v = _mm_loadu_si128((const __m128i *)(qh_ptr + l));
+			__m128i ql_v32 = _mm_loadu_si128((const __m128i *)(ql_ptr + l + 32));
 
-            // --- Decode q1 ---
-            __m128i ql_low = _mm_and_si128(ql_v, _mm_set1_epi8(0x0F));
-            __m128i qh_01 = _mm_and_si128(qh_v, _mm_set1_epi8(3));
-            __m128i q1_i8 = _mm_sub_epi8(_mm_or_si128(ql_low, _mm_slli_epi16(qh_01, 4)), _mm_set1_epi8(32));
-            __m256 q1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q1_i8));
-            
-            // --- Decode q2 ---
-            __m128i ql_low2 = _mm_and_si128(ql_v32, _mm_set1_epi8(0x0F));
-            __m128i qh_23 = _mm_and_si128(_mm_srli_epi16(qh_v, 2), _mm_set1_epi8(3));
-            __m128i q2_i8 = _mm_sub_epi8(_mm_or_si128(ql_low2, _mm_slli_epi16(qh_23, 4)), _mm_set1_epi8(32));
-            __m256 q2 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q2_i8));
+			// --- Decode q1 ---
+			__m128i ql_low = _mm_and_si128(ql_v, _mm_set1_epi8(0x0F));
+			__m128i qh_01 = _mm_and_si128(qh_v, _mm_set1_epi8(3));
+			__m128i q1_i8 = _mm_sub_epi8(_mm_or_si128(ql_low, _mm_slli_epi16(qh_01, 4)), _mm_set1_epi8(32));
+			__m256 q1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q1_i8));
 
-            // --- Decode q3 ---
-            __m128i ql_high = _mm_and_si128(_mm_srli_epi16(ql_v, 4), _mm_set1_epi8(0x0F));
-            __m128i qh_45 = _mm_and_si128(_mm_srli_epi16(qh_v, 4), _mm_set1_epi8(3));
-            __m128i q3_i8 = _mm_sub_epi8(_mm_or_si128(ql_high, _mm_slli_epi16(qh_45, 4)), _mm_set1_epi8(32));
-            __m256 q3 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q3_i8));
+			// --- Decode q2 ---
+			__m128i ql_low2 = _mm_and_si128(ql_v32, _mm_set1_epi8(0x0F));
+			__m128i qh_23 = _mm_and_si128(_mm_srli_epi16(qh_v, 2), _mm_set1_epi8(3));
+			__m128i q2_i8 =
+				_mm_sub_epi8(_mm_or_si128(ql_low2, _mm_slli_epi16(qh_23, 4)), _mm_set1_epi8(32));
+			__m256 q2 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q2_i8));
 
-            // --- Decode q4 ---
-            __m128i ql_high2 = _mm_and_si128(_mm_srli_epi16(ql_v32, 4), _mm_set1_epi8(0x0F));
-            __m128i qh_67 = _mm_and_si128(_mm_srli_epi16(qh_v, 6), _mm_set1_epi8(3));
-            __m128i q4_i8 = _mm_sub_epi8(_mm_or_si128(ql_high2, _mm_slli_epi16(qh_67, 4)), _mm_set1_epi8(32));
-            __m256 q4 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q4_i8));
+			// --- Decode q3 ---
+			__m128i ql_high = _mm_and_si128(_mm_srli_epi16(ql_v, 4), _mm_set1_epi8(0x0F));
+			__m128i qh_45 = _mm_and_si128(_mm_srli_epi16(qh_v, 4), _mm_set1_epi8(3));
+			__m128i q3_i8 =
+				_mm_sub_epi8(_mm_or_si128(ql_high, _mm_slli_epi16(qh_45, 4)), _mm_set1_epi8(32));
+			__m256 q3 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q3_i8));
 
-            // --- Accumulate (Pipelined) ---
-            acc0 = _mm256_fmadd_ps(w0, _mm256_mul_ps(q1, x0), acc0);
-            acc1 = _mm256_fmadd_ps(w1, _mm256_mul_ps(q2, x1), acc1);
-            acc0 = _mm256_fmadd_ps(w2, _mm256_mul_ps(q3, x2), acc0);
-            acc1 = _mm256_fmadd_ps(w3, _mm256_mul_ps(q4, x3), acc1);
-        }
-    }
+			// --- Decode q4 ---
+			__m128i ql_high2 = _mm_and_si128(_mm_srli_epi16(ql_v32, 4), _mm_set1_epi8(0x0F));
+			__m128i qh_67 = _mm_and_si128(_mm_srli_epi16(qh_v, 6), _mm_set1_epi8(3));
+			__m128i q4_i8 =
+				_mm_sub_epi8(_mm_or_si128(ql_high2, _mm_slli_epi16(qh_67, 4)), _mm_set1_epi8(32));
+			__m256 q4 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q4_i8));
 
-    return hsum_f32_avx2(_mm256_add_ps(acc0, acc1));
+			// --- Accumulate (Pipelined) ---
+			acc0 = _mm256_fmadd_ps(w0, _mm256_mul_ps(q1, x0), acc0);
+			acc1 = _mm256_fmadd_ps(w1, _mm256_mul_ps(q2, x1), acc1);
+			acc0 = _mm256_fmadd_ps(w2, _mm256_mul_ps(q3, x2), acc0);
+			acc1 = _mm256_fmadd_ps(w3, _mm256_mul_ps(q4, x3), acc1);
+		}
+	}
+
+	return hsum_f32_avx2(_mm256_add_ps(acc0, acc1));
 }
 
 __attribute__((target("avx2"))) void accumulate_weighted_V_f32_bf16_avx2(void *__restrict O, float weight,
@@ -532,69 +535,73 @@ __attribute__((target("avx2"))) void accumulate_weighted_V_f32_bf16_avx2(void *_
 
 __attribute__((target("avx2"))) float dot_product_f32_q4k_avx2(const float *x, const block_q4_k *blk)
 {
-    const float d = fp16_to_fp32(blk->d);
-    const float dmin = fp16_to_fp32(blk->dmin);
+	const float d = fp16_to_fp32(blk->d);
+	const float dmin = fp16_to_fp32(blk->dmin);
 
-    // Pre-calculate scales/mins
-    float scales[8], mins[8];
-    for (int i = 0; i < 8; i += 2) {
-        uint8_t s1, m1, s2, m2;
-        get_scale_min_k4(i + 0, blk->scales, &s1, &m1);
-        get_scale_min_k4(i + 1, blk->scales, &s2, &m2);
-        scales[i] = d * s1; mins[i] = dmin * m1;
-        scales[i + 1] = d * s2; mins[i + 1] = dmin * m2;
-    }
+	// Pre-calculate scales/mins
+	float scales[8], mins[8];
+	for (int i = 0; i < 8; i += 2) {
+		uint8_t s1, m1, s2, m2;
+		get_scale_min_k4(i + 0, blk->scales, &s1, &m1);
+		get_scale_min_k4(i + 1, blk->scales, &s2, &m2);
+		scales[i] = d * s1;
+		mins[i] = dmin * m1;
+		scales[i + 1] = d * s2;
+		mins[i + 1] = dmin * m2;
+	}
 
-    // Two accumulators to break dependency chains
-    __m256 acc0 = _mm256_setzero_ps();
-    __m256 acc1 = _mm256_setzero_ps();
-    
-    const uint8_t *q = blk->qs;
-    int is = 0;
+	// Two accumulators to break dependency chains
+	__m256 acc0 = _mm256_setzero_ps();
+	__m256 acc1 = _mm256_setzero_ps();
 
-    // Process 256 weights.
-    // We will process 128 (2 superblocks) inside the loop to unroll.
-    for (int j = 0; j < 256; j += 64) {
-        __m256 d1_vec = _mm256_set1_ps(scales[is]);
-        __m256 m1_vec = _mm256_set1_ps(mins[is]);
-        __m256 d2_vec = _mm256_set1_ps(scales[is + 1]);
-        __m256 m2_vec = _mm256_set1_ps(mins[is + 1]);
+	const uint8_t *q = blk->qs;
+	int is = 0;
 
-        // Inner loop: Process 32 bytes (64 weights)
-        // We unroll this to do two 16-byte chunks per iteration
-        for (int offset = 0; offset < 32; offset += 16) { 
-            // Chunk 1 (0..15 bytes)
-            __m128i q_i8_0 = _mm_loadu_si64(q + offset);
-            const __m128i mask_lo = _mm_set1_epi8(0x0F);
-            
-            __m256 qv_lo0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_and_si128(q_i8_0, mask_lo)));
-            __m256 qv_hi0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_and_si128(_mm_srli_epi16(q_i8_0, 4), mask_lo)));
+	// Process 256 weights.
+	// We will process 128 (2 superblocks) inside the loop to unroll.
+	for (int j = 0; j < 256; j += 64) {
+		__m256 d1_vec = _mm256_set1_ps(scales[is]);
+		__m256 m1_vec = _mm256_set1_ps(mins[is]);
+		__m256 d2_vec = _mm256_set1_ps(scales[is + 1]);
+		__m256 m2_vec = _mm256_set1_ps(mins[is + 1]);
 
-            __m256 xv_lo0 = _mm256_loadu_ps(x + j + offset);
-            __m256 xv_hi0 = _mm256_loadu_ps(x + j + 32 + offset);
+		// Inner loop: Process 32 bytes (64 weights)
+		// We unroll this to do two 16-byte chunks per iteration
+		for (int offset = 0; offset < 32; offset += 16) {
+			// Chunk 1 (0..15 bytes)
+			__m128i q_i8_0 = _mm_loadu_si64(q + offset);
+			const __m128i mask_lo = _mm_set1_epi8(0x0F);
 
-            // Use FMA: (x * (d*q - m)) = x*d*q - x*m
-            acc0 = _mm256_fmadd_ps(xv_lo0, _mm256_sub_ps(_mm256_mul_ps(qv_lo0, d1_vec), m1_vec), acc0);
-            acc0 = _mm256_fmadd_ps(xv_hi0, _mm256_sub_ps(_mm256_mul_ps(qv_hi0, d2_vec), m2_vec), acc0);
+			__m256 qv_lo0 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_and_si128(q_i8_0, mask_lo)));
+			__m256 qv_hi0 = _mm256_cvtepi32_ps(
+				_mm256_cvtepi8_epi32(_mm_and_si128(_mm_srli_epi16(q_i8_0, 4), mask_lo)));
 
-            // Chunk 2 (16..31 bytes) - Pipelined with Chunk 1
-            __m128i q_i8_1 = _mm_loadu_si64(q + offset + 8);
-            
-            __m256 qv_lo1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_and_si128(q_i8_1, mask_lo)));
-            __m256 qv_hi1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_and_si128(_mm_srli_epi16(q_i8_1, 4), mask_lo)));
+			__m256 xv_lo0 = _mm256_loadu_ps(x + j + offset);
+			__m256 xv_hi0 = _mm256_loadu_ps(x + j + 32 + offset);
 
-            __m256 xv_lo1 = _mm256_loadu_ps(x + j + offset + 8);
-            __m256 xv_hi1 = _mm256_loadu_ps(x + j + 32 + offset + 8);
+			// Use FMA: (x * (d*q - m)) = x*d*q - x*m
+			acc0 = _mm256_fmadd_ps(xv_lo0, _mm256_sub_ps(_mm256_mul_ps(qv_lo0, d1_vec), m1_vec), acc0);
+			acc0 = _mm256_fmadd_ps(xv_hi0, _mm256_sub_ps(_mm256_mul_ps(qv_hi0, d2_vec), m2_vec), acc0);
 
-            acc1 = _mm256_fmadd_ps(xv_lo1, _mm256_sub_ps(_mm256_mul_ps(qv_lo1, d1_vec), m1_vec), acc1);
-            acc1 = _mm256_fmadd_ps(xv_hi1, _mm256_sub_ps(_mm256_mul_ps(qv_hi1, d2_vec), m2_vec), acc1);
-        }
-        q += 32;
-        is += 2;
-    }
+			// Chunk 2 (16..31 bytes) - Pipelined with Chunk 1
+			__m128i q_i8_1 = _mm_loadu_si64(q + offset + 8);
 
-    acc0 = _mm256_add_ps(acc0, acc1);
-    return hsum_f32_avx2(acc0);
+			__m256 qv_lo1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_and_si128(q_i8_1, mask_lo)));
+			__m256 qv_hi1 = _mm256_cvtepi32_ps(
+				_mm256_cvtepi8_epi32(_mm_and_si128(_mm_srli_epi16(q_i8_1, 4), mask_lo)));
+
+			__m256 xv_lo1 = _mm256_loadu_ps(x + j + offset + 8);
+			__m256 xv_hi1 = _mm256_loadu_ps(x + j + 32 + offset + 8);
+
+			acc1 = _mm256_fmadd_ps(xv_lo1, _mm256_sub_ps(_mm256_mul_ps(qv_lo1, d1_vec), m1_vec), acc1);
+			acc1 = _mm256_fmadd_ps(xv_hi1, _mm256_sub_ps(_mm256_mul_ps(qv_hi1, d2_vec), m2_vec), acc1);
+		}
+		q += 32;
+		is += 2;
+	}
+
+	acc0 = _mm256_add_ps(acc0, acc1);
+	return hsum_f32_avx2(acc0);
 }
 
 __attribute__((target("avx2"))) void apply_rope_cache_f32_avx2(RopeCacheType *rope_cache, void *X, int pos,
@@ -915,30 +922,97 @@ __attribute__((target("avx2"))) void swiglu_activation_bf16_bf16_avx2(void *gate
 	}
 }
 
-__attribute__((target("avx2"))) void store_KV_cache_f32_bf16_avx2(struct TIEContext *ctx, int layer_idx, int start_pos,
-								  int batch_len)
+static inline __m256i float32_to_bf16_avx2(__m256 x0, __m256 x1)
+{
+	// Shift right by 16 to get the top 16 bits into the lower position
+	//    Result logic: 0xYYYYZZZZ -> 0x0000YYYY
+	__m256i i0 = _mm256_castps_si256(x0);
+	__m256i i1 = _mm256_castps_si256(x1);
+
+	i0 = _mm256_srli_epi32(i0, 16);
+	i1 = _mm256_srli_epi32(i1, 16);
+
+	// Pack 32-bit integers into 16-bit integers.
+	//    _mm256_packus_epi32 packs lanes:
+	//    Input:  [A0-A3][A4-A7] and [B0-B3][B4-B7]
+	//    Output: [A0-A3, B0-B3] [A4-A7, B4-B7] (Notice the lane interleaving!)
+	__m256i packed = _mm256_packus_epi32(i0, i1);
+
+	// Fix the lane ordering.
+	//    We need: [A0-A3, A4-A7] [B0-B3, B4-B7]
+	//    Permute logic: 0xd8 = (11 01 10 00) -> Order: 3 1 2 0 ? No, check docs.
+	//    We want indices 0, 2, 1, 3 from the 64-bit chunks.
+	//    0xd8 = 11_01_10_00 in binary.
+	return _mm256_permute4x64_epi64(packed, 0xd8);
+}
+
+void store_KV_cache_f32_bf16_avx2(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len, int sink_len)
 {
 	LayerKVCache *cache = &ctx->kv_cache[layer_idx];
 	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
-	uint16_t *k_cache_data = (uint16_t *)cache->k.data;
-	uint16_t *v_cache_data = (uint16_t *)cache->v.data;
-	float *K_mem_data = (float *)ctx->mem.K.data;
-	float *V_mem_data = (float *)ctx->mem.V.data;
+	int ring_size = ctx->model->seq_length;
+	int rolling_capacity = ring_size - sink_len;
 
-	for (int b = 0; b < batch_len; b++) {
-		long long cache_offset = (long long)(start_pos + b) * kv_dim;
-		long long mem_offset = (long long)b * kv_dim;
+	int tokens_written = 0;
+
+	while (tokens_written < batch_len) {
+		int current_logical_pos = start_pos + tokens_written;
+		int current_physical_pos;
+
+		// SINK + RING MAPPING
+		if (current_logical_pos < sink_len) {
+			current_physical_pos = current_logical_pos;
+		} else {
+			int offset = current_logical_pos - sink_len;
+			current_physical_pos = sink_len + (offset % rolling_capacity);
+		}
+
+		// Calculate contiguous chunk size
+		int chunk_len = 1;
+		if (current_logical_pos >= sink_len) {
+			int space_at_end = ring_size - current_physical_pos;
+			int tokens_remaining = batch_len - tokens_written;
+			chunk_len = (tokens_remaining < space_at_end) ? tokens_remaining : space_at_end;
+		}
+
+		// VECTORIZED COPY START
+		long long dest_offset = (long long)current_physical_pos * kv_dim;
+		long long src_offset = (long long)tokens_written * kv_dim;
+		long long num_elements = (long long)chunk_len * kv_dim;
+
+		uint16_t *k_cache = (uint16_t *)cache->k.data + dest_offset;
+		uint16_t *v_cache = (uint16_t *)cache->v.data + dest_offset;
+		float *K_src = (float *)ctx->mem.K.data + src_offset;
+		float *V_src = (float *)ctx->mem.V.data + src_offset;
+
 		long long i = 0;
-		for (; i <= kv_dim - 8; i += 8) {
-			__m256 k_vec = _mm256_load_ps(K_mem_data + mem_offset + i);
-			__m256 v_vec = _mm256_load_ps(V_mem_data + mem_offset + i);
-			store_f32_as_bf16_avx2(k_cache_data + cache_offset + i, k_vec);
-			store_f32_as_bf16_avx2(v_cache_data + cache_offset + i, v_vec);
+
+		// Process 16 elements at a time (512 bits of F32 input -> 256 bits of BF16 output)
+		for (; i <= num_elements - 16; i += 16) {
+			// Load K
+			__m256 k_f32_0 = _mm256_loadu_ps(K_src + i);
+			__m256 k_f32_1 = _mm256_loadu_ps(K_src + i + 8);
+			// Convert K
+			__m256i k_bf16 = float32_to_bf16_avx2(k_f32_0, k_f32_1);
+			// Store K
+			_mm256_storeu_si256((__m256i *)(k_cache + i), k_bf16);
+
+			// Load V
+			__m256 v_f32_0 = _mm256_loadu_ps(V_src + i);
+			__m256 v_f32_1 = _mm256_loadu_ps(V_src + i + 8);
+			// Convert V
+			__m256i v_bf16 = float32_to_bf16_avx2(v_f32_0, v_f32_1);
+			// Store V
+			_mm256_storeu_si256((__m256i *)(v_cache + i), v_bf16);
 		}
-		for (; i < kv_dim; i++) {
-			k_cache_data[cache_offset + i] = fp32_to_bf16(K_mem_data[mem_offset + i]);
-			v_cache_data[cache_offset + i] = fp32_to_bf16(V_mem_data[mem_offset + i]);
+
+		// Handle Scalar Remainder
+		for (; i < num_elements; i++) {
+			k_cache[i] = fp32_to_bf16(K_src[i]);
+			v_cache[i] = fp32_to_bf16(V_src[i]);
 		}
+
+		tokens_written += chunk_len;
 	}
 }
 
@@ -1211,9 +1285,10 @@ __attribute__((target("avx2"))) void geglu_activation_f32_f32_avx2(void *gate, c
 	}
 }
 
-__attribute__((target("avx2"))) void conv_2d_f32_avx2(MemType *dest, const MemType *src_image,
-						      const Tensor *kernel_tensor, const Tensor *bias_tensor, int H_in,
-						      int W_in, int stride, int padding)
+__attribute__((target("avx2"))) void conv_2d_f32_f32_f32_f32_avx2(MemType *dest, const MemType *src_image,
+								  const Tensor *kernel_tensor,
+								  const Tensor *bias_tensor, int H_in, int W_in,
+								  int stride, int padding)
 {
 	float *dest_data = (float *)dest->data;
 	const float *src_data = (const float *)src_image->data;
@@ -1316,8 +1391,9 @@ __attribute__((target("avx2"))) void conv_2d_f32_avx2(MemType *dest, const MemTy
 	}
 }
 
-__attribute__((target("avx2"))) void layer_norm_f32_f32_f32_f32_avx2(MemType *dest, const MemType *src, const Tensor *weight,
-							 const Tensor *bias, int size, float eps)
+__attribute__((target("avx2"))) void layer_norm_f32_f32_f32_f32_avx2(MemType *dest, const MemType *src,
+								     const Tensor *weight, const Tensor *bias, int size,
+								     float eps)
 {
 	float *x = (float *)src->data;
 	float *d = (float *)dest->data;
@@ -1462,5 +1538,67 @@ __attribute__((target("avx2"))) void transpose_f32_avx2(MemType *dest, const Mem
 		}
 	}
 }
+
+#if 0
+__attribute__((target("avx2"))) void quantize_row_q8_0_avx2(const float *__restrict x, void *__restrict y, int k)
+{
+	const int nb = k / QK8_0; // Q8_0 block size is 32
+	block_q8_0 *blocks = (block_q8_0 *)y;
+
+	for (int i = 0; i < nb; i++) {
+		// Load 32 floats
+		__m256 v0 = _mm256_loadu_ps(x + i * 32 + 0);
+		__m256 v1 = _mm256_loadu_ps(x + i * 32 + 8);
+		__m256 v2 = _mm256_loadu_ps(x + i * 32 + 16);
+		__m256 v3 = _mm256_loadu_ps(x + i * 32 + 24);
+
+		// Find Absolute Max to calculate scale
+		__m256 abs0 = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), v0);
+		__m256 abs1 = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), v1);
+		__m256 abs2 = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), v2);
+		__m256 abs3 = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), v3);
+
+		__m256 max_v = _mm256_max_ps(_mm256_max_ps(abs0, abs1), _mm256_max_ps(abs2, abs3));
+
+		// Horizontal Max Reduction
+		float amax = 0.0f;
+		// (Simplest reduction for clarity, full AVX reduction is faster)
+		float temp[8];
+		_mm256_storeu_ps(temp, max_v);
+		for (int j = 0; j < 8; j++)
+			if (temp[j] > amax)
+				amax = temp[j];
+
+		// Calculate scale: we want max value to map to 127
+		float d = amax / 127.0f;
+		if (!d)
+			d = 1.0f;
+		blocks[i].d = fp32_to_fp16(d); // Store as FP16
+		float id = 1.0f / d;
+
+		// Quantize: x * (1/d)
+		__m256 mul = _mm256_set1_ps(id);
+
+		// Convert to 32-bit int, then pack to 16-bit, then 8-bit
+		__m256i i0 = _mm256_cvtps_epi32(_mm256_mul_ps(v0, mul));
+		__m256i i1 = _mm256_cvtps_epi32(_mm256_mul_ps(v1, mul));
+		__m256i i2 = _mm256_cvtps_epi32(_mm256_mul_ps(v2, mul));
+		__m256i i3 = _mm256_cvtps_epi32(_mm256_mul_ps(v3, mul));
+
+		// Pack 32 -> 16
+		__m256i p0 = _mm256_packs_epi32(i0, i1);
+		__m256i p1 = _mm256_packs_epi32(i2, i3);
+
+		// Pack 16 -> 8
+		__m256i p_final = _mm256_packs_epi16(p0, p1);
+
+		// Fix permutation (AVX2 pack instruction acts on 128-bit lanes)
+		p_final = _mm256_permute4x64_epi64(p_final, 0xD8);
+
+		// Store
+		_mm256_storeu_si256((__m256i *)blocks[i].qs, p_final);
+	}
+}
+#endif
 
 #endif

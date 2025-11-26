@@ -7,7 +7,7 @@
 #include "math_avx2.h"
 #endif
 
-//#define DEBUG_ACCEL
+// #define DEBUG_ACCEL
 
 #ifdef DEBUG_ACCEL
 #define debug_accel(...)                                                                                               \
@@ -18,8 +18,14 @@
 #define debug_accel(...)
 #endif
 
+#define DISPATCH_MAX_GGML_TYPES 64
+
+static mat_vec_fn CACHE_MAT_VEC[DISPATCH_MAX_GGML_TYPES][DISPATCH_MAX_GGML_TYPES][DISPATCH_MAX_GGML_TYPES];
+
+
 static void mat_vec_task(void *arg);
 static void mat_mat_task(void *arg);
+
 
 /*  The global dispatch tables, listing all available implementations */
 embedding_row_dispatch_t EMBEDDING_ROW_DISPATCH_TABLE[] = {
@@ -72,7 +78,7 @@ store_KV_cache_dispatch_t STORE_KV_CACHE_DISPATCH_TABLE[] = {
 	{GGML_TYPE_F32, GGML_TYPE_BF16, store_KV_cache_f32_bf16_avx2, 1},
 #endif
 	{GGML_TYPE_F32, GGML_TYPE_BF16, store_KV_cache_f32_bf16_scalar, 0},
-	{GGML_TYPE_F32, GGML_TYPE_F32, store_KV_cache_f32_f32_scalar, 0},
+//	{GGML_TYPE_F32, GGML_TYPE_F32, store_KV_cache_f32_f32_scalar, 0},
 };
 
 apply_residual_dispatch_t APPLY_RESIDUAL_DISPATCH_TABLE[] = {
@@ -140,6 +146,20 @@ dot_product_dispatch_t DOT_PRODUCT_DISPATCH_TABLE[] = {
 	{GGML_TYPE_F32, GGML_TYPE_F32, dot_product_f32_f32_scalar, 0},
 };
 
+conv_2d_dispatch_t CONV2D_DISPATCH_TABLE[] = {
+#ifdef CONFIG_ENABLE_AVX2
+	{GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, conv_2d_f32_f32_f32_f32_avx2, 1},
+#endif
+	{GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, conv_2d_f32_f32_f32_f32_scalar, 0},
+};
+
+transpose_dispatch_t TRANSPOSE_DISPATCH_TABLE[] = {
+#ifdef CONFIG_ENABLE_AVX2
+	{GGML_TYPE_F32, transpose_f32_avx2, 1},
+#endif
+	{GGML_TYPE_F32, transpose_f32_scalar, 0},
+	{GGML_TYPE_BF16, transpose_bf16_scalar, 0},
+};
 
 
 void dispatch_embedding_row(const Tensor *W, int row_index, MemType *O_slice, int embed_dim)
@@ -195,66 +215,58 @@ static void mat_vec_task(void *arg)
 void dispatch_mat_vec(struct TIEContext *ctx, const MemType *X, const Tensor *W, MemType *O, int in_dim, int out_dim,
 		      int use_threads)
 {
+	// O(1) Lookup
+	mat_vec_fn func = CACHE_MAT_VEC[X->type][W->mem.type][O->type];
+
+	if (!func) {
+		fprintf(stderr, "FATAL: No MatVec impl for input_type: %s x tensor_type: %s -> output_type: %s\n",
+			gguf_get_type_name(X->type), gguf_get_type_name(W->mem.type), gguf_get_type_name(O->type));
+		exit(1);
+	}
+
 	int effective_in_dim = in_dim;
 	int effective_out_dim = out_dim;
 #if 0
-	// For transposed (Column-Major) weights, the logical output dimension (number of rows)
-	// is the same as the logical input dimension of the *next* layer.
-	if (ctx->model->weight_layout == LAYOUT_COL_MAJOR) {
-		effective_in_dim = out_dim;
-		effective_out_dim = in_dim;
-	}
+        if (ctx->model->weight_layout == LAYOUT_COL_MAJOR) {
+	        effective_in_dim = out_dim;
+	        effective_out_dim = in_dim;
+        }
 #endif
+
+	if (use_threads && ((long long)effective_in_dim * effective_out_dim < 32768)) {
+		use_threads = 0;
+	}
+
+	if (!use_threads) {
+		func(X->data, W->mem.data, O->data, effective_in_dim, 0, effective_out_dim);
+		return;
+	}
+
+	// Threaded execution
 	int num_threads = thread_pool->num_threads;
 	int rows_per_thread = (effective_out_dim + num_threads - 1) / num_threads;
+
 	mat_vec_task_t tasks[num_threads];
 
+	for (int t = 0; t < num_threads; t++) {
+		int start = t * rows_per_thread;
+		int end = start + rows_per_thread;
+		if (start >= effective_out_dim)
+			break;
+		if (end > effective_out_dim)
+			end = effective_out_dim;
 
-	for (int i = 0; i < ARRAY_SIZE(MAT_VEC_DISPATCH_TABLE); ++i) {
-		mat_vec_dispatch_t *entry = &MAT_VEC_DISPATCH_TABLE[i];
-
-		if (entry->input_type == X->type && entry->output_type == O->type
-		    && entry->tensor_type == W->mem.type) {
-#ifdef DEBUG_ACCEL
-			if (entry->accel == 0) {
-				debug_accel("-- WARN: %s uses scalar function in: %s, weight: %s, out: %s ---\n",
-					    __FUNCTION__, gguf_get_type_name(X->type), gguf_get_type_name(W->mem.type),
-					    gguf_get_type_name(O->type));
-			}
-#endif
-			if (use_threads == 0) {
-				entry->mat_vec(X->data, W->mem.data, O->data, effective_in_dim, 0, effective_out_dim);
-				return;
-			}
-
-			for (int t = 0; t < num_threads; t++) {
-				int start_row = t * rows_per_thread;
-				int end_row = start_row + rows_per_thread;
-
-				if (start_row >= effective_out_dim)
-					break;
-				if (end_row > effective_out_dim)
-					end_row = effective_out_dim;
-
-				tasks[t] = (mat_vec_task_t){.X = X->data,
-							 .W = W,
-							 .O = O->data,
-							 .in_dim = effective_in_dim,
-							 .start_row = start_row,
-							 .end_row = end_row,
-							 .mat_vec = entry->mat_vec};
-				thread_pool_submit(thread_pool, mat_vec_task, &tasks[t]);
-			}
-			thread_pool_wait(thread_pool);
-			return;
-		}
+		tasks[t] = (mat_vec_task_t){.X = X->data,
+					    .W = W,
+					    .O = O->data,
+					    .in_dim = effective_in_dim,
+					    .start_row = start,
+					    .end_row = end,
+					    .mat_vec = func};
+		thread_pool_submit(thread_pool, mat_vec_task, &tasks[t]);
 	}
 
-	fprintf(stderr,
-		"FATAL: No MatVec implementation found for input type: %s, tensor type: %s and output type %s\n",
-		gguf_get_type_name(X->type), gguf_get_type_name(W->mem.type), gguf_get_type_name(O->type));
-
-	exit(1);
+	thread_pool_wait(thread_pool);
 }
 
 static void mat_mat_task(void *arg)
@@ -283,22 +295,27 @@ void dispatch_mat_mat(struct TIEContext *ctx, const MemType *X, const Tensor *W,
 		return dispatch_mat_vec(ctx, X, W, O, in_dim, out_dim, use_threads);
 	}
 
+	// Threading Heuristic: Don't thread small ops (like MoE gates or small layers)
+	if (use_threads && ((long long)in_dim * out_dim < 32768)) {
+		use_threads = 0;
+	}
+
 	/* Support Serial Execution */
 	if (!use_threads) {
-    	    size_t x_el_size = ggml_type_size(X->type);
-    	    size_t o_el_size = ggml_type_size(O->type);
-    	    size_t x_stride = in_dim * x_el_size;
-    	    size_t o_stride = out_dim * o_el_size;
+		size_t x_el_size = ggml_type_size(X->type);
+		size_t o_el_size = ggml_type_size(O->type);
+		size_t x_stride = in_dim * x_el_size;
+		size_t o_stride = out_dim * o_el_size;
 
-    	    for (int i = 0; i < batch_len; ++i) {
-        	    MemType x_row = { .type=X->type, .data = (uint8_t *)X->data + i * x_stride };
-        	    MemType o_row = { .type=O->type, .data = (uint8_t *)O->data + i * o_stride };
+		for (int i = 0; i < batch_len; ++i) {
+			MemType x_row = {.type = X->type, .data = (uint8_t *)X->data + i * x_stride};
+			MemType o_row = {.type = O->type, .data = (uint8_t *)O->data + i * o_stride};
 
-        	    // Call mat_vec with use_threads=0
-	            dispatch_mat_vec(ctx, &x_row, W, &o_row, in_dim, out_dim, 0);
-	    }
-    	    return;
-        }
+			// Call mat_vec with use_threads=0
+			dispatch_mat_vec(ctx, &x_row, W, &o_row, in_dim, out_dim, 0);
+		}
+		return;
+	}
 
 	int num_threads = thread_pool->num_threads;
 	int rows_per_thread = (batch_len + num_threads - 1) / num_threads;
@@ -313,15 +330,15 @@ void dispatch_mat_mat(struct TIEContext *ctx, const MemType *X, const Tensor *W,
 			break;
 
 		tasks[t] = (mat_mat_task_t){.ctx = ctx,
-					 .X = X->data,
-					 .W = W,
-					 .O = O->data,
-					 .in_dim = in_dim,
-					 .out_dim = out_dim,
-					 .start_row = start_row,
-					 .end_row = end_row,
-					 .X_type = X->type,
-					 .O_type = O->type};
+					    .X = X->data,
+					    .W = W,
+					    .O = O->data,
+					    .in_dim = in_dim,
+					    .out_dim = out_dim,
+					    .start_row = start_row,
+					    .end_row = end_row,
+					    .X_type = X->type,
+					    .O_type = O->type};
 		thread_pool_submit(thread_pool, mat_mat_task, &tasks[t]);
 	}
 
@@ -389,7 +406,7 @@ void dispatch_accumulate_weighted_V(const MemType *V_slice, MemType *O_slice, fl
 	exit(1);
 }
 
-void dispatch_store_KV_cache(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len)
+void dispatch_store_KV_cache(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len, int sink_len)
 {
 	if (ctx->mem.K.type != ctx->mem.V.type) {
 		fprintf(stderr, "FATAL: StoreKVCache K and V memories type mismatch\n");
@@ -404,7 +421,7 @@ void dispatch_store_KV_cache(struct TIEContext *ctx, int layer_idx, int start_po
 				debug_accel("-- WARN: %s uses scalar function ---\n", __FUNCTION__);
 			}
 #endif
-			entry->func(ctx, layer_idx, start_pos, batch_len);
+			entry->func(ctx, layer_idx, start_pos, batch_len, sink_len);
 			return;
 		}
 	}
@@ -516,7 +533,8 @@ float dispatch_dot_product(const MemType *vec_a, const MemType *vec_b, int size)
 	exit(1);
 }
 
-void dispatch_layer_norm(MemType *dest, const MemType *src, const Tensor *weight, const Tensor *bias, int size, float eps)
+void dispatch_layer_norm(MemType *dest, const MemType *src, const Tensor *weight, const Tensor *bias, int size,
+			 float eps)
 {
 	for (int i = 0; i < ARRAY_SIZE(LAYER_NORM_DISPATCH_TABLE); ++i) {
 		layer_norm_dispatch_t *entry = &LAYER_NORM_DISPATCH_TABLE[i];
@@ -532,7 +550,69 @@ void dispatch_layer_norm(MemType *dest, const MemType *src, const Tensor *weight
 		}
 	}
 
-	fprintf(stderr, "FATAL: No LayerNorm implementation found for input_type: %s, output_type: %s, tensor_type: %s, bias_type: %s\n",
-		gguf_get_type_name(src->type), gguf_get_type_name(dest->type), gguf_get_type_name(weight->mem.type), gguf_get_type_name(bias->mem.type));
+	fprintf(stderr,
+		"FATAL: No LayerNorm implementation found for input_type: %s, output_type: %s, tensor_type: %s, bias_type: %s\n",
+		gguf_get_type_name(src->type), gguf_get_type_name(dest->type), gguf_get_type_name(weight->mem.type),
+		gguf_get_type_name(bias->mem.type));
 	exit(1);
+}
+
+void dispatch_transpose(MemType *dest, const MemType *src, int rows, int cols)
+{
+	for (int i = 0; i < ARRAY_SIZE(TRANSPOSE_DISPATCH_TABLE); ++i) {
+		transpose_dispatch_t *entry = &TRANSPOSE_DISPATCH_TABLE[i];
+		if (entry->type == src->type && entry->type == dest->type) {
+#ifdef DEBUG_ACCEL
+			if (entry->accel == 0) {
+				debug_accel("-- WARN: %s uses scalar function ---\n", __FUNCTION__);
+			}
+#endif
+			entry->func(dest, src, rows, cols);
+			return;
+		}
+	}
+
+	fprintf(stderr, "FATAL: No Transpose implementation found for type: %s\n", gguf_get_type_name(src->type));
+	exit(1);
+}
+
+void dispatch_conv_2d(MemType *dest, const MemType *src_image, const Tensor *kernel_tensor, const Tensor *bias_tensor,
+		      int H_in, int W_in, int stride, int padding)
+{
+	for (int i = 0; i < ARRAY_SIZE(CONV2D_DISPATCH_TABLE); ++i) {
+		conv_2d_dispatch_t *entry = &CONV2D_DISPATCH_TABLE[i];
+		if (entry->input_type == src_image->type && entry->kernel_type == kernel_tensor->mem.type
+		    && entry->output_type == dest->type) {
+#ifdef DEBUG_ACCEL
+			if (entry->accel == 0) {
+				debug_accel("-- WARN: %s uses scalar function ---\n", __FUNCTION__);
+			}
+#endif
+			return entry->func(dest, src_image, kernel_tensor, bias_tensor, H_in, W_in, stride, padding);
+		}
+	}
+
+	// Handle error
+	fprintf(stderr, "FATAL: No conv_2d implementation found for input_types %s and tensor_type: %s\n",
+		gguf_get_type_name(src_image->type), gguf_get_type_name(kernel_tensor->mem.type));
+	exit(1);
+}
+
+void math_dispatch_init()
+{
+	printf("Initializing Math Dispatch Cache...\n");
+
+	// Populate MAT_VEC Cache
+	for (int i = 0; i < ARRAY_SIZE(MAT_VEC_DISPATCH_TABLE); ++i) {
+		mat_vec_dispatch_t *e = &MAT_VEC_DISPATCH_TABLE[i];
+		if (e->input_type < DISPATCH_MAX_GGML_TYPES && e->tensor_type < DISPATCH_MAX_GGML_TYPES
+		    && e->output_type < DISPATCH_MAX_GGML_TYPES) {
+			// Overwrite scalar with AVX2 if present (since AVX2 entries usually come first or we can check
+			// accel flag) Better strategy: Scan forward, if slot is empty, fill it. Put AVX2 entries FIRST
+			// in your tables.
+			if (CACHE_MAT_VEC[e->input_type][e->tensor_type][e->output_type] == NULL) {
+				CACHE_MAT_VEC[e->input_type][e->tensor_type][e->output_type] = e->mat_vec;
+			}
+		}
+	}
 }

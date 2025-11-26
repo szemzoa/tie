@@ -551,129 +551,105 @@ void get_embedding_row_bf16_f32_scalar(const Tensor *W, int row_index, void *des
 	}
 }
 
-void store_KV_cache_f32_bf16_scalar(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len)
+void store_KV_cache_f32_bf16_scalar(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len, int sink_len)
 {
 	LayerKVCache *cache = &ctx->kv_cache[layer_idx];
 	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
-	long long cache_offset = (long long)start_pos * kv_dim;
-	long long batch_size_elements = (long long)batch_len * kv_dim;
-
-	// Get the raw data pointers from the MemType structs
-	uint16_t *k_cache_data = (uint16_t *)cache->k.data;
-	uint16_t *v_cache_data = (uint16_t *)cache->v.data;
-	float *K_mem_data = (float *)ctx->mem.K.data;
-	float *V_mem_data = (float *)ctx->mem.V.data;
-
-	for (long long i = 0; i < batch_size_elements; i++) {
-		k_cache_data[cache_offset + i] = fp32_to_bf16(K_mem_data[i]);
-		v_cache_data[cache_offset + i] = fp32_to_bf16(V_mem_data[i]);
-	}
-}
-
-void store_KV_cache_f32_f32_scalar(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len)
-{
-	LayerKVCache *cache = &ctx->kv_cache[layer_idx];
-	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
-	long long cache_offset = (long long)start_pos * kv_dim;
-	long long batch_size_elements = (long long)batch_len * kv_dim;
-
-	// Get the raw data pointers from the MemType structs
-	float *k_cache_data = (float *)cache->k.data;
-	float *v_cache_data = (float *)cache->v.data;
-	float *K_mem_data = (float *)ctx->mem.K.data;
-	float *V_mem_data = (float *)ctx->mem.V.data;
-
-	for (long long i = 0; i < batch_size_elements; i++) {
-		k_cache_data[cache_offset + i] = K_mem_data[i];
-		v_cache_data[cache_offset + i] = V_mem_data[i];
-	}
-}
-
-#if 0
-void store_KV_cache_f32_bf16_scalar(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len)
-{
-	LayerKVCache *cache = &ctx->kv_cache[layer_idx];
-	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
-
-	// The "Ring" size is the model context length
-        int ring_size = ctx->model->seq_length;
+	int ring_size = ctx->model->seq_length;
+	int rolling_capacity = ring_size - sink_len; // The rotatable space
 
 	int tokens_written = 0;
 
 	while (tokens_written < batch_len) {
-    		// Calculate where we are logically and physically
-	        int current_logical_pos = start_pos + tokens_written;
-	        int current_physical_pos = current_logical_pos % ring_size; // The Ring Logic
+		int current_logical_pos = start_pos + tokens_written;
+		int current_physical_pos;
 
-	        // Calculate contiguous chunk size
-	        // How many tokens can we write before hitting the end of the physical buffer?
-	        int space_at_end = ring_size - current_physical_pos;
-	        int tokens_remaining = batch_len - tokens_written;
+		// SINK + RING MAPPING
+		if (current_logical_pos < sink_len) {
+			// Direct map for the sink area
+			current_physical_pos = current_logical_pos;
+		} else {
+			// Ring map for the rest (skip the sink)
+			int offset = current_logical_pos - sink_len;
+			current_physical_pos = sink_len + (offset % rolling_capacity);
+		}
 
-	        // We write the smaller of the two: either the rest of the batch, or up to the cliff edge
-    		int chunk_len = (tokens_remaining < space_at_end) ? tokens_remaining : space_at_end;
+		// Calculate contiguous chunk size
+		int chunk_len = 1;
+		if (current_logical_pos >= sink_len) {
+			// How much space until the end of the physical buffer?
+			int space_at_end = ring_size - current_physical_pos;
+			int tokens_remaining = batch_len - tokens_written;
+			chunk_len = (tokens_remaining < space_at_end) ? tokens_remaining : space_at_end;
+		}
 
-		// Perform the copy for this chunk
-	        long long dest_offset = (long long)current_physical_pos * kv_dim;
-	        long long src_offset = (long long)tokens_written * kv_dim; // Source is always linear [0..batch]
-	        long long num_elements = (long long)chunk_len * kv_dim;
+		// Perform Copy
+		long long dest_offset = (long long)current_physical_pos * kv_dim;
+		long long src_offset = (long long)tokens_written * kv_dim;
+		long long num_elements = (long long)chunk_len * kv_dim;
 
-		// Get the raw data pointers from the MemType structs
-		uint16_t *k_cache_data = (uint16_t *)cache->k.data;
-		uint16_t *v_cache_data = (uint16_t *)cache->v.data;
+		uint16_t *k_cache = (uint16_t *)cache->k.data;
+		uint16_t *v_cache = (uint16_t *)cache->v.data;
 		float *K_src = (float *)ctx->mem.K.data;
 		float *V_src = (float *)ctx->mem.V.data;
 
 		for (long long i = 0; i < num_elements; i++) {
-			k_cache_data[dest_offset + i] = fp32_to_bf16(K_src[src_offset + i]);
-			v_cache_data[dest_offset + i] = fp32_to_bf16(V_src[src_offset + i]);
+			k_cache[dest_offset + i] = fp32_to_bf16(K_src[src_offset + i]);
+			v_cache[dest_offset + i] = fp32_to_bf16(V_src[src_offset + i]);
 		}
 
 		tokens_written += chunk_len;
 	}
 }
 
-void store_KV_cache_f32_f32_scalar(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len)
+void store_KV_cache_f32_f32_scalar(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len, int sink_len)
 {
 	LayerKVCache *cache = &ctx->kv_cache[layer_idx];
 	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
+	int ring_size = ctx->model->seq_length;
+	int rolling_capacity = ring_size - sink_len; // The rotatable space
 
-        // The "Ring" size is the model context length
-        int ring_size = ctx->model->seq_length;
+	int tokens_written = 0;
 
-        int tokens_written = 0;
+	while (tokens_written < batch_len) {
+		int current_logical_pos = start_pos + tokens_written;
+		int current_physical_pos;
 
-        while (tokens_written < batch_len) {
-                // Calculate where we are logically and physically
-                int current_logical_pos = start_pos + tokens_written;
-                int current_physical_pos = current_logical_pos % ring_size; // The Ring Logic
+		// SINK + RING MAPPING
+		if (current_logical_pos < sink_len) {
+			// Direct map for the sink area
+			current_physical_pos = current_logical_pos;
+		} else {
+			// Ring map for the rest (skip the sink)
+			int offset = current_logical_pos - sink_len;
+			current_physical_pos = sink_len + (offset % rolling_capacity);
+		}
 
-                // Calculate contiguous chunk size
-                // How many tokens can we write before hitting the end of the physical buffer?
-                int space_at_end = ring_size - current_physical_pos;
-                int tokens_remaining = batch_len - tokens_written;
+		// Calculate contiguous chunk size
+		int chunk_len = 1;
+		if (current_logical_pos >= sink_len) {
+			// How much space until the end of the physical buffer?
+			int space_at_end = ring_size - current_physical_pos;
+			int tokens_remaining = batch_len - tokens_written;
+			chunk_len = (tokens_remaining < space_at_end) ? tokens_remaining : space_at_end;
+		}
 
-                // We write the smaller of the two: either the rest of the batch, or up to the cliff edge
-                int chunk_len = (tokens_remaining < space_at_end) ? tokens_remaining : space_at_end;
+		// Perform Copy
+		long long dest_offset = (long long)current_physical_pos * kv_dim;
+		long long src_offset = (long long)tokens_written * kv_dim;
+		long long num_elements = (long long)chunk_len * kv_dim;
 
-                // Perform the copy for this chunk
-                long long dest_offset = (long long)current_physical_pos * kv_dim;
-                long long src_offset = (long long)tokens_written * kv_dim; // Source is always linear [0..batch]
-                long long num_elements = (long long)chunk_len * kv_dim;
+	        float *k_cache_data = (float *)cache->k.data;
+	        float *v_cache_data = (float *)cache->v.data;
+	        float *K_src = (float *)ctx->mem.K.data;
+	        float *V_src = (float *)ctx->mem.V.data;
 
-                // Get the raw data pointers from the MemType structs
-                float *k_cache_data = (float *)cache->k.data;
-                float *v_cache_data = (float *)cache->v.data;
-                float *K_src = (float *)ctx->mem.K.data;
-                float *V_src = (float *)ctx->mem.V.data;
-
-		memcpy(k_cache_data + dest_offset, K_src + src_offset, num_elements * sizeof(float));
+    		memcpy(k_cache_data + dest_offset, K_src + src_offset, num_elements * sizeof(float));
 	        memcpy(v_cache_data + dest_offset, V_src + src_offset, num_elements * sizeof(float));
 
-		tokens_written += chunk_len;
-        }
+	        tokens_written += chunk_len;
+	}
 }
-#endif
 
 // SwiGLU activation FP32, FP32
 void swiglu_activation_f32_f32_scalar(void *gate, const void *up, int size)
@@ -970,8 +946,8 @@ void geglu_activation_f32_f32_scalar(void *gate, const void *up, int size)
 	}
 }
 
-void dispatch_conv_2d_scalar(MemType *dest, const MemType *src_image, const Tensor *kernel_tensor,
-			     const Tensor *bias_tensor, int H_in, int W_in, int stride, int padding)
+void conv_2d_f32_f32_f32_f32_scalar(MemType *dest, const MemType *src_image, const Tensor *kernel_tensor,
+				    const Tensor *bias_tensor, int H_in, int W_in, int stride, int padding)
 {
 	float *dest_data = (float *)dest->data;
 	const float *src_data = (const float *)src_image->data;
@@ -1097,7 +1073,8 @@ void apply_mrope_cache_f32_scalar(RopeCacheType *rope_cache, void *X, int pos, i
 	}
 }
 
-void layer_norm_f32_f32_f32_f32_scalar(MemType *dest, const MemType *src, const Tensor *weight, const Tensor *bias, int size, float eps)
+void layer_norm_f32_f32_f32_f32_scalar(MemType *dest, const MemType *src, const Tensor *weight, const Tensor *bias,
+				       int size, float eps)
 {
 	const float *src_data = (const float *)src->data;
 	float *dest_data = (float *)dest->data;
@@ -1122,5 +1099,29 @@ void layer_norm_f32_f32_f32_f32_scalar(MemType *dest, const MemType *src, const 
 	for (int i = 0; i < size; ++i) {
 		float normalized_val = (src_data[i] - mean) * inv_std;
 		dest_data[i] = fmaf(normalized_val, weight_data[i], bias_data[i]);
+	}
+}
+
+void transpose_f32_scalar(MemType *dest, const MemType *src, int rows, int cols)
+{
+	const float *src_data = (const float *)src->data;
+	float *dest_data = (float *)dest->data;
+
+	for (int i = 0; i < rows; ++i) {
+		for (int j = 0; j < cols; ++j) {
+			dest_data[j * rows + i] = src_data[i * cols + j];
+		}
+	}
+}
+
+void transpose_bf16_scalar(MemType *dest, const MemType *src, int rows, int cols)
+{
+	const uint16_t *src_data = (const uint16_t *)src->data;
+	uint16_t *dest_data = (uint16_t *)dest->data;
+
+	for (int i = 0; i < rows; ++i) {
+		for (int j = 0; j < cols; ++j) {
+			dest_data[j * rows + i] = src_data[i * cols + j];
+		}
 	}
 }

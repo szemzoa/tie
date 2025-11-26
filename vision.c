@@ -78,7 +78,7 @@ int load_bmp_clip(const char *filename, struct TIEContext *ctx)
 	int width = dib.biWidth;
 	int height = dib.biHeight;
 
-	// --- DYNAMIC RESOLUTION LOGIC ---
+	// DYNAMIC RESOLUTION LOGIC
 	int patch_size = ctx->model_vision->patch_size;
 
 	// Optionally clamp to max size if needed (e.g. downscale huge images)
@@ -161,39 +161,6 @@ void dispatch_add_and_store(MemType *dest, const MemType *src1, const MemType *s
 
 	for (int i = 0; i < size; ++i) {
 		dest_data[i] = src1_data[i] + src2_data[i];
-	}
-}
-
-void dispatch_transpose(MemType *dest, const MemType *src, int rows, int cols)
-{
-	// Don't transpose between different types
-	if (src->type != dest->type) {
-		fprintf(stderr, "Error: Mismatched types in dispatch_transpose (%d != %d)\n", src->type, dest->type);
-		return;
-	}
-
-	switch (src->type) {
-	case GGML_TYPE_F32: {
-		transpose_f32_avx2(dest, src, rows, cols);
-		break;
-	}
-
-	case GGML_TYPE_F16:
-	case GGML_TYPE_BF16: {
-		const uint16_t *src_data = (const uint16_t *)src->data;
-		uint16_t *dest_data = (uint16_t *)dest->data;
-		for (int i = 0; i < rows; ++i) {
-			for (int j = 0; j < cols; ++j) {
-				dest_data[j * rows + i] = src_data[i * cols + j];
-			}
-		}
-		break;
-	}
-
-	default: {
-		fprintf(stderr, "Error: Unsupported tensor type %d in dispatch_transpose.\n", src->type);
-		return;
-	}
 	}
 }
 
@@ -293,22 +260,20 @@ void vision_attention_worker(void *arg)
 			memcpy(attn_output_data + dst_offset, out_data + src_offset, head_bytes);
 		}
 	}
-
-	free(task);
 }
 
 static void vision_attention(struct TIEContext *ctx, int seq_len)
 {
 	VisionModel *vm = ctx->model_vision;
 	MemLayoutVision *mem = &ctx->vision_mem;
+	int num_threads = thread_pool->num_threads;
+	vision_attn_task_t tasks[num_threads];
 
 	const int embed_dim = vm->embed_dim;
 	const int num_heads = vm->num_heads;
 	const int head_dim = embed_dim / num_heads;
 	const float attn_scale = 1.0f / sqrtf((float)head_dim);
 
-	// Configure Threads
-	int num_threads = thread_pool->num_threads;
 	if (num_threads > num_heads)
 		num_threads = num_heads;
 
@@ -328,24 +293,22 @@ static void vision_attention(struct TIEContext *ctx, int seq_len)
 		// Use Pre-allocated Buffers
 		VisionAttnScratch *scratch = &mem->attn_scratch[t];
 
-		// Create Task
-		vision_attn_task_t *task = malloc(sizeof(vision_attn_task_t));
-		*task = (vision_attn_task_t){.ctx = ctx,
-					     .seq_len = seq_len,
-					     .embed_dim = embed_dim,
-					     .head_dim = head_dim,
-					     .head_start = head_start,
-					     .head_end = head_end,
-					     .attn_scale = attn_scale,
-					     // Point to the persistent buffers
-					     .q_head = scratch->q_head,
-					     .k_head = scratch->k_head,
-					     .v_head = scratch->v_head,
-					     .v_head_t = scratch->v_head_t,
-					     .scores = scratch->scores,
-					     .output_head = scratch->output_head};
+		tasks[t] = (vision_attn_task_t){.ctx = ctx,
+						.seq_len = seq_len,
+						.embed_dim = embed_dim,
+						.head_dim = head_dim,
+						.head_start = head_start,
+						.head_end = head_end,
+						.attn_scale = attn_scale,
+						// Point to the persistent buffers
+						.q_head = scratch->q_head,
+						.k_head = scratch->k_head,
+						.v_head = scratch->v_head,
+						.v_head_t = scratch->v_head_t,
+						.scores = scratch->scores,
+						.output_head = scratch->output_head};
 
-		thread_pool_submit(thread_pool, vision_attention_worker, task);
+		thread_pool_submit(thread_pool, vision_attention_worker, &tasks[t]);
 	}
 
 	thread_pool_wait(thread_pool);
@@ -359,13 +322,9 @@ void vision_build_pos_embeds_dynamic(struct TIEContext *ctx, MemType *dest_buffe
 {
 	VisionModel *vm = ctx->model_vision;
 	float *out_data = (float *)dest_buffer->data;
-
-	// Get the raw pre-trained grid dimensions
 	int num_grid_per_side = vm->image_size / vm->patch_size; // 768 / 16 = 48
-
 	// Setup for Permutation (Spatial Merge)
 	int merge_size = vm->spatial_merge_size;
-	//	int merged_h = h_patches / merge_size;
 	int merged_w = w_patches / merge_size;
 
 	// Iterate over the TARGET grid (h_patches x w_patches)
@@ -440,23 +399,22 @@ void vision_rope_cache_build_dynamic(struct TIEContext *ctx, int h_patches, int 
 
 	int head_dim = vm->embed_dim / vm->num_heads; // 64
 	int half_dim = head_dim / 2;		      // 32
-	int mrope_dim = head_dim / 4;		      // 16 (This was missing in dynamic version)
+	int mrope_dim = head_dim / 4;		      // 16
 
 	int seq_len = h_patches * w_patches;
 
-	// 1. Calculate standard 1D inv_freq table (Size 16, not 32)
+	// Calculate standard 1D inv_freq table
 	float inv_freq[mrope_dim];
 	for (int i = 0; i < mrope_dim; i++) {
-		// Use half_dim (32) as denominator, same as static version
+		// Use half_dim (32) as denominator
 		inv_freq[i] = 1.0f / powf(10000.0f, (float)(2 * i) / (float)half_dim);
 	}
 
-	// 2. Iterate patches in the SHUFFLED order
+	// Iterate patches in the SHUFFLED order
 	int merge_size = vm->spatial_merge_size;
 	int merged_w = w_patches / merge_size;
 
 	for (int i = 0; i < seq_len; i++) {
-		// ... (Decode logic is correct, keep it) ...
 		int tokens_per_block = merge_size * merge_size;
 		int block_idx = i / tokens_per_block;
 		int intra_idx = i % tokens_per_block;
@@ -469,7 +427,7 @@ void vision_rope_cache_build_dynamic(struct TIEContext *ctx, int h_patches, int 
 		int h_coord = h_block * merge_size + h_sub;
 		int w_coord = w_block * merge_size + w_sub;
 
-		// 3. Build Frequencies [H, W, H, W]
+		// Build Frequencies [H, W, H, W]
 		float *cos_vec = cache->cos_table + i * head_dim;
 		float *sin_vec = cache->sin_table + i * head_dim;
 
@@ -484,7 +442,6 @@ void vision_rope_cache_build_dynamic(struct TIEContext *ctx, int h_patches, int 
 			float sw = sinf(freq_w);
 
 			// Layout: [H (0-15), W (16-31), H (32-47), W (48-63)]
-
 			// First Half (0-31)
 			cos_vec[d] = ch; // H at 0..15
 			sin_vec[d] = sh;
@@ -523,14 +480,11 @@ void vision_create_embeddings_qwen3vl(struct TIEContext *ctx, int h_patches, int
 	// Allocate temp buffer for the pos_embedss
 	alloc_memtype(&pos_embeds_mem, GGML_TYPE_F32, (size_t)embed_dim * num_patches);
 
-	// 3. Run Conv2D (Kernel T=0 & T=1) using Dynamic Sizes
-	conv_2d_f32_avx2(&conv_output_mem_t0, &mem->image_raw, &vm->patch_embd, NULL, img_h, img_w, patch_size, 0);
-	conv_2d_f32_avx2(&conv_output_mem_t1, &mem->image_raw, &vm->patch_embd_1, NULL, img_h, img_w, patch_size, 0);
-	/*
-		dispatch_conv_2d_avx2(&conv_output_mem_t0, &mem->image_raw, &vm->patch_embd, NULL, img_h, img_w,
-	   patch_size, 0); dispatch_conv_2d_avx2(&conv_output_mem_t1, &mem->image_raw, &vm->patch_embd_1, NULL, img_h,
-	   img_w, patch_size, 0);
-	*/
+	// Run Conv2D (Kernel T=0 & T=1) using Dynamic Sizes
+	// printf("Running Conv2D patch embedding\n");
+	dispatch_conv_2d(&conv_output_mem_t0, &mem->image_raw, &vm->patch_embd, NULL, img_h, img_w, patch_size, 0);
+	dispatch_conv_2d(&conv_output_mem_t1, &mem->image_raw, &vm->patch_embd_1, NULL, img_h, img_w, patch_size, 0);
+
 	// Sum T=0, T=1
 	dispatch_add_and_store(&conv_output_mem_t0, &conv_output_mem_t0, &conv_output_mem_t1, embed_dim * num_patches);
 	free_memtype(&conv_output_mem_t1);
@@ -539,7 +493,6 @@ void vision_create_embeddings_qwen3vl(struct TIEContext *ctx, int h_patches, int
 	// The goal: Interleave 2x2 blocks.
 	// Calculate strides dynamically
 	const int merge_size = vm->spatial_merge_size; // 2
-						       //	int merged_h = h_patches / merge_size;
 	int merged_w = w_patches / merge_size;
 
 	// Stride logic:
@@ -597,7 +550,6 @@ void vision_create_embeddings_qwen3vl(struct TIEContext *ctx, int h_patches, int
 void apply_mrope_cache(float *q_head_ptr, float *k_head_ptr, const MRopeCacheType *cache, int patch_idx, int head_dim)
 {
 	const int half_dim = head_dim / 2; // 32
-
 	// Get pointers to the pre-calculated cos/sin values for this patch
 	const float *cos_ptr = cache->cos_table + (patch_idx * head_dim);
 	const float *sin_ptr = cache->sin_table + (patch_idx * head_dim);
@@ -646,26 +598,19 @@ void vision_run_patch_merger(struct TIEContext *ctx, MemType *dest_feature, MemT
 {
 	VisionModel *vm = ctx->model_vision;
 	MemLayoutVision *mem = &ctx->vision_mem;
-
-	// Get the weights for this specific layer
 	VisionLayerWeights *weights = &vm->layers[layer_idx];
 
 	// Get Dimensions
-	//	const int seq_len = (vm->image_size / vm->patch_size) * (vm->image_size / vm->patch_size); // 2304
 	const int embed_dim = vm->embed_dim;					  // 1024
 	const int proj_dim = vm->projection_dim;				  // 2048
 	const int merge_factor = vm->spatial_merge_size * vm->spatial_merge_size; // 4
 	const int merged_seq_len = seq_len / merge_factor;			  // 576
 	const int merged_dim = embed_dim * merge_factor;			  // 4096
-
-	// This is the buffer we'll use as input for FC1
 	MemType *norm_output_buffer;
 
 	// LayerNorm
 	if (use_postshuffle_norm) {
 		// DEEPSTACK PATH (post-shuffle norm)
-		// Norm is applied to the [576, 4096] reshaped tensor
-		// The output to mem->merger_norm_buf
 		for (int i = 0; i < merged_seq_len; i++) {
 			MemType src_slice = mem_slice(src_hidden_state, i * merged_dim);
 			MemType dest_slice = mem_slice(&mem->merger_norm_buf, i * merged_dim);
@@ -677,7 +622,6 @@ void vision_run_patch_merger(struct TIEContext *ctx, MemType *dest_feature, MemT
 		norm_output_buffer = &mem->merger_norm_buf;
 
 		// FC1 (Linear + Bias)
-		// Output: mem->merger_fc1_buf [576, 4096]
 		dispatch_mat_mat(ctx, norm_output_buffer, &weights->ds_fc1_weight, &mem->merger_fc1_buf, merged_seq_len,
 				 merged_dim, merged_dim, true);
 
@@ -687,8 +631,6 @@ void vision_run_patch_merger(struct TIEContext *ctx, MemType *dest_feature, MemT
 		dispatch_gelu_inplace(&mem->merger_fc1_buf, merged_seq_len * merged_dim);
 
 		// FC2 (Linear + Bias)
-		// Input: mem->merger_fc1_buf [576, 4096]
-		// Output: dest_feature [576, 2048]
 		dispatch_mat_mat(ctx, &mem->merger_fc1_buf, &weights->ds_fc2_weight, dest_feature, merged_seq_len,
 				 merged_dim, proj_dim, true);
 
@@ -696,7 +638,6 @@ void vision_run_patch_merger(struct TIEContext *ctx, MemType *dest_feature, MemT
 
 	} else {
 		// FINAL MERGER PATH (pre-shuffle norm)
-		// Norm is applied to the original [2304, 1024] tensor.
 		for (int i = 0; i < seq_len; i++) {
 			MemType src_slice = mem_slice(src_hidden_state, i * embed_dim);
 			MemType dest_slice = mem_slice(&mem->merger_norm_buf, i * embed_dim);
@@ -707,7 +648,6 @@ void vision_run_patch_merger(struct TIEContext *ctx, MemType *dest_feature, MemT
 		norm_output_buffer = &mem->merger_norm_buf;
 
 		// FC1 (Linear + Bias)
-		// Output: mem->merger_fc1_buf [576, 4096]
 		dispatch_mat_mat(ctx, norm_output_buffer, &vm->mm_0_weight, &mem->merger_fc1_buf, merged_seq_len,
 				 merged_dim, merged_dim, true);
 
@@ -716,9 +656,7 @@ void vision_run_patch_merger(struct TIEContext *ctx, MemType *dest_feature, MemT
 		// Activation (GELU)
 		dispatch_gelu_inplace(&mem->merger_fc1_buf, merged_seq_len * merged_dim);
 
-		// 5. FC2 (Linear + Bias)
-		// Input: mem->merger_fc1_buf [576, 4096]
-		// Output: dest_feature [576, 2048]
+		// FC2 (Linear + Bias)
 		dispatch_mat_mat(ctx, &mem->merger_fc1_buf, &vm->mm_2_weight, dest_feature, merged_seq_len, merged_dim,
 				 proj_dim, true);
 
@@ -803,8 +741,7 @@ void vision_transformer_layer_qwen3vl(struct TIEContext *ctx, int layer_idx, int
 		}
 	}
 
-	// Multi-Head Attention (Standard)
-	// It takes Q, K, V and produces attn_output.
+	// Multi-Head Attention
 	vision_attention(ctx, seq_len);
 
 	// Attention Output Projection
@@ -924,17 +861,8 @@ void vision_create_embeddings_gemma3(struct TIEContext *ctx)
 		return;
 	}
 
-	//	printf("Running Conv2D patch embedding\n");
-	/*	dispatch_conv_2d_scalar(&conv_output_mem,     // Dest: [1152, 64, 64]
-					&mem->image_raw,      // Src: [3, 896, 896]
-					&vm->patch_embd,      // Kernel: [1152, 3, 14, 14]
-					&vm->patch_embd_bias, // Bias: [1152]
-					image_size,	      // H_in
-					image_size,	      // W_in
-					patch_size,	      // Stride (14)
-					0);		      // Padding (0)
-	*/
-	conv_2d_f32_avx2(&conv_output_mem,     // Dest: [1152, 64, 64]
+	// printf("Running Conv2D patch embedding\n");
+	dispatch_conv_2d(&conv_output_mem,     // Dest: [1152, 64, 64]
 			 &mem->image_raw,      // Src: [3, 896, 896]
 			 &vm->patch_embd,      // Kernel: [1152, 3, 14, 14]
 			 &vm->patch_embd_bias, // Bias: [1152]
@@ -984,7 +912,6 @@ static void vision_downsample_and_project(struct TIEContext *ctx)
 	const int patch_size = vm->patch_size;
 	const int embed_dim = vm->embed_dim;
 	const int proj_dim = vm->projection_dim;
-//	const int scale_factor = vm->proj_scale_factor;
 	const int scale_factor = vm->def->params.proj_scale_factor;
 
 	const int num_patches_side = image_size / patch_size;
@@ -1030,7 +957,6 @@ static void vision_downsample_and_project(struct TIEContext *ctx)
 	}
 
 	// Apply the Projector's RMSNorm
-	// Loop over each token in the pooled sequence (pooled_seq_len = 256)
 	for (int i = 0; i < pooled_seq_len; ++i) {
 		// Get a slice for the i-th token [1, 1152]
 		MemType slice = mem_slice(&mem->pooled_embeddings, i * embed_dim);
@@ -1086,7 +1012,6 @@ void vision_transformer_layer_gemma3(struct TIEContext *ctx, int layer_idx)
 	dispatch_add_and_store(&mem->hidden_state, &mem->residual_scratch, &mem->attn_proj_output, total_size);
 
 	// Pre-FFN LayerNorm & Residual
-	// Save the result of the first residual connection before the FFN block.
 	memcpy(mem->residual_scratch.data, mem->hidden_state.data, total_size * sizeof(float));
 
 	for (int i = 0; i < seq_len; ++i) {

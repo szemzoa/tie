@@ -1030,7 +1030,7 @@ struct GGUFModel *gguf_model_parse(char *path)
 	if (gguf_model_map_weights(gguf) != 0)
 		goto _gguf_model_open_error_free;
 
-	if ((gguf->arch = detect_architecture(gguf_metadata_get_string(gguf, "general.architecture"))) == -1)
+	if ((gguf->arch = detect_architecture(gguf_metadata_get_string(gguf, "general.architecture"), gguf_metadata_get_string(gguf, "general.basename"))) == -1)
 		goto _gguf_model_open_error_free;
 
 #ifdef DEBUG_TENSORS
