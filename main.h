@@ -2,6 +2,8 @@
 #define __MAIN_H__
 
 #include <stddef.h>
+#include <signal.h>
+#include <pthread.h>
 #include "config.h"
 #include "tokenize.h"
 #include "gguf.h"
@@ -9,30 +11,48 @@
 #include "model.h"
 #include "tools.h"
 
-
 typedef enum {
 	MODEL_TYPE_TEXT,
 	MODEL_TYPE_VISION,
 } ModelType;
 
-#define CLR_RESET   "\033[0m"
-#define CLR_BOLD    "\033[1m"
-#define CLR_DIM     "\033[2m"
+#define QUEUE_SIZE 16
 
-#define CLR_RED     "\033[31m"
-#define CLR_GREEN   "\033[32m"
-#define CLR_YELLOW  "\033[33m"
-#define CLR_BLUE    "\033[34m"
-#define CLR_MAGENTA "\033[35m"
-#define CLR_CYAN    "\033[36m"
-#define CLR_WHITE   "\033[37m"
+typedef enum { CMD_GENERATE, CMD_STOP, CMD_EXIT } CmdType;
 
-// helpers
-#define USER_PROMPT   	CLR_BOLD CLR_GREEN
-#define ASSISTANT_OUT 	CLR_CYAN
-#define DEBUG          	CLR_DIM CLR_YELLOW
-#define THINK          	CLR_DIM CLR_MAGENTA
-#define ERR            	CLR_BOLD CLR_RED
+typedef struct {
+	CmdType type;
+	char *text; // User input or Tool result
+	bool has_image;
+	bool prefill_only;
+} ModelCommand;
+
+typedef enum {
+	EVT_TOKEN,    // A new token generated
+	EVT_FINISHED, // Generation complete
+	EVT_TOOL_CALL // Model wants to call a tool (pause generation)
+} EvtType;
+
+typedef struct {
+	EvtType type;
+	int token_id;
+} ModelEvent;
+
+typedef struct {
+	ModelCommand buffer[QUEUE_SIZE];
+	int head, tail;
+	pthread_mutex_t mutex;
+	pthread_cond_t cond;
+} CommandQueue;
+
+typedef struct {
+	ModelEvent buffer[QUEUE_SIZE * 4]; // Larger buffer for tokens
+	int head, tail;
+	pthread_mutex_t mutex;
+	pthread_cond_t cond;
+} EventQueue;
+
+typedef void (*token_callback_t)(void *user_data, int token_id);
 
 typedef struct {
 	char *model_path;
@@ -52,7 +72,7 @@ typedef struct {
 	char short_opt;
 	int requires_value;
 	void (*handler)(AppConfig *cfg, const char *value);
-        const char *description;
+	const char *description;
 } ArgSpec;
 
 struct GGUFModel {
@@ -89,6 +109,9 @@ struct TIEContext {
 
 	Tokenizer tokenizer;
 	ToolContext tool_context;
+
+//	volatile sig_atomic_t sigint_flag;
+//	volatile sig_atomic_t stop_generation;
 };
 
 #endif

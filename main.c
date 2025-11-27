@@ -11,6 +11,10 @@
 #include <time.h>
 #include <unistd.h>
 #include <locale.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <readline/readline.h>
+#include <readline/history.h>
 
 #include "main.h"
 #include "threadpool.h"
@@ -23,56 +27,16 @@
 #include "math_dispatch.h"
 #include "tools.h"
 
-static void handle_model(AppConfig *cfg, const char *v)
-{
-	cfg->model_path = (char *)v;
-}
-static void handle_threads(AppConfig *cfg, const char *v)
-{
-	cfg->num_threads = atoi(v);
-}
-static void handle_mmproj(AppConfig *cfg, const char *v)
-{
-	cfg->mmproj_path = (char *)v;
-}
-static void handle_image(AppConfig *cfg, const char *v)
-{
-	cfg->image_path = (char *)v;
-}
-static void handle_context(AppConfig *cfg, const char *v)
-{
-	cfg->context_length = atoi(v);
-}
-static void handle_temp(AppConfig *cfg, const char *v)
-{
-	cfg->temperature = atof(v);
-}
-static void handle_top_p(AppConfig *cfg, const char *v)
-{
-	cfg->top_p = atof(v);
-}
-static void handle_top_k(AppConfig *cfg, const char *v)
-{
-	cfg->top_k = atoi(v);
-}
-static void handle_mmap(AppConfig *cfg, const char *v)
-{
-	cfg->use_mmap = 1;
-}
-
-static const ArgSpec arg_table[] = {
-	{"model", 'm', 1, handle_model, "Path to model GGUF file"},
-	{"threads", 't', 1, handle_threads, "Number of CPU threads"},
-	{"mmproj", 'p', 1, handle_mmproj, "Multimodal projection file"},
-	{"image", 'i', 1, handle_image, "Path to an input image"},
-	{"context", 'c', 1, handle_context, "Context window size"},
-	{"temperature", 'T', 1, handle_temp, "Sampling temperature"},
-	{"top-p", 'P', 1, handle_top_p, "Nucleus sampling (top-p)"},
-	{"top-k", 'K', 1, handle_top_k, "Top-k sampling"},
-	{"mmap", 'M', 0, handle_mmap, "Use mmap to load model"},
-	{"help", 'h', 0, NULL, "Show help message"},
+CommandQueue cmd_q = {
+	.mutex = PTHREAD_MUTEX_INITIALIZER,
+	.cond = PTHREAD_COND_INITIALIZER
 };
-static const int arg_table_count = sizeof(arg_table) / sizeof(arg_table[0]);
+
+EventQueue evt_q = {
+	.mutex = PTHREAD_MUTEX_INITIALIZER,
+	.cond = PTHREAD_COND_INITIALIZER
+};
+
 
 // Architecture Helpers
 static void handle_model_specific_post_step(struct TIEContext *ctx, int step, size_t prompt_len)
@@ -195,20 +159,6 @@ int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf,
 		text_rope_cache_init(ctx, prompt_len, ctx->kv_pos);
 	}
 
-#if 0
-	char buf[256];
-	for (int i = 0; i < prompt_len; i++) {
-
-		const unsigned char *token = get_token_string(ctx, prompt_tokens[i]);
-		int len = get_token_string_length(ctx, prompt_tokens[i]);
-
-		memset(buf, 0, 256);
-		memcpy(buf, token, len);
-
-		printf("prompt_token#%u=%u, [%s]\n", i, prompt_tokens[i], buf);
-	}
-#endif
-
 	return prompt_tokens;
 }
 
@@ -224,8 +174,7 @@ int engine_prefill(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len
 	size_t image_embed_idx = 0;
 	MemType *image_embeddings = NULL;
 
-	printf("--- Prefill Start: pos %u, len %zu ---\n", ctx->kv_pos, prompt_len);
-
+	printf(DEBUG "--- Prefill Start: pos %u, len %zu ---\n" CLR_RESET, ctx->kv_pos, prompt_len);
 	// Custom Prompt Processor (if defined)
 	if (ctx->model->interface.process_prompt) {
 		ctx->model->interface.process_prompt(ctx, prompt_tokens, prompt_len);
@@ -234,7 +183,7 @@ int engine_prefill(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len
 
 	// Process Vision Encoder
 	if (has_image) {
-		printf("Processing image");
+		printf(DEBUG "Processing image");
 		fflush(stdout);
 		if (ctx->model->interface.process_image_vision) {
 			image_embeddings = ctx->model->interface.process_image_vision(ctx);
@@ -243,7 +192,7 @@ int engine_prefill(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len
 			fprintf(stderr, " [Failed]\n");
 			return -1;
 		}
-		printf(" [Done]\n");
+		printf(" [Done]\n" CLR_RESET);
 	}
 
 	// Embedding Lookup Loop
@@ -270,22 +219,24 @@ int engine_prefill(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len
 	process_embeddings(ctx, &ctx->mem.hidden_state, current_pos);
 
 	clock_gettime(CLOCK_REALTIME, &end);
-	printf("--- Prefill Complete: %llu ms ---\n", elapsed_time_us(end, start) / 1000);
+	float tps = (float)prompt_len / (elapsed_time_us(end, start) / 1000000.0f);
+	printf(DEBUG "--- Prefill Complete: %llu ms %.2f tps---\n" CLR_RESET, elapsed_time_us(end, start) / 1000, tps);
 	return 0;
 }
 
+
 // Decode (Generate Tokens)
-// Returns the number of tokens generated
-int engine_decode(struct TIEContext *ctx, int max_new_tokens, int *out_tokens, size_t prompt_len)
+int engine_decode(struct TIEContext *ctx, int max_new_tokens, int *out_tokens, size_t prompt_len,
+		  token_callback_t on_token, void *user_data)
 {
 	struct timespec start, end;
 	int gen_len = 0;
 	Tensor *output_tensor = ctx->model->output.mem.data == NULL ? &ctx->model->token_embd : &ctx->model->output;
 
-	printf("\n--- Generation Start ---\n");
+	printf(DEBUG "\n--- Generation Start ---\n" ASSISTANT_OUT);
 	clock_gettime(CLOCK_REALTIME, &start);
 
-	printf(ASSISTANT_OUT);
+	printf(CLR_RESET ASSISTANT_OUT);
 
 	for (int step = 0; step < max_new_tokens; step++) {
 
@@ -314,16 +265,17 @@ int engine_decode(struct TIEContext *ctx, int max_new_tokens, int *out_tokens, s
 		/* tools process */
 		bool token_consumed = tools_process_token(ctx, next_token);
 
-		// If NOT consumed, print it normally
-		if (!token_consumed) {
-			generate_output(ctx, next_token);
+		// Check if a tool call is ready to be executed
+		if (ctx->tool_context.state == TOOL_STATE_CALL_READY) {
+			printf(DEBUG "\n[Model] Tool call detected. Pausing for execution.\n" CLR_RESET);
+			// Break the loop to return control to model_thread_main.
+			break;
 		}
 
-		// Check if a tool just finished executing
-		if (ctx->tool_context.state == TOOL_STATE_RESULT_READY) {
-			// We need to return to the main loop to insert the tool result.
-			printf("\n[System] Tool execution complete. Returning control.\n");
-			break;
+		// If NOT consumed, print it normally
+		if (!token_consumed) {
+			if (on_token)
+				on_token(user_data, next_token);
 		}
 
 		if (gen_len < max_new_tokens) {
@@ -337,134 +289,397 @@ int engine_decode(struct TIEContext *ctx, int max_new_tokens, int *out_tokens, s
 			ctx->model->interface.transformer_layer(ctx, l, 1);
 		}
 
-		if (next_token == ctx->model->eos_token_id) {
-			printf(CLR_RESET);
-			printf("\n--- EOS ---\n");
+		if (next_token == ctx->model->eos_token_id)
 			break;
-		}
 
 		// Advance KV Position
 		ctx->kv_pos++;
 	}
 
 	clock_gettime(CLOCK_REALTIME, &end);
+
 	float tps = (float)gen_len / (elapsed_time_us(end, start) / 1000000.0f);
-	printf("\n--- Generation End: %d tokens, %.2f tps ---\n", gen_len, tps);
+	printf(DEBUG "\n--- Generation End: %d tokens, %.2f tps ---\n" CLR_RESET, gen_len, tps);
 
 	return gen_len;
 }
 
-void read_user_input(char *input_buf, size_t buf_size)
+void push_cmd(ModelCommand cmd)
 {
-	printf("\nYou: " USER_PROMPT);
-	if (!fgets(input_buf, buf_size, stdin)) {
-		input_buf[0] = '\0';
+	pthread_mutex_lock(&cmd_q.mutex);
+	int next = (cmd_q.tail + 1) % QUEUE_SIZE;
+
+	// Simple block if full
+	while (next == cmd_q.head) {
+		pthread_cond_wait(&cmd_q.cond, &cmd_q.mutex);
 	}
-	input_buf[strcspn(input_buf, "\n")] = 0;
-	printf(CLR_RESET);
+	cmd_q.buffer[cmd_q.tail] = cmd;
+	cmd_q.tail = next;
+
+	pthread_cond_signal(&cmd_q.cond);
+	//	pthread_cond_broadcast(&cmd_q.cond);
+
+	pthread_mutex_unlock(&cmd_q.mutex);
 }
 
-// Main Chat Loop
-void run_chat_session(struct TIEContext *ctx, int max_new_tokens, bool initial_has_image)
+ModelCommand pop_cmd()
 {
-	char input_buf[MAX_PROMPT_BATCH_SIZE];
-	struct timespec start, end;
-	int *prompt_tokens = NULL;
-	int *generated_tokens = calloc(max_new_tokens, sizeof(int));
-	bool current_has_image = initial_has_image;
-	ctx->model->bos_token_sent = 0;
-	size_t system_prompt_len = 0;
-	char *system_prompt = NULL;
+	pthread_mutex_lock(&cmd_q.mutex);
 
-
-	/* Init tool call handler */
-	if (tools_init(ctx) == 0 && ctx->model->interface.build_system_prompt) {
-
-		// Process system prompt immediately at start
-		system_prompt = ctx->model->interface.build_system_prompt(ctx);
-
-		int *system_prompt_tokens =
-			ctx->model->interface.tokenize_prompt(ctx, system_prompt, &system_prompt_len);
-
-		// If the model needs a BOS token, and it hasn't been sent, prepend it to the system prompt.
-		if (ctx->model->add_bos_token == 1 && ctx->model->bos_token_sent == 0)
-			ctx->model->bos_token_sent = 1;
-
-
-		printf("--- Processing System Prompt: %zu tokens ---\n", system_prompt_len);
-		clock_gettime(CLOCK_REALTIME, &start);
-
-		if (ctx->model->use_mrope == 1) {
-			// System prompt is text-only, so h_patches=0, w_patches=0
-			// start_pos is ctx->kv_pos (usually 0 here)
-			build_mrope_position_ids(ctx, system_prompt_tokens, system_prompt_len, false, ctx->kv_pos, 0,
-						 0);
-
-			text_rope_cache_init(ctx, system_prompt_len, ctx->kv_pos);
-		}
-
-		engine_prefill(ctx, system_prompt_tokens, system_prompt_len, false);
-
-		clock_gettime(CLOCK_REALTIME, &end);
-		printf("--- System Prompt Processed, time: %llu msec ---\n", elapsed_time_us(end, start) / 1000);
-
-		free(system_prompt);
-		free(system_prompt_tokens);
+	while (cmd_q.head == cmd_q.tail) {
+		pthread_cond_wait(&cmd_q.cond, &cmd_q.mutex);
 	}
 
+	ModelCommand cmd = cmd_q.buffer[cmd_q.head];
+	cmd_q.head = (cmd_q.head + 1) % QUEUE_SIZE;
+
+	pthread_cond_signal(&cmd_q.cond);
+
+	pthread_mutex_unlock(&cmd_q.mutex);
+	return cmd;
+}
+
+void push_evt(ModelEvent evt)
+{
+	pthread_mutex_lock(&evt_q.mutex);
+
+	int next = (evt_q.tail + 1) % (QUEUE_SIZE * 4);
+
+	// If full, we block the model thread.
+	while (next == evt_q.head) {
+		pthread_cond_wait(&evt_q.cond, &evt_q.mutex);
+	}
+	evt_q.buffer[evt_q.tail] = evt;
+	evt_q.tail = next;
+
+	pthread_cond_signal(&evt_q.cond);
+
+	//	pthread_cond_broadcast(&evt_q.cond);
+	pthread_mutex_unlock(&evt_q.mutex);
+}
+
+ModelEvent pop_evt()
+{
+	pthread_mutex_lock(&evt_q.mutex);
+	while (evt_q.head == evt_q.tail) {
+		pthread_cond_wait(&evt_q.cond, &evt_q.mutex);
+	}
+	ModelEvent evt = evt_q.buffer[evt_q.head];
+	evt_q.head = (evt_q.head + 1) % (QUEUE_SIZE * 4);
+
+	pthread_cond_signal(&evt_q.cond); // Signal space available
+
+	//	pthread_cond_broadcast(&evt_q.cond);
+	pthread_mutex_unlock(&evt_q.mutex);
+	return evt;
+}
+
+void model_on_token(void *user_data, int token_id)
+{
+	ModelEvent evt = {
+		.type = EVT_TOKEN,
+		.token_id = token_id
+	};
+
+	push_evt(evt);
+}
+
+void *model_thread_main(void *arg)
+{
+	struct TIEContext *ctx = (struct TIEContext *)arg;
+	int *generated_tokens = calloc(8192, sizeof(int));
+
 	while (1) {
-		const char *input_ptr;
+		// Wait for work
+		ModelCommand cmd = pop_cmd();
 
-		// Check if we have a pending tool result
-		if (ctx->tool_context.state == TOOL_STATE_RESULT_READY) {
-			input_ptr = ctx->tool_context.result_prompt;
+		if (cmd.type == CMD_EXIT)
+			break;
 
-			// Reset state logic
-			ctx->tool_context.state = TOOL_STATE_IDLE;
+		if (cmd.type == CMD_GENERATE) {
 
-		} else {
-			// Normal User Input
-			read_user_input(input_buf, sizeof(input_buf));
-			if (strncmp(input_buf, "/exit", 5) == 0)
-				break;
-			input_ptr = input_buf;
+			// Build Prompt
+			size_t prompt_len = 0;
+			// cmd.text is owned by this thread now, free it later
+			int *tokens = build_multimodal_turn_tokens(ctx, cmd.text, cmd.has_image, &prompt_len);
+
+			if (!tokens) {
+				// Error handling: push a FINISH event immediately
+				push_evt((ModelEvent) { .type = EVT_FINISHED });
+
+				if (cmd.text)
+					free(cmd.text);
+				continue;
+			}
+
+			// Run Prefill
+			engine_prefill(ctx, tokens, prompt_len, cmd.has_image);
+			if (cmd.prefill_only) {
+				push_evt((ModelEvent){.type = EVT_FINISHED});
+				continue;
+			}
+
+
+			// Run Decode
+			engine_decode(ctx, 8192, generated_tokens, prompt_len, model_on_token, NULL);
+
+			// Handle Result
+			if (ctx->tool_context.state == TOOL_STATE_CALL_READY) {
+				// Model wants to call a tool.
+				push_evt((ModelEvent){.type = EVT_TOOL_CALL});
+				continue;
+			}
+
+			// Cleanup & Signal Finish
+			if (cmd.text)
+				free(cmd.text);
+			if (tokens)
+				free(tokens);
+
+			push_evt((ModelEvent){.type = EVT_FINISHED});
 		}
-
-		// Build Tokens (Includes M-RoPE calculation inside)
-		size_t prompt_len = 0;
-		if (prompt_tokens)
-			free(prompt_tokens); // Free previous turn
-
-		prompt_tokens = build_multimodal_turn_tokens(ctx, input_ptr, current_has_image, &prompt_len);
-
-		if (!prompt_tokens || prompt_len == 0) {
-			printf("Error: Failed to build prompt.\n");
-			continue;
-		}
-
-		// If we used a tool result, free it now
-		if (ctx->tool_context.result_prompt && input_ptr == ctx->tool_context.result_prompt) {
-			free(ctx->tool_context.result_prompt);
-			ctx->tool_context.result_prompt = NULL;
-		}
-
-		// Run Prefill
-		if (engine_prefill(ctx, prompt_tokens, prompt_len, current_has_image) != 0) {
-			continue;
-		}
-
-		// Image is consumed after the first turn
-		current_has_image = false;
-
-
-		// Run Decode
-		engine_decode(ctx, max_new_tokens, generated_tokens, prompt_len);
 	}
 
 	free(generated_tokens);
-	if (prompt_tokens)
-		free(prompt_tokens);
+	return NULL;
 }
+
+static char *file_path_generator(const char *text, int state)
+{
+	static DIR *dir = NULL;
+	static char directory[4096];
+	static char prefix[4096];
+	struct dirent *entry;
+
+	// First call: reset state
+	if (state == 0) {
+		// Split into directory + prefix
+		const char *slash = strrchr(text, '/');
+
+		if (slash) {
+			size_t len = slash - text + 1;
+			strncpy(directory, text, len);
+			directory[len] = '\0';
+
+			strcpy(prefix, slash + 1);
+		} else {
+			strcpy(directory, "./");
+			strcpy(prefix, text);
+		}
+
+		if (dir)
+			closedir(dir);
+		dir = opendir(directory);
+		if (!dir)
+			return NULL;
+	}
+
+	// Enumerate directory entries
+	while ((entry = readdir(dir)) != NULL) {
+		if (strncmp(entry->d_name, prefix, strlen(prefix)) == 0) {
+
+			static char buffer[4096];
+			snprintf(buffer, sizeof(buffer), "%s%s", directory, entry->d_name);
+
+			// If directory, add trailing '/'
+			struct stat st;
+			if (stat(buffer, &st) == 0 && S_ISDIR(st.st_mode)) {
+				strcat(buffer, "/");
+			}
+
+			return strdup(buffer);
+		}
+	}
+
+	closedir(dir);
+	dir = NULL;
+
+	return NULL;
+}
+
+static char **tie_completion(const char *text, int start, int end)
+{
+	// Trigger file completion only for "/img <PATH>"
+	if (strncmp(rl_line_buffer, "/img ", 5) == 0) {
+		// Complete only after "/img " including multiple directories
+		return rl_completion_matches(text, file_path_generator);
+	}
+
+	return NULL;
+}
+
+void init_readline()
+{
+	rl_attempted_completion_function = tie_completion;
+	rl_completion_append_character = '\0';
+
+#ifdef RL_COMPLETION_SUPPRESS_QUOTE
+	rl_completion_suppress_quote = 1;
+#endif
+#ifdef RL_COMPLETER_QUOTE_CHARACTERS
+	rl_completer_quote_characters = "";
+#endif
+}
+
+void read_user_input(char *input_buf, size_t buf_size)
+{
+	char *line = readline(USER_PROMPT "\nYou: ");
+	if (!line) {
+		input_buf[0] = '\0';
+		return;
+	}
+
+	strncpy(input_buf, line, buf_size);
+	free(line);
+}
+
+void run_ui_loop(struct TIEContext *ctx)
+{
+	char input_buf[MAX_PROMPT_BATCH_SIZE];
+	bool image_loaded = false;
+
+	// Start the background thread
+	pthread_t thread_id;
+	pthread_create(&thread_id, NULL, model_thread_main, ctx);
+
+	// System Prompt
+	if (tools_init(ctx) == 0 && ctx->model->interface.build_system_prompt) {
+
+		char *sys_prompt = ctx->model->interface.build_system_prompt(ctx);
+
+		if (sys_prompt) {
+			printf(DEBUG "[Init] Processing System Prompt...\n" CLR_RESET);
+			ModelCommand cmd = {.type = CMD_GENERATE,
+					    .text = strdup(sys_prompt),
+					    .has_image = false,
+					    .prefill_only = true};
+			push_cmd(cmd);
+
+			// Wait for it to finish
+			while (1) {
+				ModelEvent evt = pop_evt();
+				if (evt.type == EVT_FINISHED)
+					break;
+			}
+		}
+	}
+
+	printf(ERR "\nWelcome to interactive chat. Type '/exit' to quit, '/img /path/xxx.bmp' to load an image.\n");
+
+	while (1) {
+
+		// User Input
+		read_user_input(input_buf, sizeof(input_buf));
+
+		if (strncmp(input_buf, "/exit", 5) == 0) {
+			push_cmd((ModelCommand){.type = CMD_EXIT});
+			break;
+		}
+
+		if (strncmp(input_buf, "/img ", 5) == 0) {
+			const char *path = input_buf + 5;
+
+			if (load_bmp_clip(path, ctx) == 0) {
+				printf(DEBUG "[Image loaded: %s]\n" CLR_RESET, path);
+				image_loaded = true;
+			} else {
+				printf(ERR "[Failed to load image: %s]\n" CLR_RESET, path);
+			}
+
+			continue; // Go back and wait for actual user message
+		}
+
+		// Send Work to Model
+		ModelCommand cmd = {.type = CMD_GENERATE,
+				    .text = strdup(input_buf), // Duplicate because model thread frees it
+				    .has_image = image_loaded};
+		push_cmd(cmd);
+		image_loaded = false;
+
+		// Listening Mode (Blocking on Event Queue)
+		while (1) {
+
+			ModelEvent evt = pop_evt();
+
+			if (evt.type == EVT_FINISHED) {
+				break;
+
+			} else if (evt.type == EVT_TOKEN) {
+
+				// Decode and print on UI thread
+				generate_output(ctx, evt.token_id);
+
+			} else if (evt.type == EVT_TOOL_CALL) {
+
+				tools_execute_pending(ctx);
+
+				// Send the result back to the model
+				ToolContext *tc = &ctx->tool_context;
+				tc->state = TOOL_STATE_IDLE;
+
+				ModelCommand cmd = {
+					.type = CMD_GENERATE, .text = tc->result_prompt, .has_image = false};
+
+				push_cmd(cmd);
+
+				// We stay in Listening Mode because the model will immediately start generating
+				// the answer after processing the tool result.
+				printf(DEBUG "[Tool] Result sent to model: %s\n" CLR_RESET, tc->result_prompt);
+			}
+		}
+	}
+
+	printf(DEBUG);
+
+//exit_app:
+//	pthread_join(thread_id, NULL);
+}
+
+static void handle_model(AppConfig *cfg, const char *v)
+{
+	cfg->model_path = (char *)v;
+}
+static void handle_threads(AppConfig *cfg, const char *v)
+{
+	cfg->num_threads = atoi(v);
+}
+static void handle_mmproj(AppConfig *cfg, const char *v)
+{
+	cfg->mmproj_path = (char *)v;
+}
+static void handle_context(AppConfig *cfg, const char *v)
+{
+	cfg->context_length = atoi(v);
+}
+static void handle_temp(AppConfig *cfg, const char *v)
+{
+	cfg->temperature = atof(v);
+}
+static void handle_top_p(AppConfig *cfg, const char *v)
+{
+	cfg->top_p = atof(v);
+}
+static void handle_top_k(AppConfig *cfg, const char *v)
+{
+	cfg->top_k = atoi(v);
+}
+static void handle_mmap(AppConfig *cfg, const char *v)
+{
+	cfg->use_mmap = 1;
+}
+
+static const ArgSpec arg_table[] = {
+	{"model", 'm', 1, handle_model, "Path to model GGUF file"},
+	{"threads", 't', 1, handle_threads, "Number of CPU threads"},
+	{"mmproj", 'p', 1, handle_mmproj, "Multimodal projection file"},
+	{"context", 'c', 1, handle_context, "Context window size"},
+	{"temperature", 'T', 1, handle_temp, "Sampling temperature"},
+	{"top-p", 'P', 1, handle_top_p, "Nucleus sampling (top-p)"},
+	{"top-k", 'K', 1, handle_top_k, "Top-k sampling"},
+	{"mmap", 'M', 0, handle_mmap, "Use mmap to load model"},
+	{"help", 'h', 0, NULL, "Show help message"},
+};
+static const int arg_table_count = sizeof(arg_table) / sizeof(arg_table[0]);
 
 static const ArgSpec *find_long_opt(const char *name)
 {
@@ -516,7 +731,6 @@ static void print_help(const char *progname)
 
 	printf("\n");
 }
-
 
 AppConfig parse_args(int argc, char *argv[])
 {
@@ -577,7 +791,6 @@ AppConfig parse_args(int argc, char *argv[])
 			continue;
 		}
 
-		// Unknown non-option argument
 		fprintf(stderr, "Unknown argument: %s\n", arg);
 		exit(1);
 	}
@@ -600,15 +813,15 @@ int main(int argc, char *argv[])
 
 	// Init Engine
 	engine_alloc(ctx, ctx->config.num_threads);
+	init_readline();
 
 	// Load Models
 	ctx->gguf_text = gguf_model_parse(ctx->config.model_path);
 	if (!ctx->gguf_text)
 		exit(EXIT_FAILURE);
 
-	if (ctx->config.mmproj_path) {
+	if (ctx->config.mmproj_path)
 		ctx->gguf_vision = gguf_model_parse(ctx->config.mmproj_path);
-	}
 
 	ModelDef *text_def = find_model_def(ctx->gguf_text);
 	ModelDef *vision_def = ctx->gguf_vision ? find_model_def(ctx->gguf_vision) : NULL;
@@ -630,48 +843,9 @@ int main(int argc, char *argv[])
 		vision_model_info(ctx);
 	}
 
-	// Load Image (if any)
-	bool has_image = false;
-	if (ctx->model_vision && ctx->config.image_path) {
-		if (load_bmp_clip(ctx->config.image_path, ctx) == 0) {
-			has_image = true;
-			printf("Loaded image: %s\n", ctx->config.image_path);
-		}
-	}
-
-#if 0
-	char buf[256];
-	for (int i=0; i < ctx->model->vocab_size; i++) {
-		const unsigned char *token = get_token_string(ctx, i);
-		int len = get_token_string_length(ctx, i);
-
-		memset(buf, 0, 256);
-		memcpy(buf, token, len);
-
-		printf("token #%u [%s]\n", i, buf);
-	}
-#endif
-
-#if 0
-	printf("sot_token_id: %d\n", ctx->model->def->params.sot_token_id);
-	printf("eot_token_id: %d\n", ctx->model->def->params.eot_token_id);
-	printf("eos_token_id: %d\n", ctx->model->def->params.eos_token_id);
-	printf("newline_token_id: %d\n", ctx->model->def->params.newline_token_id);
-	printf("role_user_token_id: %d\n", ctx->model->def->params.role_user_token_id);
-	printf("role_model_token_id: %d\n", ctx->model->def->params.role_model_token_id);
-	printf("double_newline_token_id: %d\n", ctx->model->def->params.double_newline_token_id);
-	printf("vision_start_token_id: %d\n", ctx->model->def->params.vision_start_token_id);
-	printf("vision_end_token_id: %d\n", ctx->model->def->params.vision_end_token_id);
-	printf("vision_embed_token_id: %d\n", ctx->model->def->params.vision_embed_token_id);
-
-	printf("bos_token_id: %d\n", ctx->model->bos_token_id);
-	printf("unk_token_id: %d\n", ctx->model->unk_token_id);
-	printf("pad_token_id: %d\n", ctx->model->pad_token_id);
-	printf("eos_token_id: %d\n", ctx->model->eos_token_id);
-#endif
 
 	// Run Chat
-	run_chat_session(ctx, 8192, has_image);
+	run_ui_loop(ctx);
 
 	// Cleanup
 	engine_release(ctx);

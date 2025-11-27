@@ -46,13 +46,21 @@ int tools_init(struct TIEContext *ctx)
 	}
 }
 
-// Execution Logic
-static void execute_buffered_tool(struct TIEContext *ctx)
+void tools_release(struct TIEContext *ctx)
 {
 	ToolContext *tc = &ctx->tool_context;
 
-	// 1. Parse the buffer (e.g., {"name": "set_lamp_state", ...})
-	printf("\n[System] Executing Tool: %s\n", tc->buffer);
+//	if (tc->result_prompt)
+//		free(tc->result_prompt);
+}
+
+// Execution Logic
+void tools_execute_pending(struct TIEContext *ctx)
+{
+	ToolContext *tc = &ctx->tool_context;
+
+	// Parse the buffer (e.g., {"name": "set_lamp_state", ...})
+	printf(DEBUG "[System] Executing Tool: %s\n", tc->buffer);
 
 	// Simple parser for demo
 	char *execution_result = NULL;
@@ -70,8 +78,6 @@ static void execute_buffered_tool(struct TIEContext *ctx)
 		 "<|im_start|>user\n<tool_response>\n%s\n</tool_response><|im_end|>\n<|im_start|>assistant\n",
 		 execution_result);
 
-	if (tc->result_prompt)
-		free(tc->result_prompt);
 	tc->result_prompt = strdup(fmt_buf);
 
 	tc->state = TOOL_STATE_RESULT_READY;
@@ -103,7 +109,8 @@ bool tools_process_token(struct TIEContext *ctx, int token)
 		if (token == tc->token_end_id) {
 			// Found </tool_call>. Execute.
 			tc->buffer[tc->buf_len] = '\0';
-			execute_buffered_tool(ctx);
+
+			tc->state = TOOL_STATE_CALL_READY;
 			return true;
 		}
 

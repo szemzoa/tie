@@ -6,7 +6,7 @@
 
 struct TIEContext;
 
-typedef enum { TOOL_STATE_IDLE, TOOL_STATE_BUFFERING, TOOL_STATE_EXECUTING, TOOL_STATE_RESULT_READY } ToolState;
+typedef enum { TOOL_STATE_IDLE, TOOL_STATE_BUFFERING, TOOL_STATE_CALL_READY, TOOL_STATE_RESULT_READY } ToolState;
 
 typedef struct {
 	ToolState state;
@@ -25,9 +25,11 @@ typedef struct {
 	char *(*func)(const char *args);
 } ToolDef;
 
-extern int tools_init(struct TIEContext *ctx);
+extern int  tools_init(struct TIEContext *ctx);
+extern void tools_release(struct TIEContext *ctx);
 extern void tools_register_default(struct TIEContext *ctx);
 extern bool tools_process_token(struct TIEContext *ctx, int token);
+extern void tools_execute_pending(struct TIEContext *ctx);
 
 extern char *build_system_prompt_qwen3(struct TIEContext *ctx);
 extern char *build_system_prompt_gemma3(struct TIEContext *ctx);

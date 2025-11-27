@@ -635,18 +635,6 @@ void model_language_cleanup(struct TIEContext *ctx, struct GGUFModel *model, Mod
 		free_memtype(dest_buffer);
 	}
 
-	for (size_t i = 0; i < def->num_metadata_defs; i++) {
-		const MetadataDef *mdef = &def->metadata_defs[i];
-
-		if (mdef->is_array) {
-			void *dest_ptr = (uint8_t *)model + mdef->offset;
-
-			ModelArray *target_array = (ModelArray *)((char *)dest_ptr);
-			if (target_array->data)
-				free(target_array->data);
-		}
-	}
-
 	// MoE Buffers
 	if (ctx->model->is_moe == 1) {
 		for (int i = 0; i < ctx->model->expert_count; i++) {
@@ -703,7 +691,19 @@ void model_language_cleanup(struct TIEContext *ctx, struct GGUFModel *model, Mod
 			}
 		}
 	}
-	free(ctx->model->layers);
+//	free(ctx->model->layers);
+
+	for (size_t i = 0; i < def->num_metadata_defs; i++) {
+		const MetadataDef *mdef = &def->metadata_defs[i];
+
+		if (mdef->is_array) {
+			void *dest_ptr = (uint8_t *)model + mdef->offset;
+
+			ModelArray *target_array = (ModelArray *)((char *)dest_ptr);
+			if (target_array->data)
+				free(target_array->data);
+		}
+	}
 
 	for (int i = 0; i < model->tensor_count; i++) {
 		GGUFTensor *tensor = &model->tensors[i];
@@ -712,9 +712,11 @@ void model_language_cleanup(struct TIEContext *ctx, struct GGUFModel *model, Mod
 	free(model->tensors);
 
 	/* free rope cache(s) */
-	free(ctx->model->rope_cache_local->sin);
-	free(ctx->model->rope_cache_local->cos);
-	free(ctx->model->rope_cache_local);
+	if (ctx->model->rope_cache_local) {
+	    free(ctx->model->rope_cache_local->sin);
+    	    free(ctx->model->rope_cache_local->cos);
+	    free(ctx->model->rope_cache_local);
+	}
 
 	if (ctx->model->rope_cache_global) {
 		free(ctx->model->rope_cache_global->sin);
@@ -728,7 +730,6 @@ void model_language_cleanup(struct TIEContext *ctx, struct GGUFModel *model, Mod
 		free_memtype(&ctx->kv_cache[i].v);
 	}
 	free(ctx->kv_cache);
-
 
 	free(model);
 

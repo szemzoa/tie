@@ -94,7 +94,7 @@ ModelDef QWEN3_DEF = {
 		},
 	.interface =
 		{
-//			.build_system_prompt = build_system_prompt_qwen3,
+			.build_system_prompt = build_system_prompt_qwen3,
 			.tokenize_prompt = tokenize_bpe,
 			.decode_token = decode_token_bpe,
 			.prepare_next_token = prepare_next_token_standard,

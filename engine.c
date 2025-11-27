@@ -53,6 +53,8 @@ void engine_release(struct TIEContext *ctx)
 		model_vision_cleanup(ctx, ctx->gguf_vision, ctx->model_vision->def, ctx->config.use_mmap);
 	}
 
+	tools_release(ctx);
+
 	thread_pool_destroy(thread_pool);
 	free(ctx);
 
