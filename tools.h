@@ -33,5 +33,6 @@ extern void tools_execute_pending(struct TIEContext *ctx);
 
 extern char *build_system_prompt_qwen3(struct TIEContext *ctx);
 extern char *build_system_prompt_gemma3(struct TIEContext *ctx);
+extern char *build_system_prompt_granite(struct TIEContext *ctx);
 
 #endif

@@ -16,6 +16,9 @@ enum {
 	ARCH_GEMMA3N,
 	ARCH_CLIP_VISION,
 	ARCH_DEEPSEEK_QWEN3,
+	ARCH_GRANITE,
+	ARCH_LFM2,
+	ARCH_LFM2_MOE,
 };
 
 enum {
@@ -31,6 +34,7 @@ typedef enum {
 typedef enum {
 	SIZE_EMBED_DIM,
 	SIZE_FFN_DIM,
+	SIZE_FFN_DIM_X_2,
 	SIZE_Q_DIM,
 	SIZE_KV_DIM,
 	SIZE_VOCAB_SIZE,
@@ -42,6 +46,9 @@ typedef enum {
 	SIZE_ROPE_COS,
 
 	SIZE_POS_IDS, // for m-rope
+
+	/* LFM2 */
+	SIZE_SCONV_IN_PROJ,
 
 	/* vision */
 	SIZE_VISION_IMAGE_RAW,
@@ -82,7 +89,8 @@ typedef struct {
 } BufferDef;
 
 typedef struct {
-	uint8_t is_moe;
+	int is_moe;
+	int is_hybrid;
 
 	int sot_token_id;
 	int eot_token_id;
@@ -107,16 +115,20 @@ typedef struct {
 typedef struct {
 	char *(*build_system_prompt)(struct TIEContext *ctx);
 
-	int *(*tokenize_prompt)(struct TIEContext *ctx, const char *prompt, size_t *num_tokens);
-	void (*process_prompt)(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len);
+	int *(*tokenize_encode)(struct TIEContext *ctx, const char *prompt, size_t *num_tokens);
+	int (*tokenize_decode)(struct TIEContext *ctx, int token, char *buf, int buf_size);
 
-	int (*decode_token)(struct TIEContext *ctx, int token, char *buf, int buf_size);
+	int (*build_prompt)(struct TIEContext *ctx, int *prompt_tokens, int *user_text_tokens,
+			    int user_text_token_count, bool has_image);
 
-	void (*prepare_next_token)(struct TIEContext *ctx, int next_token);
+	void (*process_prompt_custom)(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len);
+	void (*prepare_next_token_custom)(struct TIEContext *ctx, int next_token);
+
+	void (*post_generate_step)(struct TIEContext *ctx, int step, size_t prompt_len);
 	void (*embedding_scale)(struct TIEContext *ctx, MemType *hidden_state_slice);
+
 	int (*transformer_layer)(struct TIEContext *ctx, int layer_idx, int batch_len);
 
-	int (*build_vision_tokens)(struct TIEContext *ctx, int *token_buf, int buf_pos);
 	MemType *(*process_image_vision)(struct TIEContext *ctx);
 	void (*build_rope_cache)(struct TIEContext *ctx, size_t seq_len);
 } ModelInterface;
@@ -205,7 +217,9 @@ typedef struct {
 	RopeCacheType *rope_cache_global;
 	RopeCacheType *rope_cache_local;
 
-	/* gemma3n */
+	int *layer_types;
+
+	/* Gemma-3n */
 	int pli_dim;
 	uint32_t altup_num_inputs;
 	Tensor altup_proj;
@@ -215,9 +229,27 @@ typedef struct {
 	Tensor per_layer_token_embd;
 	float final_logit_softcap;
 
-	/* qwen3-vl */
+	/* Qwen3-vl */
 	ModelArray mrope_sections;
 	int use_mrope;
+
+	/* Granite-Hybrid */
+	ModelArray attn_head_count_kv;
+	int ssm_proj_dim;
+	int expert_shared_ffn_dim;
+	int rope_dimension_count;
+	float embedding_scale;
+	float residual_scale;
+	float logit_scale;
+	int ssm_conv_kernel;
+	int ssm_state_size;
+	int ssm_group_count;
+	int ssm_inner_size;
+	int ssm_time_step_rank;
+
+	/* LFM2 */
+	int conv_kernel_size;
+	int expert_leading_dense_layers;
 } Model;
 
 typedef struct {
@@ -257,11 +289,18 @@ typedef struct {
 	Tensor position_embd;
 	Tensor post_ln_bias;
 	Tensor post_ln;
+
 	/* Qwen3-VL */
 	Tensor mm_0_bias;
 	Tensor mm_0_weight;
 	Tensor mm_2_bias;
 	Tensor mm_2_weight;
+
+	/* LFM2 */
+	Tensor mm_1_bias;
+	Tensor mm_1_weight;
+	Tensor input_norm;
+	Tensor input_norm_bias;
 
 	VisionLayerWeights *layers;
 	WeightLayout weight_layout;
@@ -288,6 +327,7 @@ extern int model_vision_init(struct TIEContext *ctx, VisionModel *model_vision, 
 
 extern void model_language_cleanup(struct TIEContext *ctx, struct GGUFModel *model, ModelDef *def, int use_mmap);
 extern void model_vision_cleanup(struct TIEContext *ctx, struct GGUFModel *model, ModelDef *def, int use_mmap);
+
 extern void language_model_info(struct TIEContext *ctx);
 extern void vision_model_info(struct TIEContext *ctx);
 

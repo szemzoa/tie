@@ -13,6 +13,7 @@ extern void rms_norm_f32_f32_f32_avx2(void *__restrict O, const void *__restrict
 extern void rms_norm_bf16_f32_f32_avx2(void *__restrict o_void, const void *__restrict x_void,
 				       const Tensor *__restrict W, int size, float eps);
 extern void apply_rope_cache_f32_avx2(RopeCacheType *rope_cache, void *X, int pos, int head_dim);
+extern void apply_rope_cache_interleaved_f32_avx2(RopeCacheType *rope_cache, void *X, int pos, int head_dim);
 extern void apply_residual_f32_f32_avx2(void *acc_void, const void *residual_void, int size);
 extern void mat_vec_row_f32_q4k_f32_avx2(const void *X, const void *w_void, void *O, int in_dim, int start_row,
 					 int end_row);
@@ -27,15 +28,17 @@ extern void mat_vec_row_bf16_q4k_f32_avx2(const void *X, const void *w_void, voi
 extern void mat_vec_row_bf16_q6k_f32_avx2(const void *X, const void *w_void, void *O, int in_dim, int start_row,
 					  int end_row);
 extern void accumulate_weighted_V_f32_bf16_avx2(void *__restrict O, float weight, const void *__restrict V, int size);
-extern void store_KV_cache_f32_bf16_avx2(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len, int sink_len);
+extern void store_KV_cache_f32_bf16_avx2(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len,
+					 int sink_len);
 extern void swiglu_activation_f32_f32_avx2(void *gate_void, const void *up_void, int size);
 extern void swiglu_activation_bf16_bf16_avx2(void *gate_void, const void *up_void, int size);
 extern void geglu_activation_f32_f32_avx2(void *gate, const void *up, int size);
 extern void convert_bf16_f32_avx2(const void *S, void *D, int n);
 extern void convert_f32_f32_avx2(const void *S, void *D, int n);
 extern void conv_2d_f32_f32_f32_f32_avx2(MemType *dest, const MemType *src_image, const Tensor *kernel_tensor,
-                      const Tensor *bias_tensor, int H_in, int W_in, int stride, int padding);
-extern void layer_norm_f32_f32_f32_f32_avx2(MemType *dest, const MemType *src, const Tensor *weight, const Tensor *bias, int size, float eps);
+					 const Tensor *bias_tensor, int H_in, int W_in, int stride, int padding);
+extern void layer_norm_f32_f32_f32_f32_avx2(MemType *dest, const MemType *src, const Tensor *weight, const Tensor *bias,
+					    int size, float eps);
 extern void transpose_f32_avx2(MemType *dest, const MemType *src, int rows, int cols);
 
 #endif

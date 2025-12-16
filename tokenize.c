@@ -10,11 +10,6 @@
 #include "tokenize.h"
 #include "main.h"
 
-
-char merge_pool[MAX_SPANS][128];
-BpeMergeMap bpe_merges_map;
-SpecialTokenList special_tokens;
-
 TrieNode *create_node()
 {
 	TrieNode *node = (TrieNode *)calloc(1, sizeof(TrieNode));
@@ -108,21 +103,6 @@ static inline void buf_write_byte(char *buf, int *pos, int max_len, unsigned cha
 	}
 }
 
-void replace_g_spaces(char *s)
-{
-	for (char *p = s; *p;) {
-		if ((unsigned char)p[0] == 0xC4 && (unsigned char)p[1] == 0xA0) { // Ġ
-			*p = ' ';
-			memmove(p + 1, p + 2, strlen(p + 2) + 1);
-		} else if ((unsigned char)p[0] == 0xC4 && (unsigned char)p[1] == 0x8A) { // Ċ
-			*p = '\n';
-			memmove(p + 1, p + 2, strlen(p + 2) + 1);
-		} else {
-			p++;
-		}
-	}
-}
-
 int vocab_lookup_token_id(TrieNode *root, const char *token, size_t len)
 {
 	TrieNode *node = root;
@@ -133,6 +113,18 @@ int vocab_lookup_token_id(TrieNode *root, const char *token, size_t len)
 			return -1;
 	}
 	return node->token_id;
+}
+
+int get_special_token_id(struct TIEContext *ctx, const char *token_str, int fallback_id)
+{
+	// Try to find the token in the vocabulary
+	int id = vocab_lookup_token_id(ctx->tokenizer.root, token_str, strlen(token_str));
+	if (id != -1)
+		return id;
+
+	// Fallback if not found (warn the user)
+	fprintf(stderr, "WARN: Special token '%s' not found, using fallback %d\n", token_str, fallback_id);
+	return fallback_id;
 }
 
 static inline uint64_t hash64(uint64_t x)
@@ -289,7 +281,7 @@ int run_bpe_on_munged_string(struct TIEContext *ctx, const char *munged_text, si
 		for (int i = 0; i < span_count - 1; i++) {
 			uint64_t key = ((uint64_t)spans[i].token_id << 32) | spans[i + 1].token_id;
 			uint32_t rank;
-			if (bpe_map_lookup(&bpe_merges_map, key, &rank)) {
+			if (bpe_map_lookup(&ctx->tokenizer.bpe_merges_map, key, &rank)) {
 				if (rank < best_rank) {
 					best_rank = rank;
 					best_idx = i;
@@ -307,7 +299,7 @@ int run_bpe_on_munged_string(struct TIEContext *ctx, const char *munged_text, si
 		if (len1 + len2 > 127) // Safety check for merge_pool buffer
 			continue;
 
-		char *buf = merge_pool[best_idx]; // Reuse the static merge_pool
+		char *buf = ctx->tokenizer.merge_pool[best_idx]; // Reuse the static merge_pool
 		memcpy(buf, spans[best_idx].start, len1);
 		memcpy(buf + len1, spans[best_idx + 1].start, len2);
 		int merged_len = len1 + len2;
@@ -350,8 +342,8 @@ int *tokenize_bpe(struct TIEContext *ctx, const char *text, size_t *num_tokens)
 
 	while (p < text_len) {
 		bool matched = false;
-		for (int s = 0; s < special_tokens.count; s++) {
-			SpecialToken *sp = &special_tokens.specials[s];
+		for (int s = 0; s < ctx->tokenizer.special_tokens.count; s++) {
+			SpecialToken *sp = &ctx->tokenizer.special_tokens.specials[s];
 			if (p + sp->length <= text_len && memcmp(&text[p], sp->text, sp->length) == 0) {
 				chunks[chunk_count++] = (TokenChunk){.ptr = &text[p],
 								     .len = sp->length,
@@ -366,8 +358,8 @@ int *tokenize_bpe(struct TIEContext *ctx, const char *text, size_t *num_tokens)
 			size_t start = p;
 			while (p < text_len) {
 				bool is_special = false;
-				for (int s = 0; s < special_tokens.count; s++) {
-					SpecialToken *sp = &special_tokens.specials[s];
+				for (int s = 0; s < ctx->tokenizer.special_tokens.count; s++) {
+					SpecialToken *sp = &ctx->tokenizer.special_tokens.specials[s];
 					if (p + sp->length <= text_len && memcmp(&text[p], sp->text, sp->length) == 0) {
 						is_special = true;
 						break;
@@ -400,48 +392,38 @@ int *tokenize_bpe(struct TIEContext *ctx, const char *text, size_t *num_tokens)
 			const char *sub_chunk_start = chunk_ptr;
 
 			while (sub_p <= chunk_len) {
-				// Find next space or end of chunk
+				// We trigger processing on SPACE or END OF CHUNK
 				if (sub_p == chunk_len || chunk_ptr[sub_p] == ' ') {
 
-					size_t sub_chunk_len = sub_p - (sub_chunk_start - chunk_ptr);
+					// Calculate length of the segment we just passed
+					// If sub_chunk_start points to a space, this segment INCLUDES that space.
+					size_t segment_len = (chunk_ptr + sub_p) - sub_chunk_start;
 
-					// A. Process the word (if it exists)
-					if (sub_chunk_len > 0) {
+					if (segment_len > 0) {
 						size_t munged_len;
+						// Munge the segment (e.g. " My" becomes "ĠMy")
 						char *munged_chunk =
-							munge_chunk(ctx, sub_chunk_start, sub_chunk_len, &munged_len);
+							munge_chunk(ctx, sub_chunk_start, segment_len, &munged_len);
 
-						int chunk_tokens[256]; // Temp buffer for one word
+						// Allocate temp buffer relative to size
+						int *chunk_tokens = malloc((munged_len + 16) * sizeof(int));
+
 						int num_chunk_tokens = run_bpe_on_munged_string(
 							ctx, munged_chunk, munged_len, chunk_tokens);
 
 						memcpy(&all_tokens[total_token_count], chunk_tokens,
 						       num_chunk_tokens * sizeof(int));
 						total_token_count += num_chunk_tokens;
+
+						free(chunk_tokens);
 						free(munged_chunk);
 					}
 
-					// Process the space (if it exists)
+					// If we hit a space, the NEXT segment starts HERE (at the space)
+					// This ensures the space is attached to the next word
 					if (sub_p < chunk_len) {
-						// " " (byte 32) -> "Ġ" (codepoint 288) -> bytes C4 A0
-						// The 'munged' string for space is "Ġ"
-						// We can look it up directly.
-
-						// We need the token ID for the "munged" space
-						// Munge the space
-						size_t munged_space_len;
-						char *munged_space = munge_chunk(ctx, " ", 1, &munged_space_len);
-
-						// Look up its ID
-						int space_token_id = vocab_lookup_token_id(
-							ctx->tokenizer.root, munged_space, munged_space_len);
-						if (space_token_id != -1) {
-							all_tokens[total_token_count++] = space_token_id;
-						}
-						free(munged_space);
+						sub_chunk_start = &chunk_ptr[sub_p];
 					}
-
-					sub_chunk_start = &chunk_ptr[sub_p + 1];
 				}
 				sub_p++;
 			}
@@ -640,16 +622,16 @@ int *tokenize_sp(struct TIEContext *ctx, const char *text, size_t *num_tokens)
 
 			// Check if the current node represents a valid token
 			if (node->token_id != -1) {
-				// We found a valid token. Let's get its properties.
+				// We found a valid token
 				int matched_token_id = node->token_id;
 				int matched_token_len = j - i + 1;
 				int end_pos = i + matched_token_len;
 
 				float candidate_score = dp[i].score + ctx->tokenizer.token_scores[matched_token_id];
 
-				// If this path is better than any previous path to end_pos...
+				// If this path is better than any previous path to end_pos
 				if (candidate_score > dp[end_pos].score) {
-					// ...update the DP table with this new best path!
+					// update the DP table with this new best path!
 					dp[end_pos].score = candidate_score;
 					dp[end_pos].token_id = matched_token_id;
 					dp[end_pos].backpointer = i;
@@ -658,7 +640,7 @@ int *tokenize_sp(struct TIEContext *ctx, const char *text, size_t *num_tokens)
 		}
 	}
 
-	// Backward Pass - Reconstruct the best path
+	// Backward Pass
 	// Check if a valid path was found to the end of the string
 	if (dp[processed_text_len].score == -INFINITY) {
 		fprintf(stderr, "ERROR: Could not tokenize the entire string.\n");
@@ -796,64 +778,4 @@ int init_token_table(struct TIEContext *ctx, int num_tokens)
 	ctx->tokenizer.utf8_codepoint = 0;
 
 	return 0;
-}
-
-int build_vision_tokens_gemma3(struct TIEContext *ctx, int *token_buf, int buf_pos)
-{
-	ModelDef *def = ctx->model->def;
-	int pos = buf_pos;
-
-	token_buf[pos++] = def->params.double_newline_token_id; // DOUBLE NEWLINE
-	token_buf[pos++] = def->params.vision_start_token_id;	// <start_of_image>
-
-	for (int i = 0; i < 256; ++i)
-		token_buf[pos++] = def->params.vision_embed_token_id;
-
-	token_buf[pos++] = def->params.vision_end_token_id;	// <end_of_image>
-	token_buf[pos++] = def->params.double_newline_token_id; // DOUBLE NEWLINE
-
-	return pos - buf_pos;
-}
-
-int build_vision_tokens_qwen3vl(struct TIEContext *ctx, int *token_buf, int buf_pos)
-{
-	int pos = buf_pos;
-	VisionModel *vm = ctx->model_vision;
-	ModelDef *def = ctx->model->def;
-
-	// Use Dynamic Dimensions from the loaded image
-	int raw_w = ctx->vision_mem.image_raw_width;
-	int raw_h = ctx->vision_mem.image_raw_height;
-
-	// Calculate patches
-	int w_patches = raw_w / vm->patch_size;
-	int h_patches = raw_h / vm->patch_size;
-
-	// Calculate merged grid size
-	// Qwen3-VL reduces resolution by spatial_merge_size
-	int merged_w = w_patches / vm->spatial_merge_size;
-	int merged_h = h_patches / vm->spatial_merge_size;
-
-	int num_patches = merged_w * merged_h;
-
-	printf("Dynamic Vision Tokens: %dx%d image -> %dx%d patches -> %d tokens\n", raw_w, raw_h, merged_w, merged_h,
-	       num_patches);
-
-	// Add <|vision_start|> token
-	token_buf[pos++] = def->params.vision_start_token_id;
-
-	// Add the *same* <|vision_pad|> token N times
-	int patch_token = def->params.vision_embed_token_id;
-
-	for (int i = 0; i < num_patches; i++) {
-		token_buf[pos++] = patch_token;
-	}
-
-	// Add <|vision_end|> token
-	token_buf[pos++] = def->params.vision_end_token_id;
-
-	// Add the required newline
-	token_buf[pos++] = def->params.newline_token_id;
-
-	return pos - buf_pos;
 }

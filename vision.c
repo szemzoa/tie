@@ -32,7 +32,6 @@ typedef struct {
 	MemType output_head;
 } vision_attn_task_t;
 
-
 typedef struct __attribute__((packed)) {
 	uint16_t bfType;
 	uint32_t bfSize;
@@ -55,9 +54,49 @@ typedef struct __attribute__((packed)) {
 	uint32_t biClrImportant;
 } DIBHeader;
 
+
+static inline int clip_int(int x, int lower, int upper)
+{
+	return (x < lower) ? lower : (x > upper ? upper : x);
+}
+
+static inline float get_pixel_value(const unsigned char *data, int w, int h, int bpp, int x, int y, int c)
+{
+	// Clamp coordinates
+	x = clip_int(x, 0, w - 1);
+	y = clip_int(y, 0, h - 1);
+
+	int stride = (w * 3 + 3) & ~3; // Row padding aligned to 4 bytes
+	const unsigned char *pixel = data + y * stride + x * 3;
+	return (float)pixel[c];
+}
+
+static float cubic_weight(float x)
+{
+	float a = -0.5f;
+	x = fabsf(x);
+	if (x <= 1.0f) {
+		return 1.0f - (a + 3.0f) * x * x + (a + 2.0f) * x * x * x;
+	} else if (x < 2.0f) {
+		return a * (x - 1.0f) * (x - 1.0f) * (x - 1.0f) - 5.0f * a * (x - 1.0f) * (x - 1.0f)
+		       + 8.0f * a * (x - 1.0f) - 4.0f * a;
+	}
+	return 0.0f;
+}
+
 int load_bmp_clip(const char *filename, struct TIEContext *ctx)
 {
 	ClipVisionMeta *meta = &ctx->model_vision->meta;
+
+	// SigLIP Defaults
+	if (meta->image_std[0] < 0.001f) {
+		meta->image_mean[0] = 0.5f;
+		meta->image_mean[1] = 0.5f;
+		meta->image_mean[2] = 0.5f;
+		meta->image_std[0] = 0.5f;
+		meta->image_std[1] = 0.5f;
+		meta->image_std[2] = 0.5f;
+	}
 
 	FILE *f = fopen(filename, "rb");
 	if (!f) {
@@ -67,25 +106,18 @@ int load_bmp_clip(const char *filename, struct TIEContext *ctx)
 
 	BMPHeader bmp;
 	DIBHeader dib;
-	fread(&bmp, sizeof(bmp), 1, f);
-	fread(&dib, sizeof(dib), 1, f);
-
-	if (bmp.bfType != 0x4D42 || dib.biCompression != 0) {
+	if (fread(&bmp, sizeof(bmp), 1, f) != 1 || fread(&dib, sizeof(dib), 1, f) != 1) {
 		fclose(f);
 		return -1;
 	}
 
 	int width = dib.biWidth;
 	int height = dib.biHeight;
-
-	// DYNAMIC RESOLUTION LOGIC
 	int patch_size = ctx->model_vision->patch_size;
 
-	// Optionally clamp to max size if needed (e.g. downscale huge images)
-	// For now, just ensure multiple of patch_size
+	// Dynamic Resolution Target
 	int target_w = (width / patch_size) * patch_size;
 	int target_h = (height / patch_size) * patch_size;
-
 	if (target_w == 0)
 		target_w = patch_size;
 	if (target_h == 0)
@@ -94,50 +126,84 @@ int load_bmp_clip(const char *filename, struct TIEContext *ctx)
 	ctx->vision_mem.image_raw_width = target_w;
 	ctx->vision_mem.image_raw_height = target_h;
 
-	const int bpp = dib.biBitCount;
-	const size_t row_padded = ((width * (bpp / 8) + 3) & ~3);
-	unsigned char *rowbuf = malloc(row_padded);
-	if (!rowbuf) {
+	// Read Input Image Data
+	const size_t row_padded = ((width * 3 + 3) & ~3);
+	unsigned char *src_buf = malloc(row_padded * height);
+	if (!src_buf) {
 		fclose(f);
 		return -1;
 	}
 
-	// Reallocate image_raw buffer if necessary (or rely on max allocation)
-	// Assuming image_raw is large enough (768x768 float32) to hold this dynamic image.
-	float *pixels = ctx->vision_mem.image_raw.data;
-
-	// Resize/Crop loop
-	for (int y = 0; y < target_h; y++) {
-		// Nearest Neighbor Sampling
-		int sample_y = (int)((float)(height - 1) * y / (target_h - 1));
-		int src_y = height - 1 - sample_y; // BMP inversion
-
+	// Read rows (BMP is bottom-up usually, handle inversion here)
+	for (int y = 0; y < height; y++) {
+		int src_y = height - 1 - y; // Flip Y
 		fseek(f, bmp.bfOffBits + (long)row_padded * src_y, SEEK_SET);
-		fread(rowbuf, 1, row_padded, f);
+		if (fread(src_buf + y * row_padded, 1, row_padded, f) != row_padded)
+			break;
+	}
+	fclose(f);
+
+	float *pixels = ctx->vision_mem.image_raw.data;
+	float x_scale = (float)width / target_w;
+	float y_scale = (float)height / target_h;
+
+	// BICUBIC RESIZE LOOP
+	for (int y = 0; y < target_h; y++) {
+		float src_y = (y + 0.5f) * y_scale - 0.5f;
+		int y_int = (int)floorf(src_y);
 
 		for (int x = 0; x < target_w; x++) {
-			int src_x = (int)((float)(width - 1) * x / (target_w - 1));
-			const unsigned char *px = rowbuf + src_x * (bpp / 8);
+			float src_x = (x + 0.5f) * x_scale - 0.5f;
+			int x_int = (int)floorf(src_x);
 
-			float r = px[2] / 255.0f;
-			float g = px[1] / 255.0f;
-			float b = px[0] / 255.0f;
+			float rgb[3] = {0.0f, 0.0f, 0.0f};
 
-			r = (r - meta->image_mean[0]) / meta->image_std[0];
-			g = (g - meta->image_mean[1]) / meta->image_std[1];
-			b = (b - meta->image_mean[2]) / meta->image_std[2];
+			// 4x4 Neighborhood
+			for (int j = -1; j <= 2; j++) {
+				float wy = cubic_weight(src_y - (y_int + j));
+				for (int i = -1; i <= 2; i++) {
+					float wx = cubic_weight(src_x - (x_int + i));
+					float w = wx * wy;
 
-			int idx = (y * target_w + x);
-			int plane_stride = target_w * target_h;
+					// Accumulate weighted sums for B, G, R
+					rgb[0] += get_pixel_value(src_buf, width, height, 24, x_int + i, y_int + j, 0)
+						  * w; // Blue
+					rgb[1] += get_pixel_value(src_buf, width, height, 24, x_int + i, y_int + j, 1)
+						  * w; // Green
+					rgb[2] += get_pixel_value(src_buf, width, height, 24, x_int + i, y_int + j, 2)
+						  * w; // Red
+				}
+			}
 
-			pixels[idx] = r;
-			pixels[plane_stride + idx] = g;
-			pixels[2 * plane_stride + idx] = b;
+			// Normalize and Clamp
+			for (int c = 0; c < 3; c++) {
+				// BMP is [0..255], Normalize to [0..1] then (x - mean)/std
+				float val = rgb[c] / 255.0f;
+
+				if (val < 0.0f)
+					val = 0.0f;
+				if (val > 1.0f)
+					val = 1.0f;
+
+				// SigLIP Norm: (val - 0.5) / 0.5
+				// indices: 0=Blue, 1=Green, 2=Red.
+				// Meta mean/std usually RGB.
+
+				int meta_idx = (2 - c); // c=2(R)->0, c=1(G)->1, c=0(B)->2
+				rgb[c] = (val - meta->image_mean[meta_idx]) / meta->image_std[meta_idx];
+			}
+
+			// Write to Planar Buffer (RR..GG..BB)
+			int idx = y * target_w + x;
+			int plane = target_w * target_h;
+
+			pixels[idx] = rgb[2];		  // R
+			pixels[idx + plane] = rgb[1];	  // G
+			pixels[idx + 2 * plane] = rgb[0]; // B
 		}
 	}
 
-	free(rowbuf);
-	fclose(f);
+	free(src_buf);
 	return 0;
 }
 
@@ -313,7 +379,6 @@ static void vision_attention(struct TIEContext *ctx, int seq_len)
 
 	thread_pool_wait(thread_pool);
 }
-
 
 /* =================== Qwen3-VL =================== */
 
@@ -849,8 +914,8 @@ void vision_create_embeddings_gemma3(struct TIEContext *ctx)
 	const int num_patches_side = image_size / patch_size;	     // 64 (H_out, W_out)
 	const int num_patches = num_patches_side * num_patches_side; // 4096 (seq_len)
 
-	//	printf("%s, image_size: %u, patch_size: %u, embed_dim: %u, num_patches_side: %u, num_patches: %u\n",
-	//	       __FUNCTION__, image_size, patch_size, embed_dim, num_patches_side, num_patches);
+	printf("%s, image_size: %u, patch_size: %u, embed_dim: %u, num_patches_side: %u, num_patches: %u\n",
+	       __FUNCTION__, image_size, patch_size, embed_dim, num_patches_side, num_patches);
 
 	// Allocate a temporary buffer for the Conv2D output
 	// The raw conv output is [C_out, H_out, W_out] = [1152, 64, 64].
@@ -861,7 +926,7 @@ void vision_create_embeddings_gemma3(struct TIEContext *ctx)
 		return;
 	}
 
-	// printf("Running Conv2D patch embedding\n");
+	printf("Running Conv2D patch embedding\n");
 	dispatch_conv_2d(&conv_output_mem,     // Dest: [1152, 64, 64]
 			 &mem->image_raw,      // Src: [3, 896, 896]
 			 &vm->patch_embd,      // Kernel: [1152, 3, 14, 14]
@@ -875,8 +940,7 @@ void vision_create_embeddings_gemma3(struct TIEContext *ctx)
 	// The output of conv is [C_out, H_out, W_out] = [1152, 64, 64] (planar)
 	// The transformer needs [seq_len, C_out] = [4096, 1152]
 	// We must permute [1152, 64, 64] -> [64, 64, 1152] and then flatten.
-
-	//	printf("Permuting Conv2D output to [seq_len, embed_dim]...\n");
+	printf("Permuting Conv2D output to [seq_len, embed_dim]...\n");
 	float *dest_data = (float *)mem->patch_embeds.data;			// [4096, 1152]
 	const float *conv_data = (const float *)conv_output_mem.data;		// [1152, 64, 64]
 	const size_t H_out_W_out = (size_t)num_patches_side * num_patches_side; // 4096
@@ -960,7 +1024,6 @@ static void vision_downsample_and_project(struct TIEContext *ctx)
 	for (int i = 0; i < pooled_seq_len; ++i) {
 		// Get a slice for the i-th token [1, 1152]
 		MemType slice = mem_slice(&mem->pooled_embeddings, i * embed_dim);
-
 		dispatch_rms_norm(&slice, &vm->soft_embd_norm, &slice, embed_dim, vm->norm_eps);
 	}
 
@@ -1041,6 +1104,7 @@ MemType *process_image_vision_gemma3(struct TIEContext *ctx)
 	VisionModel *vm = ctx->model_vision;
 	MemLayoutVision *mem = &ctx->vision_mem;
 
+
 	if (ctx->vision_mem.image_raw_width != vm->image_size || ctx->vision_mem.image_raw_height != vm->image_size) {
 		printf("invalid image size, supports %u x %u only\n", vm->image_size, vm->image_size);
 		return NULL;
@@ -1049,7 +1113,7 @@ MemType *process_image_vision_gemma3(struct TIEContext *ctx)
 	// Project raw patches into `mem->patch_embeds`
 	vision_create_embeddings_gemma3(ctx);
 
-	// Run the Vision Transformer layers.
+	// Vision Transformer layers
 	for (int layer_idx = 0; layer_idx < vm->num_layers; layer_idx++) {
 
 		vision_transformer_layer_gemma3(ctx, layer_idx);
@@ -1058,7 +1122,7 @@ MemType *process_image_vision_gemma3(struct TIEContext *ctx)
 		fflush(stdout);
 	}
 
-	// Final downsampling
+	// downsampling
 	vision_downsample_and_project(ctx);
 
 	return &mem->projected_embeddings;

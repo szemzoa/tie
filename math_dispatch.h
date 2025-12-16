@@ -16,6 +16,7 @@ typedef void (*apply_mrope_cache_fn)(RopeCacheType *rope_cache, void *X, int pos
 typedef void (*accumulate_weighted_V_fn)(void *O, float W, const void *V, int size);
 typedef void (*store_KV_cache_fn)(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len, int sink_len);
 typedef void (*apply_residual_fn)(void *acc, const void *residual, int size);
+typedef void (*apply_residual_scaled_fn)(void *acc, const void *residual, int size, float scale);
 typedef void (*swiglu_fn)(void *gate, const void *up, int size);
 typedef void (*geglu_fn)(void *gate, const void *up, int size);
 typedef void (*convert_fn)(const void *src, void *dest, int size);
@@ -127,6 +128,13 @@ typedef struct {
 } apply_residual_dispatch_t;
 
 typedef struct {
+	GGMLType input_type;
+	GGMLType output_type;
+	apply_residual_scaled_fn func;
+	int accel;
+} apply_residual_scaled_dispatch_t;
+
+typedef struct {
 	GGMLType gate_type;
 	GGMLType up_type;
 	swiglu_fn func;
@@ -177,10 +185,12 @@ extern void dispatch_mat_vec(struct TIEContext *ctx, const MemType *X, const Ten
 extern void dispatch_mat_mat(struct TIEContext *ctx, const MemType *X, const Tensor *W, MemType *O, int batch_len,
 			     int in_dim, int out_dim, int use_threads);
 extern void dispatch_apply_rope_cache(RopeCacheType *rope_cache, MemType *X_slice, int pos, int head_dim);
+extern void dispatch_apply_rope_cache_interleaved(RopeCacheType *rope_cache, MemType *X_slice, int pos, int head_dim);
 extern void dispatch_apply_mrope_cache(RopeCacheType *rope_cache, MemType *X_slice, int pos, int head_dim);
 extern void dispatch_accumulate_weighted_V(const MemType *V_slice, MemType *O_slice, float weight, int size);
 extern void dispatch_store_KV_cache(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len, int sink_len);
 extern void dispatch_apply_residual(MemType *acc, const MemType *residual, int size);
+extern void dispatch_apply_residual_scaled(MemType *acc, const MemType *residual, int size, float scale);
 extern void dispatch_swiglu_activation(MemType *gate, MemType *up, int size);
 extern void dispatch_geglu_activation(MemType *gate, MemType *up, int size);
 extern void dispatch_convert(const MemType *src, MemType *dest, int size);

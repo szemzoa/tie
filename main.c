@@ -27,33 +27,128 @@
 #include "math_dispatch.h"
 #include "tools.h"
 
-CommandQueue cmd_q = {
-	.mutex = PTHREAD_MUTEX_INITIALIZER,
-	.cond = PTHREAD_COND_INITIALIZER
-};
+CommandQueue cmd_q = {.mutex = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER};
+EventQueue evt_q = {.mutex = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER};
 
-EventQueue evt_q = {
-	.mutex = PTHREAD_MUTEX_INITIALIZER,
-	.cond = PTHREAD_COND_INITIALIZER
-};
+int start_think, end_think;
+char think_buf[65536];
+size_t think_len = 0;
+int in_think = 0;
 
-
-// Architecture Helpers
-static void handle_model_specific_post_step(struct TIEContext *ctx, int step, size_t prompt_len)
-{
-	if (ctx->gguf_text->arch == ARCH_GEMMA3N) {
-		// For the first generation step, process the LAST token of the prompt.
-		// For subsequent steps, buffer contains 1 token.
-		size_t n_tokens_in_buffer = (step == 0) ? prompt_len : 1;
-		post_process_altup_states(ctx, &ctx->mem.hidden_state, ctx->mem.altup_hidden_states,
-					  n_tokens_in_buffer);
-	}
-}
 
 int64_t elapsed_time_us(const struct timespec after, const struct timespec before)
 {
 	return ((int64_t)after.tv_sec - (int64_t)before.tv_sec) * (int64_t)1000000
 	       + ((int64_t)after.tv_nsec - (int64_t)before.tv_nsec) / 1000;
+}
+
+static char *file_path_generator(const char *text, int state)
+{
+	static DIR *dir = NULL;
+	static char directory[4096];
+	static char prefix[4096];
+	struct dirent *entry;
+
+	// First call: reset state
+	if (state == 0) {
+		// Split into directory + prefix
+		const char *slash = strrchr(text, '/');
+
+		if (slash) {
+			size_t len = slash - text + 1;
+			strncpy(directory, text, len);
+			directory[len] = '\0';
+
+			strcpy(prefix, slash + 1);
+		} else {
+			strcpy(directory, "./");
+			strcpy(prefix, text);
+		}
+
+		if (dir)
+			closedir(dir);
+		dir = opendir(directory);
+		if (!dir)
+			return NULL;
+	}
+
+	// Enumerate directory entries
+	while ((entry = readdir(dir)) != NULL) {
+		if (strncmp(entry->d_name, prefix, strlen(prefix)) == 0) {
+
+			static char buffer[4096];
+			snprintf(buffer, sizeof(buffer), "%s%s", directory, entry->d_name);
+
+			// If directory, add trailing '/'
+			struct stat st;
+			if (stat(buffer, &st) == 0 && S_ISDIR(st.st_mode)) {
+				strcat(buffer, "/");
+			}
+
+			return strdup(buffer);
+		}
+	}
+
+	closedir(dir);
+	dir = NULL;
+
+	return NULL;
+}
+
+static char **tie_completion(const char *text, int start, int end)
+{
+	// Trigger file completion only for "/img <PATH>"
+	if (strncmp(rl_line_buffer, "/img ", 5) == 0) {
+		// Complete only after "/img " including multiple directories
+		return rl_completion_matches(text, file_path_generator);
+	}
+
+	return NULL;
+}
+
+void init_readline()
+{
+	rl_attempted_completion_function = tie_completion;
+	rl_completion_append_character = '\0';
+
+#ifdef RL_COMPLETION_SUPPRESS_QUOTE
+	rl_completion_suppress_quote = 1;
+#endif
+#ifdef RL_COMPLETER_QUOTE_CHARACTERS
+	rl_completer_quote_characters = "";
+#endif
+}
+
+
+void clear_reasoning_above_spinner()
+{
+	printf("\033[2J\033[H"); // clear + home
+}
+
+void print_reasoning_buffer()
+{
+	fwrite(think_buf, 1, think_len, stdout);
+	fflush(stdout);
+}
+
+void append_to_think_buffer(const char *tok, int len)
+{
+	if (think_len + len < sizeof(think_buf) - 1) {
+		memcpy(think_buf + think_len, tok, len);
+		think_len += len;
+		think_buf[think_len] = '\0';
+	}
+}
+
+void spinner_tick(const char *status)
+{
+	static const char *frames[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+	static int idx = 0;
+
+	printf("\r" THINK "[%s] %s", frames[idx], status);
+	fflush(stdout);
+
+	idx = (idx + 1) % 10;
 }
 
 void generate_output(struct TIEContext *ctx, int current_token)
@@ -63,23 +158,45 @@ void generate_output(struct TIEContext *ctx, int current_token)
 	if (current_token == def->params.eos_token_id)
 		return;
 
-	char piece[256]; // Sufficient for one token
+	if (current_token == start_think) {
+		in_think = 1;
+		printf(THINK);
+	}
 
-	int len = ctx->model->interface.decode_token(ctx, current_token, piece, sizeof(piece));
+	char piece[256];
+	int len = ctx->model->interface.tokenize_decode(ctx, current_token, piece, sizeof(piece));
 
 	if (len > 0) {
-		fwrite(piece, 1, len, stdout);
-		fflush(stdout);
+		if (in_think == 1) {
+			spinner_tick("thinking...");
+
+			append_to_think_buffer(piece, len);
+
+		} else {
+			fwrite(piece, 1, len, stdout);
+			fflush(stdout);
+		}
+	}
+
+	if (current_token == end_think) {
+		printf("\r\033[K");
+		printf("%s\n", think_buf);
+		in_think = 0;
+		think_len = 0;
+		printf(CLR_RESET ASSISTANT_OUT);
 	}
 }
 
 int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf, bool has_image, size_t *num_tokens)
 {
-	ModelDef *def = ctx->model->def;
 	size_t user_text_token_count = 0;
+	size_t prompt_len = 0;
 
-	// Tokenize the actual user input text
-	int *user_text_tokens = ctx->model->interface.tokenize_prompt(ctx, input_buf, &user_text_token_count);
+	if (ctx->model_vision == NULL)
+		has_image = false;
+
+	// Tokenize the actual user input text FIRST
+	int *user_text_tokens = ctx->model->interface.tokenize_encode(ctx, input_buf, &user_text_token_count);
 	if (!user_text_tokens)
 		return NULL;
 
@@ -89,65 +206,33 @@ int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf,
 		free(user_text_tokens);
 		return NULL;
 	}
-	size_t prompt_len = 0;
 
-	// BOS (only for the very first turn)
-	if (ctx->model->add_bos_token == 1 && ctx->model->bos_token_sent == 0) {
-		prompt_tokens[prompt_len++] = ctx->model->bos_token_id;
-		ctx->model->bos_token_sent = 1;
+	if (ctx->model->interface.build_prompt) {
+		prompt_len = ctx->model->interface.build_prompt(ctx, prompt_tokens, user_text_tokens,
+								user_text_token_count, has_image);
 	}
-
-	// Start of User Turn
-	if (def->params.sot_token_id != -1)
-		prompt_tokens[prompt_len++] = def->params.sot_token_id;
-
-	prompt_tokens[prompt_len++] = def->params.role_user_token_id;
-
-	if (def->params.newline_token_id != -1)
-		prompt_tokens[prompt_len++] = def->params.newline_token_id;
-
-	// User's Text Message
-	memcpy(&prompt_tokens[prompt_len], user_text_tokens, user_text_token_count * sizeof(int));
-	prompt_len += user_text_token_count;
-
-	if (has_image) {
-
-		if (ctx->model->interface.build_vision_tokens) {
-			// Call the model-specific function
-			int num_added = ctx->model->interface.build_vision_tokens(ctx, prompt_tokens, prompt_len);
-			prompt_len += num_added;
-
-		} else {
-			fprintf(stderr, "ERROR: Model does not support vision, but an image was provided.\n");
-			*num_tokens = 0;
-			free(user_text_tokens);
-			return NULL;
-		}
-	}
-
-	// End of User Turn & Start of Model Turn
-	if (def->params.eot_token_id != -1)
-		prompt_tokens[prompt_len++] = def->params.eot_token_id;
-
-	if (def->params.newline_token_id != -1)
-		prompt_tokens[prompt_len++] = def->params.newline_token_id;
-
-	if (def->params.sot_token_id != -1)
-		prompt_tokens[prompt_len++] = def->params.sot_token_id;
-
-	prompt_tokens[prompt_len++] = def->params.role_model_token_id;
-
-	if (def->params.newline_token_id != -1)
-		prompt_tokens[prompt_len++] = def->params.newline_token_id;
 
 	free(user_text_tokens);
-	*num_tokens = prompt_len;
+
+#ifdef DEBUG_TOKENS
+	char buf[256];
+	for (int i = 0; i < prompt_len; i++) {
+		const char *p = get_token_string(ctx, prompt_tokens[i]);
+		int len = get_token_string_length(ctx, prompt_tokens[i]);
+
+		memset(buf, 0, 256);
+		memcpy(buf, p, len);
+
+		printf("Token #%u [%u] %s\n", i, prompt_tokens[i], buf);
+	}
+#endif
 
 	if (ctx->model->use_mrope == 1) {
 		int h_patches = 0;
 		int w_patches = 0;
 
 		if (has_image && ctx->model_vision) {
+
 			// Retrieve dimensions from the most recently processed image
 			int raw_w = ctx->vision_mem.image_raw_width;
 			int raw_h = ctx->vision_mem.image_raw_height;
@@ -159,6 +244,7 @@ int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf,
 		text_rope_cache_init(ctx, prompt_len, ctx->kv_pos);
 	}
 
+	*num_tokens = prompt_len;
 	return prompt_tokens;
 }
 
@@ -175,9 +261,10 @@ int engine_prefill(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len
 	MemType *image_embeddings = NULL;
 
 	printf(DEBUG "--- Prefill Start: pos %u, len %zu ---\n" CLR_RESET, ctx->kv_pos, prompt_len);
+
 	// Custom Prompt Processor (if defined)
-	if (ctx->model->interface.process_prompt) {
-		ctx->model->interface.process_prompt(ctx, prompt_tokens, prompt_len);
+	if (ctx->model->interface.process_prompt_custom) {
+		ctx->model->interface.process_prompt_custom(ctx, prompt_tokens, prompt_len);
 		return 0;
 	}
 
@@ -208,6 +295,7 @@ int engine_prefill(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len
 		} else {
 			// Standard text embedding
 			dispatch_embedding_row(&ctx->model->token_embd, token_id, &dest_slice, embed_dim);
+
 			if (ctx->model->interface.embedding_scale) {
 				ctx->model->interface.embedding_scale(ctx, &dest_slice);
 			}
@@ -215,7 +303,7 @@ int engine_prefill(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len
 		current_pos++;
 	}
 
-	// Run Transformer Layers (Batch Processing)
+	// Run Transformer Layers
 	process_embeddings(ctx, &ctx->mem.hidden_state, current_pos);
 
 	clock_gettime(CLOCK_REALTIME, &end);
@@ -224,6 +312,13 @@ int engine_prefill(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len
 	return 0;
 }
 
+void dispatch_scale_buffer(MemType *buffer, int size, float scale)
+{
+	float *data = (float *)buffer->data;
+	for (int i = 0; i < size; i++) {
+		data[i] *= scale;
+	}
+}
 
 // Decode (Generate Tokens)
 int engine_decode(struct TIEContext *ctx, int max_new_tokens, int *out_tokens, size_t prompt_len,
@@ -233,15 +328,17 @@ int engine_decode(struct TIEContext *ctx, int max_new_tokens, int *out_tokens, s
 	int gen_len = 0;
 	Tensor *output_tensor = ctx->model->output.mem.data == NULL ? &ctx->model->token_embd : &ctx->model->output;
 
-	printf(DEBUG "\n--- Generation Start ---\n" ASSISTANT_OUT);
+	//	printf(DEBUG "\n--- Generation Start ---\n" ASSISTANT_OUT);
+	printf(DEBUG "\n" ASSISTANT_OUT);
 	clock_gettime(CLOCK_REALTIME, &start);
 
 	printf(CLR_RESET ASSISTANT_OUT);
 
 	for (int step = 0; step < max_new_tokens; step++) {
 
-		// Architecture Specific Post-Processing (e.g., Gemma3N AltUp)
-		handle_model_specific_post_step(ctx, step, prompt_len);
+		// Architecture Specific Post-Processing (ex: Gemma3N AltUp)
+		if (ctx->model->interface.post_generate_step)
+			ctx->model->interface.post_generate_step(ctx, step, prompt_len);
 
 		// Output Norm & Head
 		dispatch_rms_norm(&ctx->mem.hidden_state, &ctx->model->output_norm, &ctx->mem.normed_ffn_input,
@@ -254,6 +351,12 @@ int engine_decode(struct TIEContext *ctx, int max_new_tokens, int *out_tokens, s
 		if (ctx->model->final_logit_softcap > 0.0f) {
 			dispatch_softcap_logits(&ctx->mem.logits, ctx->model->vocab_size,
 						ctx->model->final_logit_softcap);
+		}
+
+		// GRANITE LOGIT SCALING
+		if (ctx->model->logit_scale != 0.0f && ctx->model->logit_scale != 1.0f) {
+			float inv_scale = 1.0f / ctx->model->logit_scale;
+			dispatch_scale_buffer(&ctx->mem.logits, ctx->model->vocab_size, inv_scale);
 		}
 
 		// Sampling
@@ -282,8 +385,12 @@ int engine_decode(struct TIEContext *ctx, int max_new_tokens, int *out_tokens, s
 			out_tokens[gen_len++] = next_token;
 		}
 
-		// Run Next Token through Transformer
-		ctx->model->interface.prepare_next_token(ctx, next_token);
+		// Run Next Token through Transformer, either custom or standard processor
+		if (ctx->model->interface.prepare_next_token_custom) {
+			ctx->model->interface.prepare_next_token_custom(ctx, next_token);
+		} else {
+			prepare_next_token_standard(ctx, next_token);
+		}
 
 		for (int l = 0; l < ctx->model->num_layers; l++) {
 			ctx->model->interface.transformer_layer(ctx, l, 1);
@@ -376,10 +483,7 @@ ModelEvent pop_evt()
 
 void model_on_token(void *user_data, int token_id)
 {
-	ModelEvent evt = {
-		.type = EVT_TOKEN,
-		.token_id = token_id
-	};
+	ModelEvent evt = {.type = EVT_TOKEN, .token_id = token_id};
 
 	push_evt(evt);
 }
@@ -400,12 +504,11 @@ void *model_thread_main(void *arg)
 
 			// Build Prompt
 			size_t prompt_len = 0;
-			// cmd.text is owned by this thread now, free it later
 			int *tokens = build_multimodal_turn_tokens(ctx, cmd.text, cmd.has_image, &prompt_len);
 
 			if (!tokens) {
-				// Error handling: push a FINISH event immediately
-				push_evt((ModelEvent) { .type = EVT_FINISHED });
+
+				push_evt((ModelEvent){.type = EVT_FINISHED});
 
 				if (cmd.text)
 					free(cmd.text);
@@ -421,16 +524,16 @@ void *model_thread_main(void *arg)
 
 
 			// Run Decode
-			engine_decode(ctx, 8192, generated_tokens, prompt_len, model_on_token, NULL);
+			engine_decode(ctx, MAX_GENERATE_TOKENS, generated_tokens, prompt_len, model_on_token, NULL);
 
 			// Handle Result
 			if (ctx->tool_context.state == TOOL_STATE_CALL_READY) {
-				// Model wants to call a tool.
+				// Model wants to call a tool
 				push_evt((ModelEvent){.type = EVT_TOOL_CALL});
 				continue;
 			}
 
-			// Cleanup & Signal Finish
+			// Cleanup
 			if (cmd.text)
 				free(cmd.text);
 			if (tokens)
@@ -444,86 +547,10 @@ void *model_thread_main(void *arg)
 	return NULL;
 }
 
-static char *file_path_generator(const char *text, int state)
-{
-	static DIR *dir = NULL;
-	static char directory[4096];
-	static char prefix[4096];
-	struct dirent *entry;
-
-	// First call: reset state
-	if (state == 0) {
-		// Split into directory + prefix
-		const char *slash = strrchr(text, '/');
-
-		if (slash) {
-			size_t len = slash - text + 1;
-			strncpy(directory, text, len);
-			directory[len] = '\0';
-
-			strcpy(prefix, slash + 1);
-		} else {
-			strcpy(directory, "./");
-			strcpy(prefix, text);
-		}
-
-		if (dir)
-			closedir(dir);
-		dir = opendir(directory);
-		if (!dir)
-			return NULL;
-	}
-
-	// Enumerate directory entries
-	while ((entry = readdir(dir)) != NULL) {
-		if (strncmp(entry->d_name, prefix, strlen(prefix)) == 0) {
-
-			static char buffer[4096];
-			snprintf(buffer, sizeof(buffer), "%s%s", directory, entry->d_name);
-
-			// If directory, add trailing '/'
-			struct stat st;
-			if (stat(buffer, &st) == 0 && S_ISDIR(st.st_mode)) {
-				strcat(buffer, "/");
-			}
-
-			return strdup(buffer);
-		}
-	}
-
-	closedir(dir);
-	dir = NULL;
-
-	return NULL;
-}
-
-static char **tie_completion(const char *text, int start, int end)
-{
-	// Trigger file completion only for "/img <PATH>"
-	if (strncmp(rl_line_buffer, "/img ", 5) == 0) {
-		// Complete only after "/img " including multiple directories
-		return rl_completion_matches(text, file_path_generator);
-	}
-
-	return NULL;
-}
-
-void init_readline()
-{
-	rl_attempted_completion_function = tie_completion;
-	rl_completion_append_character = '\0';
-
-#ifdef RL_COMPLETION_SUPPRESS_QUOTE
-	rl_completion_suppress_quote = 1;
-#endif
-#ifdef RL_COMPLETER_QUOTE_CHARACTERS
-	rl_completer_quote_characters = "";
-#endif
-}
 
 void read_user_input(char *input_buf, size_t buf_size)
 {
-	char *line = readline(USER_PROMPT "\nYou: ");
+	char *line = readline(USER_PROMPT "\n> ");
 	if (!line) {
 		input_buf[0] = '\0';
 		return;
@@ -631,8 +658,8 @@ void run_ui_loop(struct TIEContext *ctx)
 
 	printf(DEBUG);
 
-//exit_app:
-//	pthread_join(thread_id, NULL);
+	// exit_app:
+	//	pthread_join(thread_id, NULL);
 }
 
 static void handle_model(AppConfig *cfg, const char *v)
@@ -668,6 +695,14 @@ static void handle_mmap(AppConfig *cfg, const char *v)
 	cfg->use_mmap = 1;
 }
 
+static void print_help(const char *progname);
+
+static void handle_help(AppConfig *cfg, const char *v)
+{
+	print_help(v);
+	exit(EXIT_SUCCESS);
+}
+
 static const ArgSpec arg_table[] = {
 	{"model", 'm', 1, handle_model, "Path to model GGUF file"},
 	{"threads", 't', 1, handle_threads, "Number of CPU threads"},
@@ -677,7 +712,7 @@ static const ArgSpec arg_table[] = {
 	{"top-p", 'P', 1, handle_top_p, "Nucleus sampling (top-p)"},
 	{"top-k", 'K', 1, handle_top_k, "Top-k sampling"},
 	{"mmap", 'M', 0, handle_mmap, "Use mmap to load model"},
-	{"help", 'h', 0, NULL, "Show help message"},
+	{"help", 'h', 0, handle_help, "Show help message"},
 };
 static const int arg_table_count = sizeof(arg_table) / sizeof(arg_table[0]);
 
@@ -742,7 +777,7 @@ AppConfig parse_args(int argc, char *argv[])
 
 	if (argc == 1) {
 		print_help(argv[0]);
-		exit(0);
+		exit(EXIT_SUCCESS);
 	}
 
 	for (int i = 1; i < argc; i++) {
@@ -785,9 +820,13 @@ AppConfig parse_args(int argc, char *argv[])
 					exit(1);
 				}
 				value = argv[++i];
+			} else {
+				value = argv[0];
 			}
 
-			spec->handler(&config, value);
+			if (spec->handler) {
+				spec->handler(&config, value);
+			}
 			continue;
 		}
 
@@ -798,10 +837,21 @@ AppConfig parse_args(int argc, char *argv[])
 	return config;
 }
 
+char banner[] = {
+	"\n"
+	"\t████████╗██╗███████╗\n"
+	"\t╚══██╔══╝██║██╔════╝\n"
+	"\t   ██║   ██║█████╗  \n"
+	"\t   ██║   ██║██╔══╝  \n"
+	"\t   ██║   ██║███████╗\n"
+	"\t   ╚═╝   ╚═╝╚══════╝\n"
+	"\t	Toy Inference Engine v%u.%u\n\n"};
 
 int main(int argc, char *argv[])
 {
-	printf("Toy Inference Engine v%u.%u\n", VERSION_MAJOR, VERSION_MINOR);
+
+	printf(banner, VERSION_MAJOR, VERSION_MINOR);
+	//	printf("Toy Inference Engine v%u.%u\n", VERSION_MAJOR, VERSION_MINOR);
 
 	setlocale(LC_ALL, "en_US.UTF-8");
 
@@ -826,11 +876,22 @@ int main(int argc, char *argv[])
 	ModelDef *text_def = find_model_def(ctx->gguf_text);
 	ModelDef *vision_def = ctx->gguf_vision ? find_model_def(ctx->gguf_vision) : NULL;
 
-	model_load(ctx, ctx->gguf_text, (void **)&ctx->model, text_def, ctx->config.use_mmap);
+	if (model_load(ctx, ctx->gguf_text, (void **)&ctx->model, text_def, ctx->config.use_mmap) != 0) {
+		printf("Failed to load language model %s\n", ctx->config.model_path);
+		exit(EXIT_FAILURE);
+	}
 	ctx->model->def = text_def;
 
 	if (ctx->gguf_vision) {
-		model_load(ctx, ctx->gguf_vision, (void **)&ctx->model_vision, vision_def, ctx->config.use_mmap);
+		if (vision_def == NULL) {
+			printf("Unsupported vision model\n");
+			exit(EXIT_FAILURE);
+		}
+		if (model_load(ctx, ctx->gguf_vision, (void **)&ctx->model_vision, vision_def, ctx->config.use_mmap)
+		    != 0) {
+			printf("Failed to load vision model %s\n", ctx->config.mmproj_path);
+			exit(EXIT_FAILURE);
+		}
 		ctx->model_vision->def = vision_def;
 	}
 
@@ -843,6 +904,41 @@ int main(int argc, char *argv[])
 		vision_model_info(ctx);
 	}
 
+#if 0
+	char buf[2048];
+	for (int i=0; i < ctx->model->vocab_size; i++) {
+		const unsigned char *token = get_token_string(ctx, i);
+		int len = get_token_string_length(ctx, i);
+
+		memset(buf, 0, sizeof(buf));
+		memcpy(buf, token, len);
+
+		printf("token #%u [%s]\n", i, buf);
+	}
+
+	fflush(stdout);
+#endif
+
+#if 0
+	printf("sot_token_id: %d\n", ctx->model->def->params.sot_token_id);
+	printf("eot_token_id: %d\n", ctx->model->def->params.eot_token_id);
+	printf("eos_token_id: %d\n", ctx->model->def->params.eos_token_id);
+	printf("newline_token_id: %d\n", ctx->model->def->params.newline_token_id);
+	printf("role_user_token_id: %d\n", ctx->model->def->params.role_user_token_id);
+	printf("role_model_token_id: %d\n", ctx->model->def->params.role_model_token_id);
+	printf("double_newline_token_id: %d\n", ctx->model->def->params.double_newline_token_id);
+	printf("vision_start_token_id: %d\n", ctx->model->def->params.vision_start_token_id);
+	printf("vision_end_token_id: %d\n", ctx->model->def->params.vision_end_token_id);
+	printf("vision_embed_token_id: %d\n", ctx->model->def->params.vision_embed_token_id);
+
+	printf("bos_token_id: %d\n", ctx->model->bos_token_id);
+	printf("unk_token_id: %d\n", ctx->model->unk_token_id);
+	printf("pad_token_id: %d\n", ctx->model->pad_token_id);
+	printf("eos_token_id: %d\n", ctx->model->eos_token_id);
+#endif
+
+	start_think = get_special_token_id(ctx, "<think>", -1);
+	end_think = get_special_token_id(ctx, "</think>", -1);
 
 	// Run Chat
 	run_ui_loop(ctx);

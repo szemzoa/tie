@@ -53,7 +53,6 @@ __attribute__((target("avx2"))) static inline void store_f32_as_bf16_avx2(uint16
 	_mm_storeu_si128((__m128i *)dst, final_result);
 }
 
-
 __attribute__((target("avx2"))) void rms_norm_f32_f32_f32_avx2(void *__restrict O, const void *__restrict X,
 							       const Tensor *__restrict W, int size, float eps)
 {
@@ -104,7 +103,7 @@ __attribute__((target("avx2"))) void rms_norm_bf16_f32_f32_avx2(void *__restrict
 	uint16_t *o = (uint16_t *)o_void;
 	const float *weight = (const float *)W->mem.data;
 
-	// --- 1. Sum of squares (computation is in FP32) ---
+	// Sum of squares
 	__m256 sum_sq_vec = _mm256_setzero_ps();
 	int i = 0;
 	for (; i <= size - 8; i += 8) {
@@ -123,7 +122,7 @@ __attribute__((target("avx2"))) void rms_norm_bf16_f32_f32_avx2(void *__restrict
 		ss += val * val;
 	}
 
-	// --- 2. Scale and Store ---
+	// Scale and Store
 	const float inv_rms = 1.0f / sqrtf(ss / size + eps);
 	const __m256 scale_vec = _mm256_set1_ps(inv_rms);
 
@@ -386,7 +385,7 @@ __attribute__((target("avx2"))) static void dequantize_row_q4k_f32_avx2(const vo
 				// Load 8 bytes, containing 16 4-bit nibbles
 				const __m128i q_i8 = _mm_loadu_si64(q + offset);
 
-				// --- Vectorized Unpacking ---
+				// Vectorized Unpacking
 				const __m128i mask_lo = _mm_set1_epi8(0x0F);
 				const __m128i q_lo_i8 = _mm_and_si128(q_i8, mask_lo);
 				const __m128i q_hi_i8 = _mm_and_si128(_mm_srli_epi16(q_i8, 4), mask_lo);
@@ -434,7 +433,7 @@ __attribute__((target("avx2"))) float dot_product_f32_q6k_avx2(const float *x, c
 		for (int l = 0; l < 32; l += 8) {
 			int is = (l >= 16) ? 1 : 0; // Scale index offset
 
-			// --- Load Scales ---
+			// Load Scales
 			// We need scales for 4 groups: [is+0], [is+2], [is+4], [is+6]
 			__m256 sc0 = _mm256_set1_ps((float)sc_ptr[is + 0]);
 			__m256 sc1 = _mm256_set1_ps((float)sc_ptr[is + 2]);
@@ -446,45 +445,45 @@ __attribute__((target("avx2"))) float dot_product_f32_q6k_avx2(const float *x, c
 			__m256 w2 = _mm256_mul_ps(d_vec, sc2);
 			__m256 w3 = _mm256_mul_ps(d_vec, sc3);
 
-			// --- Load X ---
+			// Load X
 			__m256 x0 = _mm256_loadu_ps(x_ptr + l + 0);
 			__m256 x1 = _mm256_loadu_ps(x_ptr + l + 32);
 			__m256 x2 = _mm256_loadu_ps(x_ptr + l + 64);
 			__m256 x3 = _mm256_loadu_ps(x_ptr + l + 96);
 
-			// --- Load Quants ---
+			// Load Quants
 			__m128i ql_v = _mm_loadu_si128((const __m128i *)(ql_ptr + l));
 			__m128i qh_v = _mm_loadu_si128((const __m128i *)(qh_ptr + l));
 			__m128i ql_v32 = _mm_loadu_si128((const __m128i *)(ql_ptr + l + 32));
 
-			// --- Decode q1 ---
+			// Decode q1
 			__m128i ql_low = _mm_and_si128(ql_v, _mm_set1_epi8(0x0F));
 			__m128i qh_01 = _mm_and_si128(qh_v, _mm_set1_epi8(3));
 			__m128i q1_i8 = _mm_sub_epi8(_mm_or_si128(ql_low, _mm_slli_epi16(qh_01, 4)), _mm_set1_epi8(32));
 			__m256 q1 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q1_i8));
 
-			// --- Decode q2 ---
+			// Decode q2
 			__m128i ql_low2 = _mm_and_si128(ql_v32, _mm_set1_epi8(0x0F));
 			__m128i qh_23 = _mm_and_si128(_mm_srli_epi16(qh_v, 2), _mm_set1_epi8(3));
 			__m128i q2_i8 =
 				_mm_sub_epi8(_mm_or_si128(ql_low2, _mm_slli_epi16(qh_23, 4)), _mm_set1_epi8(32));
 			__m256 q2 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q2_i8));
 
-			// --- Decode q3 ---
+			// Decode q3
 			__m128i ql_high = _mm_and_si128(_mm_srli_epi16(ql_v, 4), _mm_set1_epi8(0x0F));
 			__m128i qh_45 = _mm_and_si128(_mm_srli_epi16(qh_v, 4), _mm_set1_epi8(3));
 			__m128i q3_i8 =
 				_mm_sub_epi8(_mm_or_si128(ql_high, _mm_slli_epi16(qh_45, 4)), _mm_set1_epi8(32));
 			__m256 q3 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q3_i8));
 
-			// --- Decode q4 ---
+			// Decode q4
 			__m128i ql_high2 = _mm_and_si128(_mm_srli_epi16(ql_v32, 4), _mm_set1_epi8(0x0F));
 			__m128i qh_67 = _mm_and_si128(_mm_srli_epi16(qh_v, 6), _mm_set1_epi8(3));
 			__m128i q4_i8 =
 				_mm_sub_epi8(_mm_or_si128(ql_high2, _mm_slli_epi16(qh_67, 4)), _mm_set1_epi8(32));
 			__m256 q4 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q4_i8));
 
-			// --- Accumulate (Pipelined) ---
+			// Accumulate
 			acc0 = _mm256_fmadd_ps(w0, _mm256_mul_ps(q1, x0), acc0);
 			acc1 = _mm256_fmadd_ps(w1, _mm256_mul_ps(q2, x1), acc1);
 			acc0 = _mm256_fmadd_ps(w2, _mm256_mul_ps(q3, x2), acc0);
@@ -607,23 +606,24 @@ __attribute__((target("avx2"))) float dot_product_f32_q4k_avx2(const float *x, c
 __attribute__((target("avx2"))) void apply_rope_cache_f32_avx2(RopeCacheType *rope_cache, void *X, int pos,
 							       int head_dim)
 {
-	int h_dim_half = head_dim / 2;
 	float *x = (float *)X;
+	int rope_dim = rope_cache->rope_dim;
+	int half_rope_dim = rope_dim / 2;
 
 	if (pos >= rope_cache->max_pos) {
 		fprintf(stderr, "Position %d exceeds rope cache max_pos %d\n", pos, rope_cache->max_pos);
 		return;
 	}
 
-	const float *sin_vals = rope_cache->sin + pos * h_dim_half;
-	const float *cos_vals = rope_cache->cos + pos * h_dim_half;
+	const float *sin_vals = rope_cache->sin + pos * half_rope_dim;
+	const float *cos_vals = rope_cache->cos + pos * half_rope_dim;
 
 	int i = 0;
 	// Process 8 floats (16 total elements: 8 real, 8 imaginary) at a time
-	for (; i <= h_dim_half - 8; i += 8) {
+	for (; i <= half_rope_dim - 8; i += 8) {
 		// Load 8 "real" and 8 "imaginary" parts from the input vector x
 		__m256 x_r = _mm256_loadu_ps(&x[i]);
-		__m256 x_i = _mm256_loadu_ps(&x[i + h_dim_half]);
+		__m256 x_i = _mm256_loadu_ps(&x[i + half_rope_dim]);
 
 		// Load 8 sin and cos values from the cache
 		__m256 sin_v = _mm256_loadu_ps(&sin_vals[i]);
@@ -643,18 +643,88 @@ __attribute__((target("avx2"))) void apply_rope_cache_f32_avx2(RopeCacheType *ro
 
 		// Store the results back into the x vector
 		_mm256_storeu_ps(&x[i], new_x_r);
-		_mm256_storeu_ps(&x[i + h_dim_half], new_x_i);
+		_mm256_storeu_ps(&x[i + half_rope_dim], new_x_i);
 	}
 
 	// Scalar tail loop for remaining elements
-	for (; i < h_dim_half; ++i) {
+	for (; i < half_rope_dim; ++i) {
 		float x_real = x[i];
-		float x_imag = x[i + h_dim_half];
+		float x_imag = x[i + half_rope_dim];
 		float sin = sin_vals[i];
 		float cos = cos_vals[i];
 
 		x[i] = fmaf(x_real, cos, -x_imag * sin);
-		x[i + h_dim_half] = fmaf(x_real, sin, x_imag * cos);
+		x[i + half_rope_dim] = fmaf(x_real, sin, x_imag * cos);
+	}
+}
+
+__attribute__((target("avx2"))) void apply_rope_cache_interleaved_f32_avx2(RopeCacheType *rope_cache, void *X, int pos,
+									   int head_dim)
+{
+	float *x = (float *)X;
+	int rope_dim = rope_cache->rope_dim;
+	int half_rope_dim = rope_dim / 2;
+
+	if (pos >= rope_cache->max_pos)
+		return;
+
+	const float *sin_vals = rope_cache->sin + pos * half_rope_dim;
+	const float *cos_vals = rope_cache->cos + pos * half_rope_dim;
+
+	int i = 0;
+
+	// Process 4 pairs (8 floats) per iteration
+	// We stop when we have fewer than 4 pairs left
+	for (; i <= half_rope_dim - 4; i += 4) {
+
+		// Load 8 floats from X (4 Real/Imag pairs)
+		// [r0, i0, r1, i1, r2, i2, r3, i3]
+		__m256 x_vec = _mm256_loadu_ps(x + 2 * i);
+
+		// Load 4 Cos and 4 Sin values
+		__m128 c_small = _mm_loadu_ps(cos_vals + i);
+		__m128 s_small = _mm_loadu_ps(sin_vals + i);
+
+		// Duplicate values to match X layout
+		// We need [c0, c0, c1, c1, c2, c2, c3, c3]
+		__m128 c_lo = _mm_unpacklo_ps(c_small, c_small);
+		__m128 c_hi = _mm_unpackhi_ps(c_small, c_small);
+		__m256 c_vec = _mm256_insertf128_ps(_mm256_castps128_ps256(c_lo), c_hi, 1);
+
+		__m128 s_lo = _mm_unpacklo_ps(s_small, s_small);
+		__m128 s_hi = _mm_unpackhi_ps(s_small, s_small);
+		__m256 s_vec = _mm256_insertf128_ps(_mm256_castps128_ps256(s_lo), s_hi, 1);
+
+		// Calculate terms
+		// term1 = [r0*c0, i0*c0, ...]
+		__m256 term1 = _mm256_mul_ps(x_vec, c_vec);
+
+		// Swap Real and Imag parts: [i0, r0, i1, r1...]
+		// 0xB1 = 10 11 00 01 (Swap adjacent)
+		__m256 x_swapped = _mm256_permute_ps(x_vec, 0xB1);
+
+		// term2 = [i0*s0, r0*s0, ...]
+		__m256 term2 = _mm256_mul_ps(x_swapped, s_vec);
+
+		// Calculate Final Result using ADDSUB
+		// ADDSUB performs subtraction on EVEN indices and addition on ODD indices.
+		// Even: term1 - term2 = r*c - i*s (Real Part)
+		// Odd:  term1 + term2 = i*c + r*s (Imag Part)
+		__m256 res = _mm256_addsub_ps(term1, term2);
+
+		// 6. Store back
+		_mm256_storeu_ps(x + 2 * i, res);
+	}
+
+	// Scalar Tail (Process remaining pairs)
+	for (; i < half_rope_dim; i++) {
+		float x_real = x[2 * i];
+		float x_imag = x[2 * i + 1];
+		float s = sin_vals[i];
+		float c = cos_vals[i];
+
+		x[2 * i] = x_real * c - x_imag * s;
+		x[2 * i + 1] = x_real * s + x_imag * c;
 	}
 }
 
@@ -835,7 +905,6 @@ __attribute__((target("avx2"))) void convert_f32_f32_avx2(const void *S, void *D
 		dst[i] = src[i];
 	}
 }
-
 __attribute__((target("avx2"))) void swiglu_activation_f32_f32_avx2(void *gate_void, const void *up_void, int size)
 {
 	float *gate = (float *)gate_void;
@@ -853,11 +922,11 @@ __attribute__((target("avx2"))) void swiglu_activation_f32_f32_avx2(void *gate_v
 		__m256 x_vec = _mm256_loadu_ps(gate + i);
 		__m256 up_vec = _mm256_loadu_ps(up + i);
 
-		// --- Vectorized Lookup ---
+		// Vectorized Lookup
 		__m256 pos_f = _mm256_div_ps(_mm256_mul_ps(_mm256_sub_ps(x_vec, x_min), table_size_minus_1), range);
 		__m256i idx_i = _mm256_cvtps_epi32(pos_f);
 
-		// --- Clamp indices to the valid range before gathering ---
+		// Clamp indices to the valid range before gathering
 		idx_i = _mm256_max_epi32(idx_i, zero_idx); // Clamp min to 0
 		idx_i = _mm256_min_epi32(idx_i, max_idx);  // Clamp max to TABLE_SIZE - 2
 
@@ -897,7 +966,7 @@ __attribute__((target("avx2"))) void swiglu_activation_bf16_bf16_avx2(void *gate
 		__m256 gate_vec_f32 = load_bf16_as_f32(gate + i);
 		__m256 up_vec_f32 = load_bf16_as_f32(up + i);
 
-		// --- Vectorized SiLU Lookup (same logic as the FP32 version) ---
+		// Vectorized SiLU Lookup
 		__m256 pos_f =
 			_mm256_div_ps(_mm256_mul_ps(_mm256_sub_ps(gate_vec_f32, x_min), table_size_minus_1), range);
 		__m256i idx_i = _mm256_cvtps_epi32(pos_f);
@@ -933,9 +1002,6 @@ static inline __m256i float32_to_bf16_avx2(__m256 x0, __m256 x1)
 	i1 = _mm256_srli_epi32(i1, 16);
 
 	// Pack 32-bit integers into 16-bit integers.
-	//    _mm256_packus_epi32 packs lanes:
-	//    Input:  [A0-A3][A4-A7] and [B0-B3][B4-B7]
-	//    Output: [A0-A3, B0-B3] [A4-A7, B4-B7] (Notice the lane interleaving!)
 	__m256i packed = _mm256_packus_epi32(i0, i1);
 
 	// Fix the lane ordering.
@@ -1360,7 +1426,6 @@ __attribute__((target("avx2"))) void conv_2d_f32_f32_f32_f32_avx2(MemType *dest,
 							// output-channel parallelism. A [C_in, K_H, K_W, C_out] layout
 							// would allow contiguous loads here. Since we can't change
 							// layout easily on the fly:
-
 							float w0 = k_ptr_base[0 * k_stride_C_out + ky * K_W + kx];
 							float w1 = k_ptr_base[1 * k_stride_C_out + ky * K_W + kx];
 							float w2 = k_ptr_base[2 * k_stride_C_out + ky * K_W + kx];
@@ -1538,67 +1603,5 @@ __attribute__((target("avx2"))) void transpose_f32_avx2(MemType *dest, const Mem
 		}
 	}
 }
-
-#if 0
-__attribute__((target("avx2"))) void quantize_row_q8_0_avx2(const float *__restrict x, void *__restrict y, int k)
-{
-	const int nb = k / QK8_0; // Q8_0 block size is 32
-	block_q8_0 *blocks = (block_q8_0 *)y;
-
-	for (int i = 0; i < nb; i++) {
-		// Load 32 floats
-		__m256 v0 = _mm256_loadu_ps(x + i * 32 + 0);
-		__m256 v1 = _mm256_loadu_ps(x + i * 32 + 8);
-		__m256 v2 = _mm256_loadu_ps(x + i * 32 + 16);
-		__m256 v3 = _mm256_loadu_ps(x + i * 32 + 24);
-
-		// Find Absolute Max to calculate scale
-		__m256 abs0 = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), v0);
-		__m256 abs1 = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), v1);
-		__m256 abs2 = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), v2);
-		__m256 abs3 = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), v3);
-
-		__m256 max_v = _mm256_max_ps(_mm256_max_ps(abs0, abs1), _mm256_max_ps(abs2, abs3));
-
-		// Horizontal Max Reduction
-		float amax = 0.0f;
-		// (Simplest reduction for clarity, full AVX reduction is faster)
-		float temp[8];
-		_mm256_storeu_ps(temp, max_v);
-		for (int j = 0; j < 8; j++)
-			if (temp[j] > amax)
-				amax = temp[j];
-
-		// Calculate scale: we want max value to map to 127
-		float d = amax / 127.0f;
-		if (!d)
-			d = 1.0f;
-		blocks[i].d = fp32_to_fp16(d); // Store as FP16
-		float id = 1.0f / d;
-
-		// Quantize: x * (1/d)
-		__m256 mul = _mm256_set1_ps(id);
-
-		// Convert to 32-bit int, then pack to 16-bit, then 8-bit
-		__m256i i0 = _mm256_cvtps_epi32(_mm256_mul_ps(v0, mul));
-		__m256i i1 = _mm256_cvtps_epi32(_mm256_mul_ps(v1, mul));
-		__m256i i2 = _mm256_cvtps_epi32(_mm256_mul_ps(v2, mul));
-		__m256i i3 = _mm256_cvtps_epi32(_mm256_mul_ps(v3, mul));
-
-		// Pack 32 -> 16
-		__m256i p0 = _mm256_packs_epi32(i0, i1);
-		__m256i p1 = _mm256_packs_epi32(i2, i3);
-
-		// Pack 16 -> 8
-		__m256i p_final = _mm256_packs_epi16(p0, p1);
-
-		// Fix permutation (AVX2 pack instruction acts on 128-bit lanes)
-		p_final = _mm256_permute4x64_epi64(p_final, 0xD8);
-
-		// Store
-		_mm256_storeu_si256((__m256i *)blocks[i].qs, p_final);
-	}
-}
-#endif
 
 #endif

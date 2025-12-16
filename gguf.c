@@ -25,6 +25,8 @@ size_t ggml_block_size(GGMLType type)
 		return sizeof(block_q6_k);
 	case GGML_TYPE_Q8_0:
 		return sizeof(block_q8_0);
+	case GGML_TYPE_BF16:
+		return sizeof(uint16_t);
 	default:
 		printf("FATAL: Unknown block size for type %d\n", type);
 		return 0;
@@ -210,25 +212,20 @@ int gguf_metadata_read_array(struct GGUFModel *gguf, GGUFMetadata *metadata)
 	uint64_t element_size_in_bytes = 0;
 	uint64_t total_array_size_in_bytes = 0;
 
-	// Read the array's element type (e.g., UINT32, FLOAT32, STRING)
 	array_element_type = *(uint32_t *)gguf->fptr;
 	gguf->fptr += sizeof(uint32_t);
 
-	// Read the number of elements in the array
 	array_element_count = *(uint64_t *)gguf->fptr;
 	gguf->fptr += sizeof(uint64_t);
 
-	// Store the element count
 	metadata->size = array_element_count;
-	// Store the file offset where the actual data begins
 	metadata->arr_offset = gguf->fptr;
 
-	// Special case: Array of strings
+	// Array of strings
 	if (array_element_type == GGUF_METADATA_VALUE_TYPE_STRING) {
 		uint64_t i;
 		uint64_t str_len;
 
-		// Allocate memory for the array of pointers
 		metadata->data = malloc(array_element_count * sizeof(char *));
 		if (!metadata->data) {
 			fprintf(stderr, "GGUF: Failed to allocate memory for string array pointers\n");
@@ -238,7 +235,7 @@ int gguf_metadata_read_array(struct GGUFModel *gguf, GGUFMetadata *metadata)
 		char **string_array = (char **)metadata->data;
 
 		for (i = 0; i < array_element_count; i++) {
-			// Read the length of the string
+			// length
 			str_len = *(uint64_t *)gguf->fptr;
 			gguf->fptr += sizeof(uint64_t);
 
@@ -249,15 +246,13 @@ int gguf_metadata_read_array(struct GGUFModel *gguf, GGUFMetadata *metadata)
 				return -1;
 			}
 
-			// Copy the string data
 			memcpy(string_array[i], gguf->fptr, str_len);
-			string_array[i][str_len] = '\0'; // Add null terminator
+			string_array[i][str_len] = '\0';
 
-			// Advance pointer past the string data
 			gguf->fptr += str_len;
 		}
+
 	} else {
-		// Determine the size of a single element
 		switch (array_element_type) {
 		case GGUF_METADATA_VALUE_TYPE_UINT8:
 			element_size_in_bytes = sizeof(uint8_t);
@@ -281,7 +276,7 @@ int gguf_metadata_read_array(struct GGUFModel *gguf, GGUFMetadata *metadata)
 			element_size_in_bytes = sizeof(float);
 			break;
 		case GGUF_METADATA_VALUE_TYPE_BOOL:
-			element_size_in_bytes = sizeof(uint8_t); // GGUF bools are uint8_t
+			element_size_in_bytes = sizeof(uint8_t);
 			break;
 		case GGUF_METADATA_VALUE_TYPE_UINT64:
 			element_size_in_bytes = sizeof(uint64_t);
@@ -297,20 +292,16 @@ int gguf_metadata_read_array(struct GGUFModel *gguf, GGUFMetadata *metadata)
 			return -1;
 		}
 
-		// Calculate total size
+		// total size
 		total_array_size_in_bytes = element_size_in_bytes * array_element_count;
 
-		// Allocate a single block for the entire array
 		metadata->data = malloc(total_array_size_in_bytes);
 		if (!metadata->data) {
 			fprintf(stderr, "GGUF: Failed to allocate memory for metadata array\n");
 			return -1;
 		}
 
-		// Copy the entire array data
 		memcpy(metadata->data, gguf->fptr, total_array_size_in_bytes);
-
-		// Advance the file pointer past the entire array
 		gguf->fptr += total_array_size_in_bytes;
 	}
 
@@ -762,7 +753,7 @@ void gguf_model_metadata_free(struct GGUFModel *gguf)
 		// Free the metadata key name
 		if (metadata->name) {
 			free(metadata->name);
-			metadata->name = NULL; // Good practice
+			metadata->name = NULL;
 		}
 
 		if (metadata->type == GGUF_METADATA_VALUE_TYPE_ARRAY) {
@@ -770,7 +761,6 @@ void gguf_model_metadata_free(struct GGUFModel *gguf)
 			// Free the metadata value data
 			if (metadata->data) {
 				// Array of strings
-				// We must free each individual string before freeing the array of pointers.
 				if (metadata->type == GGUF_METADATA_VALUE_TYPE_STRING && metadata->size > 0) {
 
 					char **string_array = (char **)metadata->data;
@@ -782,7 +772,6 @@ void gguf_model_metadata_free(struct GGUFModel *gguf)
 							free(string_array[j]);
 					}
 
-					// Now free the array of pointers itself
 					free(metadata->data);
 				} else {
 					free(metadata->data);
@@ -892,14 +881,15 @@ int gguf_model_metadata_read(struct GGUFModel *gguf)
 		return -1;
 	}
 
+#ifdef DUMP_MODEL_METADATA
 	gguf_model_metadata_dump(gguf);
+#endif
 
 	return 0;
 }
 
 int gguf_model_map_weights(struct GGUFModel *gguf)
 {
-	// Read tensor metadata
 	gguf->tensors = (GGUFTensor *)calloc(gguf->tensor_count, sizeof(GGUFTensor));
 	uint64_t data_offset = 0; // Will be set after alignment
 
@@ -965,7 +955,7 @@ int gguf_model_map_weights(struct GGUFModel *gguf)
 
 		if (gguf->tensor_data_offset + last_tensor->offset + last_tensor->size > gguf->file_size) {
 			fprintf(stderr, "Error: End of last tensor exceeds file size.\n");
-			return -1; // Or handle error appropriately
+			return -1;
 		} else {
 			fprintf(stderr, "gguf: tensor pointers mapped and validated against file size.\n");
 		}
@@ -1030,8 +1020,12 @@ struct GGUFModel *gguf_model_parse(char *path)
 	if (gguf_model_map_weights(gguf) != 0)
 		goto _gguf_model_open_error_free;
 
-	if ((gguf->arch = detect_architecture(gguf_metadata_get_string(gguf, "general.architecture"), gguf_metadata_get_string(gguf, "general.basename"))) == -1)
+	if ((gguf->arch = detect_architecture(gguf_metadata_get_string(gguf, "general.architecture"),
+					      gguf_metadata_get_string(gguf, "general.basename")))
+	    == -1) {
+		fprintf(stderr, "Unsupported model\n");
 		goto _gguf_model_open_error_free;
+	}
 
 #ifdef DEBUG_TENSORS
 	gguf_model_tensors_dump(gguf);
@@ -1116,11 +1110,11 @@ int gguf_model_read_token_embeds(struct TIEContext *ctx, struct GGUFModel *gguf,
 		// Detect special tokens
 		if (detect_special == 1) {
 			if (is_special_token_fast(token_ptr, len)) {
-				if (special_tokens.count >= MAX_SPECIAL_TOKENS) {
+				if (ctx->tokenizer.special_tokens.count >= MAX_SPECIAL_TOKENS) {
 					printf("Too many special tokens\n");
 					return -1;
 				}
-				special_tokens.specials[special_tokens.count++] =
+				ctx->tokenizer.special_tokens.specials[ctx->tokenizer.special_tokens.count++] =
 					(SpecialToken){.text = token_ptr, .length = len, .token_id = (int)i};
 
 				/*				char buf[256];
@@ -1173,7 +1167,7 @@ int gguf_model_read_token_types(struct TIEContext *ctx, struct GGUFModel *gguf, 
 
 		if (type == GGUF_TOKEN_TYPE_CONTROL) {
 
-			special_tokens.specials[special_tokens.count++] =
+			ctx->tokenizer.special_tokens.specials[ctx->tokenizer.special_tokens.count++] =
 				(SpecialToken){.text = ctx->tokenizer.token_table[i],
 					       .length = ctx->tokenizer.token_lens[i],
 					       .token_id = (int)i};
@@ -1221,10 +1215,10 @@ int gguf_model_read_token_scores(struct TIEContext *ctx, struct GGUFModel *gguf,
 int gguf_model_read_token_merges(struct TIEContext *ctx, struct GGUFModel *gguf, char *key)
 {
 	GGUFMetadata *metadata = NULL;
-	char merge_str[512];
+	char merge_str[2048];
 	uint64_t i, str_len;
 
-	// 1. Find metadata entry
+	// Find metadata entry
 	for (i = 0; i < gguf->metadata_num; i++) {
 		if (!strcmp(gguf->metadata[i].name, key)) {
 			metadata = &gguf->metadata[i];
@@ -1242,18 +1236,18 @@ int gguf_model_read_token_merges(struct TIEContext *ctx, struct GGUFModel *gguf,
 		return -1;
 	}
 
-	memset((void *)&bpe_merges_map, 0, sizeof(BpeMergeMap));
+	memset((void *)&ctx->tokenizer.bpe_merges_map, 0, sizeof(BpeMergeMap));
 
 	gguf->fptr = metadata->arr_offset;
 	ctx->model->merges_size = metadata->size;
-	// printf("model merges_size: %llu\n", ctx->model->merges_size);
+	//printf("model merges_size: %llu\n", ctx->model->merges_size);
 
 	for (i = 0; i < metadata->size; i++) {
 		str_len = *(uint64_t *)gguf->fptr;
 		gguf->fptr += sizeof(uint64_t);
 
 		if (str_len >= sizeof(merge_str)) {
-			printf("Merge string too long\n");
+			printf("Merge string too long %llu\n", str_len);
 			return -1;
 		}
 
@@ -1261,7 +1255,7 @@ int gguf_model_read_token_merges(struct TIEContext *ctx, struct GGUFModel *gguf,
 		merge_str[str_len] = '\0';
 		gguf->fptr += str_len;
 
-		// 2. Split into two tokens
+		// Split into two tokens
 		char *space = strchr(merge_str, ' ');
 		if (!space) {
 			printf("Malformed merge pair: %s\n", merge_str);
@@ -1271,13 +1265,13 @@ int gguf_model_read_token_merges(struct TIEContext *ctx, struct GGUFModel *gguf,
 		const char *left = merge_str;
 		const char *right = space + 1;
 
-		// 3. Lookup token IDs
+		// Lookup token IDs
 		int id1 = vocab_lookup_token_id(ctx->tokenizer.root, left, strlen(left));
 		int id2 = vocab_lookup_token_id(ctx->tokenizer.root, right, strlen(right));
 
-		// 4. Pack into key and insert
+		// Pack into key and insert
 		uint64_t key = ((uint64_t)id1 << 32) | (uint32_t)id2;
-		bpe_map_insert(&bpe_merges_map, key, (uint32_t)i);
+		bpe_map_insert(&ctx->tokenizer.bpe_merges_map, key, (uint32_t)i);
 	}
 
 	return 0;
@@ -1291,7 +1285,7 @@ size_t gguf_get_type_size(uint32_t type)
 	case GGUF_METADATA_VALUE_TYPE_INT8:
 		return sizeof(int8_t);
 	case GGUF_METADATA_VALUE_TYPE_BOOL:
-		return sizeof(uint8_t); // Bools are uint8_t
+		return sizeof(uint8_t);
 	case GGUF_METADATA_VALUE_TYPE_UINT16:
 		return sizeof(uint16_t);
 	case GGUF_METADATA_VALUE_TYPE_INT16:

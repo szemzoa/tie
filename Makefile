@@ -5,8 +5,8 @@ TARGET = tie
 BUILD_REVISION_H = "build_revision.h"
 BUILD_REVISION_D = "BUILD_REVISION"
 
-SRCS = threadpool.c gguf.c math_dispatch.c math_scalar.c math_avx2.c predict.c tokenize.c model.c engine.c model_defs.c vision.c main.c tools.c
-
+SRCS = threadpool.c gguf.c math_dispatch.c math_scalar.c math_avx2.c predict.c tokenize.c model.c engine.c vision.c main.c tools.c
+SRCS += model_qwen3.c model_gemma3.c model_gemma3n.c model_granite.c model_lfm2.c
 
 CC_ARGS= -g -O3 -mfma -mavx2 -ffast-math -fno-associative-math -march=native -ffp-contract=fast -Wall -Wno-pointer-sign -Wno-unused-label -funsigned-char $(INCLUDE_DIRS)
 #CC_ARGS = -O3 -mfma -mavx2 -march=native -ffinite-math-only -fno-math-errno -funsafe-math-optimizations -fno-associative-math -ffp-contract=fast -Wall -Wno-pointer-sign -funsigned-char -falign-functions=32 -funroll-loops -ftree-vectorize -mtune=native $(INCLUDE_DIRS)
@@ -47,7 +47,7 @@ begin:
 .SILENT:
 
 build: $(TARGET)
-	$(STRIP) $(TARGET)
+#	$(STRIP) $(TARGET)
 
 .SECONDARY : $(TARGET)
 .PRECIOUS : $(OBJS)

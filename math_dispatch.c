@@ -61,6 +61,13 @@ apply_rope_cache_dispatch_t APPLY_ROPE_CACHE_DISPATCH_TABLE[] = {
 	{GGML_TYPE_F32, apply_rope_cache_f32_scalar, 0},
 };
 
+apply_rope_cache_dispatch_t APPLY_ROPE_CACHE_INTERLEAVED_DISPATCH_TABLE[] = {
+#ifdef CONFIG_ENABLE_AVX2
+	{GGML_TYPE_F32, apply_rope_cache_interleaved_f32_avx2, 1},
+#endif
+	{GGML_TYPE_F32, apply_rope_cache_interleaved_f32_scalar, 0},
+};
+
 apply_mrope_cache_dispatch_t APPLY_MROPE_CACHE_DISPATCH_TABLE[] = {
 	{GGML_TYPE_F32, apply_mrope_cache_f32_scalar, 0},
 };
@@ -78,7 +85,7 @@ store_KV_cache_dispatch_t STORE_KV_CACHE_DISPATCH_TABLE[] = {
 	{GGML_TYPE_F32, GGML_TYPE_BF16, store_KV_cache_f32_bf16_avx2, 1},
 #endif
 	{GGML_TYPE_F32, GGML_TYPE_BF16, store_KV_cache_f32_bf16_scalar, 0},
-//	{GGML_TYPE_F32, GGML_TYPE_F32, store_KV_cache_f32_f32_scalar, 0},
+	//	{GGML_TYPE_F32, GGML_TYPE_F32, store_KV_cache_f32_f32_scalar, 0},
 };
 
 apply_residual_dispatch_t APPLY_RESIDUAL_DISPATCH_TABLE[] = {
@@ -86,6 +93,10 @@ apply_residual_dispatch_t APPLY_RESIDUAL_DISPATCH_TABLE[] = {
 	{GGML_TYPE_F32, GGML_TYPE_F32, apply_residual_f32_f32_avx2, 1},
 #endif
 	{GGML_TYPE_F32, GGML_TYPE_F32, apply_residual_f32_f32_scalar, 0},
+};
+
+apply_residual_scaled_dispatch_t APPLY_RESIDUAL_SCALED_DISPATCH_TABLE[] = {
+	{GGML_TYPE_F32, GGML_TYPE_F32, apply_residual_scaled_f32_f32_scalar, 0},
 };
 
 mat_vec_dispatch_t MAT_VEC_DISPATCH_TABLE[] = {
@@ -105,6 +116,7 @@ mat_vec_dispatch_t MAT_VEC_DISPATCH_TABLE[] = {
 	{GGML_TYPE_BF16, GGML_TYPE_Q4_K, GGML_TYPE_F32, mat_vec_row_bf16_q4k_f32_scalar, 0},
 	{GGML_TYPE_BF16, GGML_TYPE_BF16, GGML_TYPE_F32, mat_vec_row_bf16_bf16_f32_scalar, 0},
 	{GGML_TYPE_BF16, GGML_TYPE_F32, GGML_TYPE_F32, mat_vec_row_bf16_f32_f32_scalar, 0},
+	{GGML_TYPE_F32, GGML_TYPE_Q4_K, GGML_TYPE_BF16, mat_vec_row_f32_q4k_bf16_scalar, 0},
 	{GGML_TYPE_F32, GGML_TYPE_Q4_K, GGML_TYPE_BF16, mat_vec_row_f32_q4k_bf16_scalar, 0},
 
 	/* column wise for Gemma3 vision */
@@ -226,6 +238,7 @@ void dispatch_mat_vec(struct TIEContext *ctx, const MemType *X, const Tensor *W,
 
 	int effective_in_dim = in_dim;
 	int effective_out_dim = out_dim;
+
 #if 0
         if (ctx->model->weight_layout == LAYOUT_COL_MAJOR) {
 	        effective_in_dim = out_dim;
@@ -233,9 +246,9 @@ void dispatch_mat_vec(struct TIEContext *ctx, const MemType *X, const Tensor *W,
         }
 #endif
 
-	if (use_threads && ((long long)effective_in_dim * effective_out_dim < 32768)) {
-		use_threads = 0;
-	}
+	//	if (use_threads && ((long long)effective_in_dim * effective_out_dim < 32768)) {
+	//		use_threads = 0;
+	//	}
 
 	if (!use_threads) {
 		func(X->data, W->mem.data, O->data, effective_in_dim, 0, effective_out_dim);
@@ -366,6 +379,26 @@ void dispatch_apply_rope_cache(RopeCacheType *rope_cache, MemType *X_slice, int 
 	exit(1);
 }
 
+void dispatch_apply_rope_cache_interleaved(RopeCacheType *rope_cache, MemType *X_slice, int pos, int head_dim)
+{
+	for (int i = 0; i < ARRAY_SIZE(APPLY_ROPE_CACHE_INTERLEAVED_DISPATCH_TABLE); ++i) {
+		apply_rope_cache_dispatch_t *entry = &APPLY_ROPE_CACHE_INTERLEAVED_DISPATCH_TABLE[i];
+		if (entry->input_type == X_slice->type) {
+#ifdef DEBUG_ACCEL
+			if (entry->accel == 0) {
+				debug_accel("-- WARN: %s uses scalar function ---\n", __FUNCTION__);
+			}
+#endif
+			entry->func(rope_cache, X_slice->data, pos, head_dim);
+			return;
+		}
+	}
+
+	fprintf(stderr, "FATAL: No ApplyRopeInterleaved implementation found for input type %s\n",
+		gguf_get_type_name(X_slice->type));
+	exit(1);
+}
+
 void dispatch_apply_mrope_cache(RopeCacheType *rope_cache, MemType *X_slice, int pos, int head_dim)
 {
 	for (int i = 0; i < ARRAY_SIZE(APPLY_MROPE_CACHE_DISPATCH_TABLE); ++i) {
@@ -448,6 +481,27 @@ void dispatch_apply_residual(MemType *acc, const MemType *residual, int size)
 	}
 
 	fprintf(stderr, "FATAL: No ApplyResidual implementation found for input_type: %s and output_type: %s\n",
+		gguf_get_type_name(residual->type), gguf_get_type_name(acc->type));
+
+	exit(1);
+}
+
+void dispatch_apply_residual_scaled(MemType *acc, const MemType *residual, int size, float scale)
+{
+	for (int i = 0; i < ARRAY_SIZE(APPLY_RESIDUAL_SCALED_DISPATCH_TABLE); ++i) {
+		apply_residual_scaled_dispatch_t *entry = &APPLY_RESIDUAL_SCALED_DISPATCH_TABLE[i];
+		if (entry->input_type == residual->type && entry->output_type == acc->type) {
+#ifdef DEBUG_ACCEL
+			if (entry->accel == 0) {
+				debug_accel("-- WARN: %s uses scalar function ---\n", __FUNCTION__);
+			}
+#endif
+			entry->func(acc->data, residual->data, size, scale);
+			return;
+		}
+	}
+
+	fprintf(stderr, "FATAL: No ApplyResidualScaled implementation found for input_type: %s and output_type: %s\n",
 		gguf_get_type_name(residual->type), gguf_get_type_name(acc->type));
 
 	exit(1);
@@ -607,9 +661,6 @@ void math_dispatch_init()
 		mat_vec_dispatch_t *e = &MAT_VEC_DISPATCH_TABLE[i];
 		if (e->input_type < DISPATCH_MAX_GGML_TYPES && e->tensor_type < DISPATCH_MAX_GGML_TYPES
 		    && e->output_type < DISPATCH_MAX_GGML_TYPES) {
-			// Overwrite scalar with AVX2 if present (since AVX2 entries usually come first or we can check
-			// accel flag) Better strategy: Scan forward, if slot is empty, fill it. Put AVX2 entries FIRST
-			// in your tables.
 			if (CACHE_MAT_VEC[e->input_type][e->tensor_type][e->output_type] == NULL) {
 				CACHE_MAT_VEC[e->input_type][e->tensor_type][e->output_type] = e->mat_vec;
 			}

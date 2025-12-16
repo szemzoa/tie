@@ -29,7 +29,7 @@ int tools_init(struct TIEContext *ctx)
 
 	// Architecture Detection & Token Lookup
 	if (ctx->gguf_text->arch == ARCH_QWEN3 || ctx->gguf_text->arch == ARCH_QWEN3_MOE
-	    || ctx->gguf_text->arch == ARCH_QWEN3VL || ctx->gguf_text->arch == ARCH_QWEN3VL_MOE) {
+	    || ctx->gguf_text->arch == ARCH_QWEN3VL || ctx->gguf_text->arch == ARCH_QWEN3VL_MOE || ctx->gguf_text->arch == ARCH_GRANITE) {
 
 		tc->token_start_id = vocab_lookup_token_id(ctx->tokenizer.root, "<tool_call>", 11);
 		tc->token_end_id = vocab_lookup_token_id(ctx->tokenizer.root, "</tool_call>", 12);
@@ -48,8 +48,7 @@ int tools_init(struct TIEContext *ctx)
 
 void tools_release(struct TIEContext *ctx)
 {
-	ToolContext *tc = &ctx->tool_context;
-
+//	ToolContext *tc = &ctx->tool_context;
 //	if (tc->result_prompt)
 //		free(tc->result_prompt);
 }
@@ -116,7 +115,7 @@ bool tools_process_token(struct TIEContext *ctx, int token)
 
 		// Append token string to buffer
 		char piece[256];
-		int len = ctx->model->interface.decode_token(ctx, token, piece, sizeof(piece));
+		int len = ctx->model->interface.tokenize_decode(ctx, token, piece, sizeof(piece));
 
 		if (tc->buf_len + len < TOOL_BUFFER_SIZE - 1) {
 			memcpy(tc->buffer + tc->buf_len, piece, len);
@@ -178,4 +177,18 @@ char *build_system_prompt_gemma3(struct TIEContext *ctx)
 		"  }\n"
 		"]\n"
 		"<end_of_turn>\n");
+}
+
+char *build_system_prompt_granite(struct TIEContext *ctx)
+{
+	return strdup(
+		"<|start_of_role|>system<|end_of_role|>You are a helpful assistant with access to the following tools. You may call one or more tools to assist with the user query.\n"
+		"You are provided with function signatures within <tools></tools> XML tags:\n"
+		"<tools>\n"
+		"{\"type\": \"function\", \"function\": {\"name\": \"get_current_weather\", \"description\": \"Get the current weather for a specified city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"Name of the city\"}}, \"required\": [\"city\"]}}}\n"
+		"</tools>\n"
+		"For each tool call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n"
+		"<tool_call>\n"
+		"{\"name\": <function-name>, \"arguments\": <args-json-object>}\n"
+		"</tool_call>. If a tool does not exist in the provided list of tools, notify the user that you do not have the ability to fulfill the request.<|end_of_text|>\n");
 }

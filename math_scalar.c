@@ -99,7 +99,6 @@ inline void get_scale_min_k4(int j, const uint8_t *scales, uint8_t *scale, uint8
 	}
 }
 
-
 void convert_bf16_f32_scalar(const void *src, void *dest, int size)
 {
 	uint16_t *S = (uint16_t *)src;
@@ -125,49 +124,99 @@ void apply_residual_f32_f32_scalar(void *acc_void, const void *residual_void, in
 	}
 }
 
+void apply_residual_scaled_f32_f32_scalar(void *acc_void, const void *residual_void, int size, float scale)
+{
+	float *acc = (float *)acc_void;
+	float *residual = (float *)residual_void;
+
+	for (int i = 0; i < size; i++)
+		acc[i] = fmaf(residual[i], scale, acc[i]);
+}
+
 void apply_rope_cache_f32_scalar(RopeCacheType *rope_cache, void *X, int pos, int head_dim)
 {
 	float *x = (float *)X;
-	int h_dim_half = head_dim / 2;
+	int rope_dim = rope_cache->rope_dim;
+	int half_rope_dim = rope_dim / 2;
 
 	if (pos >= rope_cache->max_pos) {
 		fprintf(stderr, "Position %d exceeds rope cache max_pos %d\n", pos, rope_cache->max_pos);
 		return;
 	}
 
-	const float *sin_vals = rope_cache->sin + pos * h_dim_half;
-	const float *cos_vals = rope_cache->cos + pos * h_dim_half;
+	const float *sin_vals = rope_cache->sin + pos * half_rope_dim;
+	const float *cos_vals = rope_cache->cos + pos * half_rope_dim;
 
 	int i = 0;
-	for (; i <= h_dim_half - 2; i += 2) {
-		float x_r0 = x[i], x_i0 = x[i + h_dim_half];
-		float x_r1 = x[i + 1], x_i1 = x[i + 1 + h_dim_half];
+	for (; i <= half_rope_dim - 2; i += 2) {
+		float x_r0 = x[i], x_i0 = x[i + half_rope_dim];
+		float x_r1 = x[i + 1], x_i1 = x[i + 1 + half_rope_dim];
 
 		float sin0 = sin_vals[i], cos0 = cos_vals[i];
 		float sin1 = sin_vals[i + 1], cos1 = cos_vals[i + 1];
 
 		x[i] = fmaf(x_r0, cos0, -x_i0 * sin0);
-		x[i + h_dim_half] = fmaf(x_r0, sin0, x_i0 * cos0);
+		x[i + half_rope_dim] = fmaf(x_r0, sin0, x_i0 * cos0);
 
 		x[i + 1] = fmaf(x_r1, cos1, -x_i1 * sin1);
-		x[i + 1 + h_dim_half] = fmaf(x_r1, sin1, x_i1 * cos1);
+		x[i + 1 + half_rope_dim] = fmaf(x_r1, sin1, x_i1 * cos1);
 	}
 
 	// Handle tail if odd head_dim
-	for (; i < h_dim_half; ++i) {
+	for (; i < half_rope_dim; ++i) {
 		float x_real = x[i];
-		float x_imag = x[i + h_dim_half];
+		float x_imag = x[i + half_rope_dim];
 		float sin = sin_vals[i], cos = cos_vals[i];
 
 		x[i] = fmaf(x_real, cos, -x_imag * sin);
-		x[i + h_dim_half] = fmaf(x_real, sin, x_imag * cos);
+		x[i + half_rope_dim] = fmaf(x_real, sin, x_imag * cos);
+	}
+}
+
+void apply_rope_cache_interleaved_f32_scalar(RopeCacheType *rope_cache, void *X, int pos, int head_dim)
+{
+	float *x = (float *)X;
+	int rope_dim = rope_cache->rope_dim;
+	int half_rope_dim = rope_dim / 2;
+
+	if (pos >= rope_cache->max_pos) {
+		fprintf(stderr, "Position %d exceeds rope cache max_pos %d\n", pos, rope_cache->max_pos);
+		return;
+	}
+
+	// Get pre-computed cos/sin for this position
+	const float *sin_vals = rope_cache->sin + pos * half_rope_dim;
+	const float *cos_vals = rope_cache->cos + pos * half_rope_dim;
+
+	// Process adjacent pairs [Real, Imag, Real, Imag...]
+	int i = 0;
+	for (; i < half_rope_dim; i++) {
+		float x_real = x[2 * i];
+		float x_imag = x[2 * i + 1];
+
+		float s = sin_vals[i];
+		float c = cos_vals[i];
+
+		// Standard RoPE rotation on adjacent elements
+		x[2 * i] = x_real * c - x_imag * s;
+		x[2 * i + 1] = x_real * s + x_imag * c;
+	}
+
+	// Handle tail if odd head_dim
+	for (; i < half_rope_dim; ++i) {
+		float x_real = x[i];
+		float x_imag = x[i + half_rope_dim];
+		float sin = sin_vals[i], cos = cos_vals[i];
+
+		x[i] = fmaf(x_real, cos, -x_imag * sin);
+		x[i + half_rope_dim] = fmaf(x_real, sin, x_imag * cos);
 	}
 }
 
 void dequantize_row_q4_k_f32_scalar(const void *__restrict__ q_void, float *__restrict__ y, int k)
 {
 	const block_q4_k *blocks = (const block_q4_k *)q_void;
-	const int nb = k / QK_K; // k is the total number of elements, e.g., model dimension
+	const int nb = k / QK_K;
 
 	// Iterate over the blocks that make up the row
 	for (int i = 0; i < nb; ++i) {
@@ -393,16 +442,12 @@ void mat_vec_row_f32_q4k_f32_scalar(const void *X, const void *w_void, void *O, 
 		const block_q4_k *w_row = w + (long long)i * nb;
 		float sum = 0.0f;
 		for (int j = 0; j < nb; j++) {
-			// Explicitly call the scalar version of the dot product
 			sum += dot_product_f32_q4k_scalar(x + j * QK_K, &w_row[j]);
 		}
 		o[i] = sum;
 	}
 }
 
-/**
- * @brief Scalar matrix-vector multiplication for Q6_K weights.
- */
 void mat_vec_row_f32_q6k_f32_scalar(const void *X, const void *w_void, void *O, int in_dim, int start_row, int end_row)
 {
 	const block_q6_k *w = (const block_q6_k *)w_void;
@@ -414,13 +459,11 @@ void mat_vec_row_f32_q6k_f32_scalar(const void *X, const void *w_void, void *O, 
 		const block_q6_k *w_row = w + (long long)i * nb;
 		float sum = 0.0f;
 		for (int j = 0; j < nb; j++) {
-			// Explicitly call the scalar version of the dot product
 			sum += dot_product_f32_q6k_scalar(x + j * QK_K, &w_row[j]);
 		}
 		o[i] = sum;
 	}
 }
-
 
 void mat_vec_row_f32_bf16_f32_scalar(const void *X, const void *w_void, void *O, int in_dim, int start_row, int end_row)
 {
@@ -463,7 +506,7 @@ void mat_vec_row_f32_bf16_f32_scalar(const void *X, const void *w_void, void *O,
 	}
 }
 
-// COLUMN VISE !!//
+// COLUMN VISE !! //
 void mat_vec_row_f32_f16_f32_scalar(const void *X, const void *w_void, void *O, int in_dim, int start_row, int end_row)
 {
 	const float *x = (const float *)X;
@@ -577,13 +620,12 @@ void store_KV_cache_f32_bf16_scalar(struct TIEContext *ctx, int layer_idx, int s
 		// Calculate contiguous chunk size
 		int chunk_len = 1;
 		if (current_logical_pos >= sink_len) {
-			// How much space until the end of the physical buffer?
+			// space until the end of the physical buffer
 			int space_at_end = ring_size - current_physical_pos;
 			int tokens_remaining = batch_len - tokens_written;
 			chunk_len = (tokens_remaining < space_at_end) ? tokens_remaining : space_at_end;
 		}
 
-		// Perform Copy
 		long long dest_offset = (long long)current_physical_pos * kv_dim;
 		long long src_offset = (long long)tokens_written * kv_dim;
 		long long num_elements = (long long)chunk_len * kv_dim;
@@ -628,26 +670,24 @@ void store_KV_cache_f32_f32_scalar(struct TIEContext *ctx, int layer_idx, int st
 		// Calculate contiguous chunk size
 		int chunk_len = 1;
 		if (current_logical_pos >= sink_len) {
-			// How much space until the end of the physical buffer?
 			int space_at_end = ring_size - current_physical_pos;
 			int tokens_remaining = batch_len - tokens_written;
 			chunk_len = (tokens_remaining < space_at_end) ? tokens_remaining : space_at_end;
 		}
 
-		// Perform Copy
 		long long dest_offset = (long long)current_physical_pos * kv_dim;
 		long long src_offset = (long long)tokens_written * kv_dim;
 		long long num_elements = (long long)chunk_len * kv_dim;
 
-	        float *k_cache_data = (float *)cache->k.data;
-	        float *v_cache_data = (float *)cache->v.data;
-	        float *K_src = (float *)ctx->mem.K.data;
-	        float *V_src = (float *)ctx->mem.V.data;
+		float *k_cache_data = (float *)cache->k.data;
+		float *v_cache_data = (float *)cache->v.data;
+		float *K_src = (float *)ctx->mem.K.data;
+		float *V_src = (float *)ctx->mem.V.data;
 
-    		memcpy(k_cache_data + dest_offset, K_src + src_offset, num_elements * sizeof(float));
-	        memcpy(v_cache_data + dest_offset, V_src + src_offset, num_elements * sizeof(float));
+		memcpy(k_cache_data + dest_offset, K_src + src_offset, num_elements * sizeof(float));
+		memcpy(v_cache_data + dest_offset, V_src + src_offset, num_elements * sizeof(float));
 
-	        tokens_written += chunk_len;
+		tokens_written += chunk_len;
 	}
 }
 
@@ -803,7 +843,6 @@ void mat_vec_row_bf16_q6k_f32_scalar(const void *X, const void *w_void, void *O,
 	}
 }
 
-
 void mat_vec_row_bf16_bf16_f32_scalar(const void *X, const void *w_void, void *O, int in_dim, int start_row,
 				      int end_row)
 {
@@ -849,7 +888,7 @@ void mat_vec_row_f32_q4k_bf16_scalar(const void *X, const void *w_void, void *O,
 void dequantize_row_q4_k_bf16_scalar(const void *__restrict__ q_void, uint16_t *__restrict__ y, int k)
 {
 	const block_q4_k *blocks = (const block_q4_k *)q_void;
-	const int nb = k / QK_K; // k is the total number of elements, e.g., model dimension
+	const int nb = k / QK_K;
 
 	// Iterate over the blocks that make up the row
 	for (int i = 0; i < nb; ++i) {
@@ -975,6 +1014,7 @@ void conv_2d_f32_f32_f32_f32_scalar(MemType *dest, const MemType *src_image, con
 	const size_t kernel_stride_C_in = (size_t)K_H * kernel_stride_K_H;
 	const size_t kernel_stride_C_out = (size_t)C_in * kernel_stride_C_in;
 
+
 	// Perform Convolution
 	for (int c_out = 0; c_out < C_out; ++c_out) {
 
@@ -1053,13 +1093,10 @@ void apply_mrope_cache_f32_scalar(RopeCacheType *rope_cache, void *X, int pos, i
 	const float *cos_vals = (const float *)rope_cache->cos + (size_t)pos * head_dim;
 	const float *sin_vals = (const float *)rope_cache->sin + (size_t)pos * head_dim;
 
-	// This loop implements: q_embed = (q * cos) + (rotate_half(q) * sin)
 	for (int i = 0; i < h_dim_half; i++) {
 		float x_real = x[i];
 		float x_imag = x[i + h_dim_half];
 
-		// cos_vals[i] is from the first half of the table
-		// cos_vals[i + h_dim_half] is from the second half
 		float cos_real = cos_vals[i];
 		float cos_imag = cos_vals[i + h_dim_half];
 		float sin_real = sin_vals[i];
@@ -1125,3 +1162,4 @@ void transpose_bf16_scalar(MemType *dest, const MemType *src, int rows, int cols
 		}
 	}
 }
+

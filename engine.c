@@ -61,13 +61,12 @@ void engine_release(struct TIEContext *ctx)
 	//	debug_close();
 }
 
-#if 0
+#if 1
 #define DEBUG_MEMTYPE_NUM 10
 void debug_memtype_f32(MemType *mem, char *name, int layer_idx, int debug_offset)
 {
 	float *p = mem->data;
 
-	//	return;
 
 	printf("--- layer%d_%s --- offset: %u [", layer_idx, name, debug_offset);
 	for (int i = 0; i < DEBUG_MEMTYPE_NUM; i++) {
@@ -80,7 +79,7 @@ void debug_memtype_f32(MemType *mem, char *name, int layer_idx, int debug_offset
 	printf("]\n");
 }
 
-static void debug_check_tensor(const char *name, MemType *mem, int len, int layer, int batch_idx)
+void debug_check_tensor(const char *name, MemType *mem, int len, int layer, int batch_idx)
 {
 	float *ptr = mem->data;
 
@@ -117,13 +116,14 @@ static void debug_check_tensor(const char *name, MemType *mem, int len, int laye
 int compare_tensor_with_file(const char *ref_filename, const float *your_c_tensor, long num_elements, float tolerance,
 			     int debug_offset)
 {
+	//	return 0;
+
 	FILE *file = fopen(ref_filename, "rb");
 	if (file == NULL) {
 		fprintf(stderr, "ERROR: Could not open reference file %s\n", ref_filename);
-		return 1; // Return error
+		return 1;
 	}
 
-	// Allocate memory to hold the reference data
 	float *ref_tensor = (float *)malloc(num_elements * sizeof(float));
 	if (ref_tensor == NULL) {
 		fprintf(stderr, "ERROR: Could not allocate memory for reference tensor\n");
@@ -131,7 +131,6 @@ int compare_tensor_with_file(const char *ref_filename, const float *your_c_tenso
 		return 1;
 	}
 
-	// Read the data from the file
 	long elements_read = fread(ref_tensor, sizeof(float), num_elements, file);
 	fclose(file);
 
@@ -151,13 +150,12 @@ int compare_tensor_with_file(const char *ref_filename, const float *your_c_tenso
 	}
 	printf("\n");
 
-	// --- The Comparison ---
 	int mismatch_found = 0;
 	for (long i = 0; i < num_elements; i++) {
 		float diff = fabsf(your_c_tensor[i] - ref_tensor[i]);
 
 		if (diff > tolerance) {
-			fprintf(stderr, "\n--- MISMATCH DETECTED ---\n");
+			fprintf(stderr, "\n--- MISMATCH DETECTED - tolerance: %.10f---\n", tolerance);
 			fprintf(stderr, "File: %s\n", ref_filename);
 			fprintf(stderr, "Index: %ld (elements: %ld)\n", i, num_elements);
 			fprintf(stderr, "  C Value:   %f\n", your_c_tensor[i]);
@@ -165,14 +163,14 @@ int compare_tensor_with_file(const char *ref_filename, const float *your_c_tenso
 			fprintf(stderr, "  Difference: %f\n", diff);
 
 			mismatch_found = 1;
-			break; // Stop at the first error
+			break;
 		}
 	}
 
-	free(ref_tensor); // Clean up
+	free(ref_tensor);
 
 	if (!mismatch_found) {
-		printf("SUCCESS: %s matches the reference.\n", ref_filename);
+		printf("SUCCESS: %s matches the reference. Tolerance: %.10f\n", ref_filename, tolerance);
 	} else {
 		exit(EXIT_FAILURE);
 	}
@@ -226,9 +224,8 @@ inline float expf_fast(float x)
 	return u.f + u.f * p;
 }
 
-static inline void *xaligned_alloc(size_t alignment, size_t size_bytes)
+void *xaligned_alloc(size_t alignment, size_t size_bytes)
 {
-	// aligned_alloc requires size % alignment == 0
 	size_t padded = (size_bytes + (alignment - 1)) & ~(alignment - 1);
 
 	void *p = NULL;
@@ -309,7 +306,6 @@ float silu_lookup(float x)
 {
 	if (!isfinite(x)) {
 		// If x is not a valid number, we can't use the lookup table.
-		// Fallback to a direct, safe calculation or return 0.
 		return x / (1.0f + expf_fast(-x));
 	}
 
@@ -328,35 +324,38 @@ float silu_lookup(float x)
 	if (idx >= SILU_TABLE_SIZE - 1)
 		idx = SILU_TABLE_SIZE - 2;
 
-	// Use FMA for better interpolation precision
 	return fmaf(silu_table[idx + 1] - silu_table[idx], frac, silu_table[idx]);
 }
 
-void rope_cache_init(struct TIEContext *ctx, RopeCacheType *rope_cache, int max_pos, int head_dim, float base,
-		     float scale)
+void rope_cache_init(struct TIEContext *ctx, RopeCacheType *rope_cache, int max_pos, int head_dim, int rope_dim,
+		     float base, float scale)
 {
 	float scaled_pos;
 
 	rope_cache->max_pos = max_pos;
 	rope_cache->head_dim = head_dim;
+	rope_cache->rope_dim = rope_dim;
 
-	rope_cache->sin = aligned_alloc(32, sizeof(float) * max_pos * (head_dim / 2));
-	rope_cache->cos = aligned_alloc(32, sizeof(float) * max_pos * (head_dim / 2));
+	// only need cache for the ROTATED dimensions (rope_dim / 2)
+	int cache_elements = max_pos * (rope_dim / 2);
 
-	printf("RoPE init base=%.01f, scale=%f\n", base, scale);
+	rope_cache->sin = aligned_alloc(32, sizeof(float) * cache_elements);
+	rope_cache->cos = aligned_alloc(32, sizeof(float) * cache_elements);
+
+	printf("RoPE init base=%.01f, scale=%f, rot_dim=%d\n", base, scale, rope_dim);
 
 	for (int pos = 0; pos < max_pos; ++pos) {
-
 		scaled_pos = (float)pos * scale;
 
-		for (int i = 0; i < head_dim / 2; ++i) {
-			float exponent = (2.0f * (float)i) / (float)head_dim;
+		for (int i = 0; i < rope_dim / 2; ++i) {
+
+			float exponent = (2.0f * (float)i) / (float)rope_dim;
+
 			float inv_freq = 1.0f / powf(base, exponent);
 			float angle = scaled_pos * inv_freq;
 
-			// Store sin and cos
-			rope_cache->sin[pos * (head_dim / 2) + i] = sinf(angle);
-			rope_cache->cos[pos * (head_dim / 2) + i] = cosf(angle);
+			rope_cache->sin[pos * (rope_dim / 2) + i] = sinf(angle);
+			rope_cache->cos[pos * (rope_dim / 2) + i] = cosf(angle);
 		}
 	}
 }
@@ -365,7 +364,6 @@ void build_rope_cache_dynamic(struct TIEContext *ctx, size_t seq_len)
 {
 	printf("%s seq_len: %zu\n", __FUNCTION__, seq_len);
 
-	// Allocate the container struct
 	ctx->model->rope_cache_global = malloc(sizeof(RopeCacheType));
 	if (!ctx->model->rope_cache_global) {
 		perror("Failed to allocate rope_cache");
@@ -376,7 +374,7 @@ void build_rope_cache_dynamic(struct TIEContext *ctx, size_t seq_len)
 
 	// Allocate the *data buffers
 	size_t head_dim = ctx->model->head_dim;
-	size_t max_tokens = seq_len; // Use max context length
+	size_t max_tokens = seq_len; // max context length
 	size_t buffer_bytes = sizeof(float) * max_tokens * head_dim;
 
 	rope_cache->sin = aligned_alloc(32, buffer_bytes);
@@ -389,11 +387,8 @@ void build_rope_cache_dynamic(struct TIEContext *ctx, size_t seq_len)
 	}
 }
 
-// Applies the Qwen3-VL Interleaved M-RoPE logic
+// Qwen3-VL Interleaved M-RoPE logic
 // Shuffles H and W frequencies into the T frequency buffer.
-// Dest buffer (T freqs) [seq_len, head_dim/2]
-// Source W freqs [seq_len, head_dim/2]
-// [24, 20, 20]
 static void apply_interleaved_mrope(float *freqs_t, const float *freqs_h, const float *freqs_w,
 				    const int *mrope_sections, int seq_len, int half_head_dim)
 {
@@ -425,9 +420,9 @@ void text_rope_cache_init(struct TIEContext *ctx, int seq_len, int start_pos)
 	RopeCacheType *rope_cache = ctx->model->rope_cache_global;
 	MemLayout *mem = &ctx->mem;
 
-	const int head_dim = lm->head_dim;	    // e.g., 128
-	const int half_head_dim = head_dim / 2;	    // e.g., 64
-	const float rope_base = lm->rope_freq_base; // e.g., 5000000.0
+	const int head_dim = lm->head_dim;
+	const int half_head_dim = head_dim / 2;
+	const float rope_base = lm->rope_freq_base;
 
 	// Calculate inv_freq
 	float inv_freq[half_head_dim];
@@ -477,7 +472,7 @@ void text_rope_cache_init(struct TIEContext *ctx, int seq_len, int start_pos)
 	// Finalize cos/sin tables
 	for (int i = 0; i < seq_len; i++) {
 
-		int absolute_pos = start_pos + i; // e.g., 19 + 0, 19 + 1, ...
+		int absolute_pos = start_pos + i;
 		if (absolute_pos >= rope_cache->max_pos)
 			continue;
 
@@ -510,13 +505,12 @@ void text_rope_cache_extend(struct TIEContext *ctx, int pos)
 	//    printf("%s pos: %u\n", __FUNCTION__, pos);
 
 	if (pos >= rope_cache->max_pos) {
-		// Optional: Reallocate larger, or just warn and clamp
 		fprintf(stderr, "WARN: RoPE cache exhausted at pos %d. RoPE will be incorrect.\n", pos);
 		return;
 	}
 
-	const int head_dim = lm->head_dim;	// e.g., 128
-	const int half_head_dim = head_dim / 2; // e.g., 64
+	const int head_dim = lm->head_dim;	// 128
+	const int half_head_dim = head_dim / 2; // 64
 	const float rope_base = lm->rope_freq_base;
 
 	// Calculate inv_freq
@@ -539,7 +533,7 @@ void text_rope_cache_extend(struct TIEContext *ctx, int pos)
 		freqs_w[j] = (float)pos * inv_freq[j];
 	}
 
-	// Apply Interleaved M-RoPE
+	// Interleaved M-RoPE
 	int *mrope_sections = (int *)lm->mrope_sections.data;
 	apply_interleaved_mrope(freqs_t, freqs_h, freqs_w, mrope_sections,
 				1, // seq_len is 1
@@ -578,15 +572,12 @@ void build_mrope_position_ids(struct TIEContext *ctx, const int *prompt_tokens, 
 	int text_pos_counter = start_pos;
 	int image_patch_counter = 0;
 
-	// Use Passed-In Dimensions
 	int h_patches = 0;
 	int w_patches = 0;
 	int num_image_patches = 0;
 
 	if (has_image && ctx->model_vision) {
 		// Calculate the *merged* grid size, which is what the LLM sees.
-		// h_patches_in/w_patches_in are the raw patch counts (e.g., 50x37).
-		// The LLM sees them reduced by spatial_merge_size (e.g., 2).
 		h_patches = h_patches_in / ctx->model_vision->spatial_merge_size;
 		w_patches = w_patches_in / ctx->model_vision->spatial_merge_size;
 
@@ -600,11 +591,11 @@ void build_mrope_position_ids(struct TIEContext *ctx, const int *prompt_tokens, 
 
 		// Check for the <vision_pad> token
 		if (has_image && token == def->params.vision_embed_token_id) {
-			// This is an image patch token
-			int h = image_patch_counter / w_patches; // Use dynamic width
+			// image patch token
+			int h = image_patch_counter / w_patches;
 			int w = image_patch_counter % w_patches;
 
-			// We use the text_pos_counter as the base for all.
+			// text_pos_counter as the base for all.
 			pos_t[i] = text_pos_counter; // T is 0 + counter
 			pos_h[i] = h + text_pos_counter;
 			pos_w[i] = w + text_pos_counter;
@@ -613,7 +604,7 @@ void build_mrope_position_ids(struct TIEContext *ctx, const int *prompt_tokens, 
 			text_pos_counter++;
 
 		} else {
-			// This is a normal text token
+			// normal text token
 			pos_t[i] = text_pos_counter;
 			pos_h[i] = text_pos_counter;
 			pos_w[i] = text_pos_counter;
@@ -628,19 +619,6 @@ void build_mrope_position_ids(struct TIEContext *ctx, const int *prompt_tokens, 
 	}
 }
 
-void embedding_scale_gemma3(struct TIEContext *ctx, MemType *hidden_state_slice)
-{
-	float *hidden_data_fp32;
-
-	float scale = sqrtf((float)ctx->model->embed_dim);
-	hidden_data_fp32 = (float *)hidden_state_slice->data;
-	for (int j = 0; j < ctx->model->embed_dim; j++) {
-		float val = hidden_data_fp32[j];
-		val *= scale;
-		hidden_data_fp32[j] = val;
-	}
-}
-
 static inline bool is_token_masked(struct TIEContext *ctx, AttentionType type, int abs_pos, int t)
 {
 	// Global attention sees everything
@@ -648,7 +626,6 @@ static inline bool is_token_masked(struct TIEContext *ctx, AttentionType type, i
 		return false;
 
 	// LOCAL / SLIDING WINDOW LOGIC
-
 	// Gemma-3N (Centered Window)
 	if (ctx->gguf_text->arch == ARCH_GEMMA3) {
 		int window = ctx->model->attn_sliding_window;
@@ -672,7 +649,7 @@ static inline bool is_token_masked(struct TIEContext *ctx, AttentionType type, i
 		return true;	      // Masked
 	}
 
-	// Default: No mask
+	// No mask
 	return false;
 }
 
@@ -686,12 +663,14 @@ void attention_worker(void *arg)
 	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
 	LayerKVCache *cache = &ctx->kv_cache[task->kv_source_layer_idx];
 
-	// Thread-local scratch buffers
+	// scratch buffers
 	float *attn_scores_buffer = ctx->mem.attn_scores_buffer[task->thread_id];
 	MemType *q_head_fp32_scratch = &ctx->mem.q_head_fp32_scratch[task->thread_id];
 
 	int ring_size = ctx->model->seq_length;
 	int rolling_capacity = ring_size - sink_len;
+
+	//	printf("ATTN_SCALE: %.5f\n", ctx->model->attn_scale);
 
 	for (int i = task->token_start_idx; i < task->token_end_idx; i++) {
 		int absolute_pos = task->batch_start_pos + i;
@@ -712,7 +691,7 @@ void attention_worker(void *arg)
 
 			dispatch_convert(&q_head_slice, q_head_fp32_scratch, ctx->model->head_dim);
 
-			// Conditional Q-Scaling (Gemma-3 specific)
+			// Q-Scaling (Gemma-3)
 			if (ctx->gguf_text->arch == ARCH_GEMMA3) {
 				float q_scale = 1.0f / sqrtf((float)ctx->model->head_dim);
 				float *q_fp32_data = (float *)q_head_fp32_scratch->data;
@@ -725,7 +704,8 @@ void attention_worker(void *arg)
 
 			// LOOP 1: SINK (0..sink_len)
 			for (int t = 0; t < sink_end; t++) {
-				// Check mask via helper
+
+				// Check mask
 				if (!is_token_masked(ctx, attn_type, absolute_pos, t)) {
 					void *k_head = get_kv_head(&cache->k, t, kv_head_idx, ctx->model->head_dim,
 								   ctx->model->num_kv_heads, ring_size, sink_len);
@@ -742,7 +722,7 @@ void attention_worker(void *arg)
 
 			// LOOP 2: RING (Rolling History)
 			for (int t = rolling_start; t <= absolute_pos; t++) {
-				// Check mask via helper
+				// Check mask
 				if (!is_token_masked(ctx, attn_type, absolute_pos, t)) {
 					void *k_head = get_kv_head(&cache->k, t, kv_head_idx, ctx->model->head_dim,
 								   ctx->model->num_kv_heads, ring_size, sink_len);
@@ -829,8 +809,6 @@ void attention(struct TIEContext *ctx, int batch_len, int layer_idx, int kv_sour
 			if (head_start >= head_end)
 				break;
 
-			//			attention_worker_task_t *task = malloc(sizeof(attention_worker_task_t));
-			//			*task = (attention_worker_task_t){
 			tasks[t] = (attention_worker_task_t){
 				.ctx = ctx,
 				.layer_idx = layer_idx,
@@ -887,6 +865,7 @@ void softmax(float *x, int size)
 {
 	if (size == 0)
 		return;
+
 	// Find max value for numerical stability
 	float max_val = x[0];
 	for (int i = 1; i < size; i++) {
@@ -894,12 +873,14 @@ void softmax(float *x, int size)
 			max_val = x[i];
 		}
 	}
+
 	// Calculate exponentials and sum
 	float sum = 0.0f;
 	for (int i = 0; i < size; i++) {
 		x[i] = expf(x[i] - max_val);
 		sum = fmaf(x[i], 1.0f, sum);
 	}
+
 	// Normalize
 	for (int i = 0; i < size; i++) {
 		x[i] /= sum;
@@ -980,845 +961,21 @@ void process_expert_task(void *arg)
 	// Down-projection
 	dispatch_mat_vec(ctx, ffn_hidden1, &expert_down, expert_out, ctx->model->expert_ffn_dim, ctx->model->embed_dim,
 			 false);
-
-	//	free(task);
-}
-
-int transformer_layer_qwen3(struct TIEContext *ctx, int layer_idx, int batch_len)
-{
-	LayerWeights *l = &ctx->model->layers[layer_idx];
-	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
-	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
-	AttentionType attn_type = ATTN_TYPE_GLOBAL;
-	RopeCacheType *active_rope_cache = ctx->model->rope_cache_global;
-	int sink_len = 4;
-
-	// The absolute starting position for this batch
-	int start_pos = ctx->kv_pos;
-
-	// ============ Attention Block ============
-	// RMSNorm on input
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-
-		// Create slices for the specific token being processed
-		MemType hidden_state_slice = mem_slice(&ctx->mem.hidden_state, offset);
-		MemType normed_input_slice = mem_slice(&ctx->mem.normed_qkv_input, offset);
-
-		dispatch_rms_norm(&hidden_state_slice, &l->attn_norm, &normed_input_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
-
-	// Compute Q/K/V Matrices
-	dispatch_mat_mat(ctx, &ctx->mem.normed_qkv_input, &l->attn_q, &ctx->mem.Q, batch_len, ctx->model->embed_dim,
-			 q_dim, true);
-
-	dispatch_mat_mat(ctx, &ctx->mem.normed_qkv_input, &l->attn_k, &ctx->mem.K, batch_len, ctx->model->embed_dim,
-			 kv_dim, true);
-
-	dispatch_mat_mat(ctx, &ctx->mem.normed_qkv_input, &l->attn_v, &ctx->mem.V, batch_len, ctx->model->embed_dim,
-			 kv_dim, true);
-
-	// Apply RoPE
-	for (int i = 0; i < batch_len; i++) {
-		// The absolute position for the current token in the batch
-		int absolute_pos = start_pos + i;
-
-		for (int h = 0; h < ctx->model->num_heads; h++) {
-			MemType Q_slice = mem_slice(&ctx->mem.Q, (size_t)i * q_dim + h * ctx->model->head_dim);
-
-			if (l->attn_q_norm.mem.data) {
-				dispatch_rms_norm(&Q_slice, &l->attn_q_norm, &Q_slice, ctx->model->head_dim,
-						  ctx->model->norm_eps);
-			}
-
-			// Use the absolute position for RoPE
-			if (ctx->model->use_mrope == 0) {
-				dispatch_apply_rope_cache(active_rope_cache, &Q_slice, absolute_pos,
-							  ctx->model->head_dim);
-			} else {
-				dispatch_apply_mrope_cache(active_rope_cache, &Q_slice, absolute_pos,
-							   ctx->model->head_dim);
-			}
-		}
-
-		for (int h = 0; h < ctx->model->num_kv_heads; h++) {
-			MemType K_slice = mem_slice(&ctx->mem.K, (size_t)i * kv_dim + h * ctx->model->head_dim);
-
-			if (l->attn_k_norm.mem.data) {
-				dispatch_rms_norm(&K_slice, &l->attn_k_norm, &K_slice, ctx->model->head_dim,
-						  ctx->model->norm_eps);
-			}
-
-			// Use the absolute position for RoPE
-			if (ctx->model->use_mrope == 0) {
-				dispatch_apply_rope_cache(active_rope_cache, &K_slice, absolute_pos,
-							  ctx->model->head_dim);
-			} else {
-				dispatch_apply_mrope_cache(active_rope_cache, &K_slice, absolute_pos,
-							   ctx->model->head_dim);
-			}
-		}
-	}
-
-	// Store K/V to cache
-	dispatch_store_KV_cache(ctx, layer_idx, start_pos, batch_len, sink_len);
-
-	// Multi-Head Attention Calculation
-	attention(ctx, batch_len, layer_idx, layer_idx, start_pos, attn_type, attention_worker, sink_len);
-
-	// Output projection
-	dispatch_mat_mat(ctx, &ctx->mem.attn_output, &l->attn_out, &ctx->mem.attn_proj_output, batch_len, q_dim,
-			 ctx->model->embed_dim, true);
-
-	// Add residual
-	dispatch_apply_residual(&ctx->mem.hidden_state, &ctx->mem.attn_proj_output, batch_len * ctx->model->embed_dim);
-
-	// ============ FFN Block ============
-	// RMSNorm
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-
-		// Create slices for the specific token being processed
-		MemType hidden_state_slice = mem_slice(&ctx->mem.hidden_state, offset);
-		MemType normed_ffn_input_slice = mem_slice(&ctx->mem.normed_ffn_input, offset);
-
-		dispatch_rms_norm(&hidden_state_slice, &l->ffn_norm, &normed_ffn_input_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
-
-	// MoE
-	if (ctx->model->is_moe) {
-
-		// Get the size of a single quantization block for the expert tensors
-		size_t block_size_bytes = ggml_block_size(l->ffn_up_exps.mem.type);
-		if (block_size_bytes == 0) {
-			return -1;
-		}
-
-		int num_threads = thread_pool->num_threads;
-		expert_task_t tasks[num_threads];
-
-		for (int i = 0; i < batch_len; i++) {
-
-			// Pointers for the current token
-			MemType normed_input_for_token_i =
-				mem_slice(&ctx->mem.normed_ffn_input, (size_t)i * ctx->model->embed_dim);
-
-			// Create a slice for the destination buffer
-			MemType ffn_out_slice = mem_slice(&ctx->mem.ffn_down_output, (size_t)i * ctx->model->embed_dim);
-
-			// Use a per-thread scratch buffer for FP32 accumulation
-			MemType *ffn_out_fp32_scratch = &ctx->mem.expert_out_fp32;
-			float *ffn_out_fp32_token_buffer = ctx->mem.expert_out_fp32.data;
-
-			// Route, Select, and Gate
-			// The input type for the router is the intermediate type, but the output scores are always
-			// FP32.
-			dispatch_mat_vec(ctx, &normed_input_for_token_i, &l->ffn_gate_inp, &ctx->mem.expert_scores,
-					 ctx->model->embed_dim, ctx->model->expert_count, false);
-
-			ExpertChoice top_experts[ctx->model->expert_used_count];
-			find_top_k((float *)ctx->mem.expert_scores.data, ctx->model->expert_count,
-				   ctx->model->expert_used_count, top_experts);
-
-			float gate_values[ctx->model->expert_used_count];
-
-			for (int j = 0; j < ctx->model->expert_used_count; j++)
-				gate_values[j] = top_experts[j].score;
-
-			softmax(gate_values, ctx->model->expert_used_count);
-
-			// Parallel Expert Processing
-			for (int j = 0; j < ctx->model->expert_used_count; j++) {
-				//				expert_task_t *task = malloc(sizeof(expert_task_t));
-				tasks[j] = (expert_task_t){
-					.ctx = ctx,
-					.thread_id = j,
-					.layer_idx = layer_idx,
-					.expert_idx = top_experts[j].index,
-					.normed_input = normed_input_for_token_i,
-				};
-				thread_pool_submit(thread_pool, process_expert_task, &tasks[j]);
-			}
-			thread_pool_wait(thread_pool);
-
-			// Accumulate results in the FP32 temporary buffer
-			memset(ffn_out_fp32_scratch->data, 0, ctx->model->embed_dim * sizeof(float));
-
-			for (int j = 0; j < ctx->model->expert_used_count; j++) {
-				float gate_val = gate_values[j];
-				float *expert_result = ctx->mem.expert_outputs[j].data;
-				for (int k = 0; k < ctx->model->embed_dim; k++) {
-					ffn_out_fp32_token_buffer[k] += gate_val * expert_result[k];
-				}
-			}
-
-			// Convert the final FP32 result to the destination format
-			dispatch_convert(ffn_out_fp32_scratch, &ffn_out_slice, ctx->model->embed_dim);
-		}
-
-	} else { // DENSE FFN
-
-		// Gate + Up projections
-		dispatch_mat_mat(ctx, &ctx->mem.normed_ffn_input, &l->ffn_gate, &ctx->mem.gate_proj_output, batch_len,
-				 ctx->model->embed_dim, ctx->model->ffn_dim, true);
-		dispatch_mat_mat(ctx, &ctx->mem.normed_ffn_input, &l->ffn_up, &ctx->mem.up_proj_output, batch_len,
-				 ctx->model->embed_dim, ctx->model->ffn_dim, true);
-
-		/* Call the interface activation function */
-		dispatch_swiglu_activation(&ctx->mem.gate_proj_output, &ctx->mem.up_proj_output,
-					   batch_len * ctx->model->ffn_dim);
-
-
-		// Down projection
-		dispatch_mat_mat(ctx, &ctx->mem.gate_proj_output, &l->ffn_down, &ctx->mem.ffn_down_output, batch_len,
-				 ctx->model->ffn_dim, ctx->model->embed_dim, true);
-	}
-
-	// Add residual
-	dispatch_apply_residual(&ctx->mem.hidden_state, &ctx->mem.ffn_down_output, batch_len * ctx->model->embed_dim);
-
-	return 0;
-}
-
-int transformer_layer_gemma3(struct TIEContext *ctx, int layer_idx, int batch_len)
-{
-	LayerWeights *l = &ctx->model->layers[layer_idx];
-	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
-	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
-	AttentionType attn_type;
-	RopeCacheType *active_rope_cache;
-	int sink_len = 4;
-
-	// The absolute starting position for this batch
-	int start_pos = ctx->kv_pos;
-
-	// Determine the attention and rope cache type for the current layer
-	if ((layer_idx + 1) % 6 == 0) {
-		attn_type = ATTN_TYPE_GLOBAL;
-		active_rope_cache = ctx->model->rope_cache_global; // Use the global cache
-	} else {
-		attn_type = ATTN_TYPE_LOCAL;
-		active_rope_cache = ctx->model->rope_cache_local; // Use the local cache
-	}
-
-	// Save the residual for the attention block.
-	// We use a scratch buffer to hold the original hidden_state.
-	memcpy(ctx->mem.residual_stratch.data, ctx->mem.hidden_state.data,
-	       batch_len * ctx->model->embed_dim * sizeof(float));
-
-	// ============ Attention Block ============
-	// RMSNorm on input
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-
-		// Create slices for the specific token being processed
-		MemType hidden_state_slice = mem_slice(&ctx->mem.hidden_state, offset);
-		MemType normed_input_slice = mem_slice(&ctx->mem.normed_qkv_input, offset);
-
-		dispatch_rms_norm(&hidden_state_slice, &l->attn_norm, &normed_input_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
-
-	// Compute Q/K/V Matrices
-	dispatch_mat_mat(ctx, &ctx->mem.normed_qkv_input, &l->attn_q, &ctx->mem.Q, batch_len, ctx->model->embed_dim,
-			 q_dim, true);
-
-	dispatch_mat_mat(ctx, &ctx->mem.normed_qkv_input, &l->attn_k, &ctx->mem.K, batch_len, ctx->model->embed_dim,
-			 kv_dim, true);
-
-	dispatch_mat_mat(ctx, &ctx->mem.normed_qkv_input, &l->attn_v, &ctx->mem.V, batch_len, ctx->model->embed_dim,
-			 kv_dim, true);
-
-	// Apply RoPE
-	for (int i = 0; i < batch_len; i++) {
-		// The absolute position for the current token in the batch
-		int absolute_pos = start_pos + i;
-
-		for (int h = 0; h < ctx->model->num_heads; h++) {
-			MemType Q_slice = mem_slice(&ctx->mem.Q, (size_t)i * q_dim + h * ctx->model->head_dim);
-
-			if (l->attn_q_norm.mem.data) {
-				dispatch_rms_norm(&Q_slice, &l->attn_q_norm, &Q_slice, ctx->model->head_dim,
-						  ctx->model->norm_eps);
-			}
-
-			// Use the absolute position for RoPE
-			dispatch_apply_rope_cache(active_rope_cache, &Q_slice, absolute_pos, ctx->model->head_dim);
-		}
-
-		for (int h = 0; h < ctx->model->num_kv_heads; h++) {
-			MemType K_slice = mem_slice(&ctx->mem.K, (size_t)i * kv_dim + h * ctx->model->head_dim);
-
-			if (l->attn_k_norm.mem.data) {
-				dispatch_rms_norm(&K_slice, &l->attn_k_norm, &K_slice, ctx->model->head_dim,
-						  ctx->model->norm_eps);
-			}
-
-			// Use the absolute position for RoPE
-			dispatch_apply_rope_cache(active_rope_cache, &K_slice, absolute_pos, ctx->model->head_dim);
-		}
-	}
-
-	// Store K/V to cache
-	dispatch_store_KV_cache(ctx, layer_idx, start_pos, batch_len, sink_len);
-
-	// Multi-Head Attention Calculation
-	attention(ctx, batch_len, layer_idx, layer_idx, start_pos, attn_type, attention_worker, sink_len);
-
-	// Output projection
-	dispatch_mat_mat(ctx, &ctx->mem.attn_output, &l->attn_out, &ctx->mem.attn_proj_output, batch_len, q_dim,
-			 ctx->model->embed_dim, true);
-
-	// Apply POST-ATTENTION norm.
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-
-		MemType attn_proj_slice = mem_slice(&ctx->mem.attn_proj_output, offset);
-
-		dispatch_rms_norm(&attn_proj_slice, &l->post_attn_norm, &attn_proj_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
-
-	// Add the attention residual.
-	// Add the post-normed attention output to the original residual we saved.
-	// The result is stored in `hidden_state`.
-	dispatch_apply_residual(&ctx->mem.residual_stratch, &ctx->mem.attn_proj_output,
-				batch_len * ctx->model->embed_dim);
-
-	memcpy(ctx->mem.hidden_state.data, ctx->mem.residual_stratch.data,
-	       batch_len * ctx->model->embed_dim * sizeof(float));
-
-
-	// ============ FFN Block ============
-	// Save the residual for the FFN block.
-	memcpy(ctx->mem.residual_stratch.data, ctx->mem.hidden_state.data,
-	       batch_len * ctx->model->embed_dim * sizeof(float));
-
-	// RMSNorm
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-
-		// Create slices for the specific token being processed
-		MemType hidden_state_slice = mem_slice(&ctx->mem.hidden_state, offset);
-		MemType normed_ffn_input_slice = mem_slice(&ctx->mem.normed_ffn_input, offset);
-
-		dispatch_rms_norm(&hidden_state_slice, &l->ffn_norm, &normed_ffn_input_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
-
-	// Gate + Up projections
-	dispatch_mat_mat(ctx, &ctx->mem.normed_ffn_input, &l->ffn_gate, &ctx->mem.gate_proj_output, batch_len,
-			 ctx->model->embed_dim, ctx->model->ffn_dim, true);
-	dispatch_mat_mat(ctx, &ctx->mem.normed_ffn_input, &l->ffn_up, &ctx->mem.up_proj_output, batch_len,
-			 ctx->model->embed_dim, ctx->model->ffn_dim, true);
-
-	/* Call the interface activation function */
-	dispatch_geglu_activation(&ctx->mem.gate_proj_output, &ctx->mem.up_proj_output,
-				  batch_len * ctx->model->ffn_dim);
-
-	// Down projection
-	dispatch_mat_mat(ctx, &ctx->mem.gate_proj_output, &l->ffn_down, &ctx->mem.ffn_down_output, batch_len,
-			 ctx->model->ffn_dim, ctx->model->embed_dim, true);
-
-	// Apply POST-FFN norm.
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-		MemType ffn_down_slice = mem_slice(&ctx->mem.ffn_down_output, offset);
-
-		dispatch_rms_norm(&ffn_down_slice, &l->post_ffw_norm, &ffn_down_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
-
-	// Second Residual Add.
-	// Add the post-normed FFN output to the residual we saved
-	dispatch_apply_residual(&ctx->mem.residual_stratch, &ctx->mem.ffn_down_output,
-				batch_len * ctx->model->embed_dim);
-
-	// Copy the correct final result back to hidden_state for the next layer.
-	memcpy(ctx->mem.hidden_state.data, ctx->mem.residual_stratch.data,
-	       batch_len * ctx->model->embed_dim * sizeof(float));
-
-	return 0;
-}
-
-// Implements the full LAUREL block logic for a given input.
-void dispatch_laurel(struct TIEContext *ctx, MemType *output, const MemType *input, LayerWeights *l, int batch_len)
-{
-	const int embed_dim = ctx->model->embed_dim;
-	const int laurel_rank = 64; // From the config
-
-	MemType laurel_left;
-	alloc_memtype(&laurel_left, GGML_TYPE_F32, batch_len * laurel_rank);
-
-	MemType laurel_right;
-	alloc_memtype(&laurel_right, GGML_TYPE_F32, batch_len * embed_dim);
-
-	// Left projection: input @ laurel_l.weight
-	dispatch_mat_mat(ctx, input, &l->laurel_l, &laurel_left, batch_len, embed_dim, laurel_rank, true);
-
-	// Right projection: laurel_left @ laurel_r.weight
-	dispatch_mat_mat(ctx, &laurel_left, &l->laurel_r, &laurel_right, batch_len, laurel_rank, embed_dim, true);
-
-	// Post-LAUREL normalization
-	for (int i = 0; i < batch_len; i++) {
-		MemType slice = mem_slice(&laurel_right, i * embed_dim);
-		dispatch_rms_norm(&slice, &l->laurel_post_norm, &slice, embed_dim, ctx->model->norm_eps);
-	}
-
-	// Final residual connection: output = input + normed_result
-	dispatch_apply_residual_to_buffer(input, &laurel_right, output, batch_len * embed_dim);
-
-	free_memtype(&laurel_left);
-	free_memtype(&laurel_right);
-}
-
-// This can be optimized with AVX2.
-void dispatch_subtract_to_buffer(const MemType *src1, const MemType *src2, MemType *dest, int size)
-{
-	const float *src1_data = (const float *)src1->data;
-	const float *src2_data = (const float *)src2->data;
-	float *dest_data = (float *)dest->data;
-
-	// A simple loop for element-wise addition.
-	for (int i = 0; i < size; i++) {
-		dest_data[i] = src1_data[i] - src2_data[i];
-	}
-}
-
-// This can be optimized with AVX2.
-void dispatch_elementwise_mul(MemType *dest, const MemType *src1, const MemType *src2, int size)
-{
-	float *dest_data = (float *)dest->data;
-	const float *src1_data = (const float *)src1->data;
-	const float *src2_data = (const float *)src2->data;
-
-	for (int i = 0; i < size; i++) {
-		dest_data[i] = src1_data[i] * src2_data[i];
-	}
-}
-
-// This can be optimized with AVX2.
-void dispatch_elementwise_mul_tensor(MemType *dest, const MemType *src1, const Tensor *src2, int batch_len,
-				     int embed_dim)
-{
-	float *dest_data = (float *)dest->data;
-	const float *src1_data = (const float *)src1->data;
-	const float *src2_data = (const float *)src2->mem.data;
-
-	int size = batch_len * embed_dim;
-
-	for (int i = 0; i < size; i++) {
-		// Use the modulo operator to repeat/broadcast the smaller src2 vector
-		// for each token in the batch.
-		dest_data[i] = src1_data[i] * src2_data[i % embed_dim];
-	}
-}
-
-void dispatch_rms_norm_weightless(MemType *tensor, int size, float eps)
-{
-	float *x = (float *)tensor->data;
-
-	// Unrolled accumulation for faster reduction
-	float ss0 = 0.0f, ss1 = 0.0f, ss2 = 0.0f, ss3 = 0.0f;
-	int i = 0;
-	for (; i <= size - 4; i += 4) {
-		ss0 = fmaf(x[i + 0], x[i + 0], ss0);
-		ss1 = fmaf(x[i + 1], x[i + 1], ss1);
-		ss2 = fmaf(x[i + 2], x[i + 2], ss2);
-		ss3 = fmaf(x[i + 3], x[i + 3], ss3);
-	}
-	float ss = ss0 + ss1 + ss2 + ss3;
-	for (; i < size; i++) {
-		ss = fmaf(x[i], x[i], ss);
-	}
-
-	float inv_rms = 1.0f / sqrtf(ss / size + eps);
-
-	// Apply scale
-	for (int i = 0; i < size; ++i) {
-		x[i] *= inv_rms;
-	}
-}
-
-void dispatch_gaussian_topk(MemType *gate_tensor, int size)
-{
-	float *data = (float *)gate_tensor->data;
-	const float f_sparsity_std_mul = 1.6448533535f; // Corresponds to the 95th percentile
-
-	if (size == 0)
-		return;
-
-	// Numerically Stable Single-Pass Algorithm (Welford's)
-	float mean = 0.0;
-	float m2 = 0.0;
-	float delta;
-
-	for (int i = 0; i < size; i++) {
-		delta = data[i] - mean;
-		mean += delta / (i + 1);
-		m2 += delta * (data[i] - mean);
-	}
-
-	float variance = m2 / size; // Population variance
-	float std_dev = sqrt(variance);
-
-	// Determine the cutoff value
-	float cutoff = mean + std_dev * f_sparsity_std_mul;
-
-	// Apply the ReLU-like sparsity: output = max(0, input - cutoff)
-	for (int i = 0; i < size; i++) {
-		data[i] = (data[i] > cutoff) ? (data[i] - cutoff) : 0.0f;
-	}
-}
-
-inline float gelu_fast(float x)
-{
-	return 0.5f * x * (1.0f + tanhf(0.79788456f * x * (1.0f + 0.044715f * x * x)));
-}
-
-// GELU activation function to a tensor in-place.
-// This can be optimized with AVX2.
-void dispatch_gelu_inplace(MemType *tensor, int size)
-{
-	float *data = (float *)tensor->data;
-	for (int i = 0; i < size; i++) {
-		data[i] = gelu_fast(data[i]);
-	}
-}
-
-void dispatch_softcap_logits(MemType *logits, int size, float cap)
-{
-	if (cap <= 0.0f)
-		return;
-
-	float *data = (float *)logits->data;
-	float inv_cap = 1.0f / cap;
-
-	for (int i = 0; i < size; i++) {
-		data[i] = tanhf(data[i] * inv_cap) * cap;
-	}
-}
-
-void dispatch_apply_residual_to_buffer(const MemType *src1, const MemType *src2, MemType *dest, int size)
-{
-	const float *src1_data = (const float *)src1->data;
-	const float *src2_data = (const float *)src2->data;
-	float *dest_data = (float *)dest->data;
-
-	for (int i = 0; i < size; i++) {
-		dest_data[i] = src1_data[i] + src2_data[i];
-	}
-}
-
-void dispatch_altup_predict(struct TIEContext *ctx, MemType *predicted_states, MemType *input_states, LayerWeights *l,
-			    int batch_len, int active_idx)
-{
-	const int embed_dim = ctx->model->embed_dim;
-	const int num_altup = ctx->model->altup_num_inputs;
-	MemType *active_state_in = &input_states[active_idx];
-
-	MemType normed_for_router, modalities, prediction_coefs;
-	alloc_memtype(&normed_for_router, GGML_TYPE_F32, batch_len * embed_dim);
-	alloc_memtype(&modalities, GGML_TYPE_F32, batch_len * num_altup);
-	alloc_memtype(&prediction_coefs, GGML_TYPE_F32, batch_len * (num_altup * num_altup));
-
-
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * embed_dim;
-		MemType active_slice = mem_slice(active_state_in, offset);
-		MemType normed_slice = mem_slice(&normed_for_router, offset);
-
-		// Normalize one token at a time
-		dispatch_rms_norm(&active_slice, &l->altup_router_norm, &normed_slice, embed_dim, ctx->model->norm_eps);
-
-		// Scale one token at a time
-		float scale = 1.0f / (float)embed_dim;
-		float *norm_data = (float *)normed_slice.data;
-		for (int d = 0; d < embed_dim; d++) {
-			norm_data[d] *= scale;
-		}
-	}
-
-	dispatch_mat_mat(ctx, &normed_for_router, &l->altup_router, &modalities, batch_len, embed_dim, num_altup, true);
-
-	float *mod = (float *)modalities.data;
-	for (int i = 0; i < batch_len * num_altup; i++)
-		mod[i] = tanhf(mod[i]);
-	dispatch_mat_mat(ctx, &modalities, &l->altup_predict_coef, &prediction_coefs, batch_len, num_altup,
-			 num_altup * num_altup, true);
-
-	// Use Coefficients to Mix States
-	const float *coefs_data = (const float *)prediction_coefs.data;
-	MemType mixed_states;
-	alloc_memtype(&mixed_states, GGML_TYPE_F32, batch_len * num_altup * embed_dim);
-
-	// Re-order the loops to create a [state][token][dim] memory layout.
-	// This makes the data for each state contiguous across the entire batch.
-	for (int i = 0; i < num_altup; i++) {	      // For each OUTPUT state
-		for (int t = 0; t < batch_len; t++) { // For each token
-			const float *coefs_for_token = coefs_data + t * (num_altup * num_altup);
-			float *out_vec = (float *)mixed_states.data + (i * batch_len + t) * embed_dim;
-			memset(out_vec, 0, embed_dim * sizeof(float));
-
-			for (int j = 0; j < num_altup; j++) { // For each INPUT state
-				const float *in_vec = (const float *)input_states[j].data + t * embed_dim;
-				const float coef = coefs_for_token[i * num_altup + j];
-				for (int d = 0; d < embed_dim; d++) {
-					out_vec[d] += coef * in_vec[d];
-				}
-			}
-		}
-	}
-
-	// Final Residual Connection
-	for (int i = 0; i < num_altup; i++) {
-		// Slice points to the start of the contiguous data for state `i`.
-		MemType slice = mem_slice(&mixed_states, (size_t)i * batch_len * embed_dim);
-		dispatch_apply_residual_to_buffer(&input_states[i], &slice, &predicted_states[i],
-						  batch_len * embed_dim);
-	}
-
-	free_memtype(&normed_for_router);
-	free_memtype(&modalities);
-	free_memtype(&prediction_coefs);
-	free_memtype(&mixed_states);
-}
-
-// corrected_states: Output: The final 4 corrected states for this layer
-// predictions: Input: The 4 states from the 'P' step
-// final_active_output: Input: The result of the 'A' step
-void dispatch_altup_correct(struct TIEContext *ctx, MemType *corrected_states, const MemType *predictions,
-			    MemType *final_active_output, LayerWeights *l, int batch_len, int active_idx)
-{
-	const int embed_dim = ctx->model->embed_dim;
-	const int num_altup = ctx->model->altup_num_inputs;
-
-	MemType modalities, correction_coefs, innovation;
-	alloc_memtype(&modalities, GGML_TYPE_F32, batch_len * num_altup);
-	alloc_memtype(&correction_coefs, GGML_TYPE_F32, batch_len * num_altup);
-	alloc_memtype(&innovation, GGML_TYPE_F32, batch_len * embed_dim);
-
-	// Create a single buffer for all per-token calculations
-	MemType temp_token_vec;
-	alloc_memtype(&temp_token_vec, GGML_TYPE_F32, embed_dim);
-	float *temp_data = (float *)temp_token_vec.data;
-
-	// Process the Corrector Path ONE TOKEN AT A TIME
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * embed_dim;
-		MemType active_slice = mem_slice(final_active_output, offset);
-
-		// Normalize the single active token's vector
-		dispatch_rms_norm(&active_slice, &l->altup_router_norm, &temp_token_vec, embed_dim,
-				  ctx->model->norm_eps);
-
-		// Scale the result
-		float scale = 1.0f / (float)embed_dim;
-		for (int d = 0; d < embed_dim; d++) {
-			temp_data[d] *= scale;
-		}
-
-		// Compute modalities for this single token
-		MemType modalities_slice = mem_slice(&modalities, i * num_altup);
-		dispatch_mat_vec(ctx, &temp_token_vec, &l->altup_router, &modalities_slice, embed_dim, num_altup, true);
-
-		// Apply tanh to this token's modalities
-		float *mod_slice_data = (float *)modalities_slice.data;
-		for (int d = 0; d < num_altup; d++) {
-			mod_slice_data[d] = tanhf(mod_slice_data[d]);
-		}
-	}
-
-	// Compute correction coefficients for the whole batch
-	dispatch_mat_mat(ctx, &modalities, &l->altup_correct_coef, &correction_coefs, batch_len, num_altup, num_altup,
-			 true);
-
-	// Add 1.0 to all coefficients
-	float *coef = (float *)correction_coefs.data;
-	for (int i = 0; i < batch_len * num_altup; i++) {
-		coef[i] += 1.0f;
-	}
-
-	// Calculate the "innovation" vector for the whole batch
-	dispatch_subtract_to_buffer(final_active_output, &predictions[active_idx], &innovation, batch_len * embed_dim);
-
-	// Apply the correction to all states
-	const float *final_coefs_data = (const float *)correction_coefs.data;
-	for (int i = 0; i < num_altup; i++) {
-		for (int t = 0; t < batch_len; t++) {
-			const float *innovation_vec = (const float *)innovation.data + t * embed_dim;
-			const float *prediction_vec = (const float *)predictions[i].data + t * embed_dim;
-			float *corrected_vec = (float *)corrected_states[i].data + t * embed_dim;
-			const float coef_for_this_state = final_coefs_data[t * num_altup + i];
-			for (int d = 0; d < embed_dim; d++) {
-				corrected_vec[d] = prediction_vec[d] + innovation_vec[d] * coef_for_this_state;
-			}
-		}
-	}
-
-	free_memtype(&temp_token_vec);
-	free_memtype(&modalities);
-	free_memtype(&correction_coefs);
-	free_memtype(&innovation);
-}
-
-// This function calculates the final refinement_residual
-void dispatch_pli_gating(struct TIEContext *ctx,
-			 MemType *refinement_residual,	 // The final output buffer
-			 const MemType *active_state,	 // Input: The active state from the 'Corrected' array
-			 const MemType *per_layer_input, // Input: The 256-dim PLI vector for this layer
-			 LayerWeights *l, int batch_len)
-{
-	const int embed_dim = ctx->model->embed_dim;
-	const int pli_dim = ctx->model->pli_dim;
-	MemType scaled_active_state, gated_state, gelu_state, modulated_state, projected_state;
-
-	alloc_memtype(&scaled_active_state, GGML_TYPE_F32, batch_len * embed_dim);
-	alloc_memtype(&gated_state, GGML_TYPE_F32, batch_len * pli_dim);
-	alloc_memtype(&gelu_state, GGML_TYPE_F32, batch_len * pli_dim);
-	alloc_memtype(&modulated_state, GGML_TYPE_F32, batch_len * pli_dim);
-	alloc_memtype(&projected_state, GGML_TYPE_F32, batch_len * embed_dim);
-
-	// Scale the Active State
-	// This is an element-wise multiplication by the altup_correct_scale vector
-	dispatch_elementwise_mul_tensor(&scaled_active_state, active_state, &l->altup_correct_scale, batch_len,
-					embed_dim);
-
-	// Gate Projection (2048-dim -> 256-dim)
-	dispatch_mat_mat(ctx, &scaled_active_state, &l->inp_gate, &gated_state, batch_len, embed_dim, pli_dim, true);
-
-	// GeLU Activation
-	// The GeLU for this gate is special; it doesn't have an 'up' projection, so we pass NULL or a dummy.
-	// Let's create a temporary dummy buffer for the 'up' projection if needed.
-	memcpy(gelu_state.data, gated_state.data, batch_len * pli_dim * ggml_type_size(gated_state.type));
-	dispatch_gelu_inplace(&gelu_state, batch_len * pli_dim);
-
-	// Modulate by Per-Layer Input
-	// Element-wise multiplication: gelu_state * per_layer_input
-	dispatch_elementwise_mul(&modulated_state, &gelu_state, per_layer_input, batch_len * pli_dim);
-
-	// Project Back (256-dim -> 2048-dim)
-	dispatch_mat_mat(ctx, &modulated_state, &l->proj, &projected_state, batch_len, pli_dim, embed_dim, true);
-
-	// Final Norm
-	// The output is the final refinement_residual
-	for (int i = 0; i < batch_len; i++) {
-		MemType projected_slice = mem_slice(&projected_state, i * embed_dim);
-		MemType dest_slice = mem_slice(refinement_residual, i * embed_dim);
-
-		// Apply the norm to each token's vector individually
-		dispatch_rms_norm(&projected_slice, &l->post_norm, &dest_slice, embed_dim, ctx->model->norm_eps);
-	}
-
-	free_memtype(&scaled_active_state);
-	free_memtype(&gated_state);
-	free_memtype(&gelu_state);
-	free_memtype(&modulated_state);
-	free_memtype(&projected_state);
-}
-
-/* Extracts all per-layer inputs for a specific layer from the main PLI buffer.
- * The source buffer has a layout of [batch_len][num_layers][pli_dim].
- * The destination buffer will have a contiguous layout of [batch_len][pli_dim].
- */
-void get_per_layer_input_for_layer(MemType *dest_buffer,    // Pre-allocated destination buffer
-				   MemType *src_pli_buffer, // The main [batch_len, num_layers, pli_dim] buffer
-				   int layer_idx, int batch_len, int num_layers, int pli_dim)
-{
-	// Loop through each token in the batch
-	for (int i = 0; i < batch_len; i++) {
-		// Calculate the offset to find the source data for this token at the specified layer
-		size_t src_offset = (i * num_layers + layer_idx) * pli_dim;
-		MemType src_slice = mem_slice(src_pli_buffer, src_offset);
-
-		// Calculate the offset in the destination buffer
-		size_t dest_offset = i * pli_dim;
-		MemType dest_slice = mem_slice(dest_buffer, dest_offset);
-
-		// Copy the pli_dim (e.g., 256) floats from the source to the destination
-		memcpy(dest_slice.data, src_slice.data, pli_dim * ggml_type_size(dest_slice.type));
-	}
 }
 
 void prepare_next_token_standard(struct TIEContext *ctx, int next_token)
 {
 	if (ctx->model->use_mrope == 1) {
 		// Build the cos/sin table for the new token at ctx->kv_pos
-		// *before* the transformer layer runs.
 		text_rope_cache_extend(ctx, ctx->kv_pos);
 	}
 
-	// Create a slice for this token's position in the hidden_state buffer
 	MemType hidden_state_slice = mem_slice(&ctx->mem.hidden_state, 0);
 
 	dispatch_embedding_row(&ctx->model->token_embd, next_token, &hidden_state_slice, ctx->model->embed_dim);
 
 	if (ctx->model->interface.embedding_scale != NULL)
 		ctx->model->interface.embedding_scale(ctx, &hidden_state_slice);
-}
-
-void prepare_next_token_gemma3n(struct TIEContext *ctx, int next_token)
-{
-	const int embed_dim = ctx->model->embed_dim;
-	const int pli_dim = ctx->model->pli_dim;
-	const int num_layers = ctx->model->num_layers;
-
-	// Create a temporary buffer for the single token's scaled embedding
-	MemType single_token_embedding;
-	alloc_memtype(&single_token_embedding, GGML_TYPE_F32, embed_dim);
-
-	// Prepare the altup_hidden_states for the next step
-	dispatch_embedding_row(&ctx->model->token_embd, next_token, &single_token_embedding, embed_dim);
-	ctx->model->interface.embedding_scale(ctx, &single_token_embedding);
-
-	// Copy the base embedding to the first state
-	memcpy(ctx->mem.altup_hidden_states[0].data, single_token_embedding.data,
-	       embed_dim * ggml_type_size(single_token_embedding.type));
-
-	// Create the other 3 parallel states for this single token
-	create_altup_parallel_states(ctx, &ctx->mem.altup_hidden_states[0], 1, &ctx->model->altup_proj,
-				     ctx->mem.altup_hidden_states);
-
-	// Prepare the per_layer_inputs for the next step
-	MemType pli_from_lookup, pli_from_proj;
-	alloc_memtype(&pli_from_lookup, GGML_TYPE_F32, num_layers * pli_dim);
-	alloc_memtype(&pli_from_proj, GGML_TYPE_F32, num_layers * pli_dim);
-
-	// Get the raw PLI for the single token
-	calculate_and_deinterleave_pli_raw(ctx, &next_token, 1, &pli_from_lookup);
-
-	// Project the main embedding
-	dispatch_mat_mat(ctx, &single_token_embedding, &ctx->model->per_layer_model_proj, &pli_from_proj, 1, embed_dim,
-			 num_layers * pli_dim, true);
-
-	// Scale and Norm the projected component
-	float scale = 1.0f / sqrtf((float)embed_dim);
-	float *proj_data = (float *)pli_from_proj.data;
-	for (size_t i = 0; i < (size_t)num_layers * pli_dim; i++) {
-		proj_data[i] *= scale;
-	}
-
-	for (int i = 0; i < num_layers; i++) {
-		MemType slice = mem_slice(&pli_from_proj, i * pli_dim);
-		dispatch_rms_norm(&slice, &ctx->model->per_layer_proj_norm, &slice, pli_dim, ctx->model->norm_eps);
-	}
-
-	// Add the two sources into the final persistent buffer.
-	dispatch_apply_residual_to_buffer(&pli_from_lookup, &pli_from_proj, &ctx->mem.per_layer_inputs,
-					  num_layers * pli_dim);
-
-	// Apply the final scale factor
-	scale = 1.0f / sqrtf(2.0f);
-	float *final_data = (float *)ctx->mem.per_layer_inputs.data;
-	for (size_t i = 0; i < (size_t)num_layers * pli_dim; i++) {
-		final_data[i] *= scale;
-	}
-
-	free_memtype(&single_token_embedding);
-	free_memtype(&pli_from_lookup);
-	free_memtype(&pli_from_proj);
 }
 
 void process_embeddings(struct TIEContext *ctx, MemType *embeddings, size_t n_tokens)
@@ -1840,563 +997,3 @@ void process_embeddings(struct TIEContext *ctx, MemType *embeddings, size_t n_to
 	// Update the KV cache position.
 	ctx->kv_pos += n_tokens;
 }
-
-// Process prompt tokens (Gemma-3n)
-void process_prompt_gemma3n(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len)
-{
-	const int embed_dim = ctx->model->embed_dim;
-	const int pli_dim = ctx->model->pli_dim;
-	const int num_layers = ctx->model->num_layers;
-
-	// Allocate all necessary buffers
-	MemType scaled_token_embeddings;
-	alloc_memtype(&scaled_token_embeddings, GGML_TYPE_F32, prompt_len * embed_dim);
-
-	MemType pli_from_lookup_scaled;
-	alloc_memtype(&pli_from_lookup_scaled, GGML_TYPE_F32, prompt_len * num_layers * pli_dim);
-
-	MemType pli_from_projection;
-	alloc_memtype(&pli_from_projection, GGML_TYPE_F32, prompt_len * num_layers * pli_dim);
-
-	// Temporary buffer for de-interleaving the projected PLI
-	MemType pli_from_projection_deinterleaved;
-	alloc_memtype(&pli_from_projection_deinterleaved, GGML_TYPE_F32, prompt_len * num_layers * pli_dim);
-
-	// Get the raw token embeddings
-	for (int i = 0; i < prompt_len; i++) {
-		MemType slice = mem_slice(&scaled_token_embeddings, i * embed_dim);
-		dispatch_embedding_row(&ctx->model->token_embd, prompt_tokens[i], &slice, embed_dim);
-	}
-
-	// Scale the embeddings
-	for (int i = 0; i < prompt_len; i++) {
-		MemType slice = mem_slice(&scaled_token_embeddings, i * embed_dim);
-		ctx->model->interface.embedding_scale(ctx, &slice);
-	}
-
-	// Create parallel AltUp states
-	memcpy(ctx->mem.altup_hidden_states[0].data, scaled_token_embeddings.data,
-	       prompt_len * embed_dim * ggml_type_size(scaled_token_embeddings.type));
-	create_altup_parallel_states(ctx, &ctx->mem.altup_hidden_states[0], prompt_len, &ctx->model->altup_proj,
-				     ctx->mem.altup_hidden_states);
-
-	// Look up PLI from its dedicated table (creates [B, L, D] layout)
-	calculate_and_deinterleave_pli_raw(ctx, prompt_tokens, prompt_len, &pli_from_lookup_scaled);
-
-	// Project the main embeddings (creates flat [B, L*D] layout)
-	dispatch_mat_mat(ctx, &scaled_token_embeddings, &ctx->model->per_layer_model_proj, &pli_from_projection,
-			 prompt_len, embed_dim, num_layers * pli_dim, true);
-
-	// Scale and Norm the projected embeddings (still in flat layout)
-	float scale = 1.0f / sqrtf((float)embed_dim);
-	float *proj_data = (float *)pli_from_projection.data;
-	for (size_t i = 0; i < prompt_len * num_layers * pli_dim; i++) {
-		proj_data[i] *= scale;
-	}
-
-	int num_vectors_to_norm = prompt_len * num_layers;
-	for (int i = 0; i < num_vectors_to_norm; i++) {
-		MemType vector_slice = mem_slice(&pli_from_projection, i * pli_dim);
-		dispatch_rms_norm(&vector_slice, &ctx->model->per_layer_proj_norm, &vector_slice, pli_dim,
-				  ctx->model->norm_eps);
-	}
-
-	// De-interleave the projected PLI to match the lookup PLI's layout
-	for (int i = 0; i < prompt_len; i++) {
-		for (int l = 0; l < num_layers; l++) {
-			size_t src_offset = (i * num_layers + l) * pli_dim;
-			MemType src_slice = mem_slice(&pli_from_projection, src_offset);
-
-			size_t dest_offset = (i * num_layers + l) * pli_dim;
-			MemType dest_slice = mem_slice(&pli_from_projection_deinterleaved, dest_offset);
-
-			memcpy(dest_slice.data, src_slice.data, pli_dim * ggml_type_size(dest_slice.type));
-		}
-	}
-
-	// Add the two sources together (now with matching layouts)
-	dispatch_apply_residual_to_buffer(&pli_from_lookup_scaled, &pli_from_projection_deinterleaved,
-					  &ctx->mem.per_layer_inputs, prompt_len * num_layers * pli_dim);
-
-	// Apply the final scale
-	scale = 1.0f / sqrtf(2.0f);
-	float *final_data = (float *)ctx->mem.per_layer_inputs.data;
-	for (size_t i = 0; i < prompt_len * num_layers * pli_dim; i++) {
-		final_data[i] *= scale;
-	}
-
-	for (int l = 0; l < num_layers; l++) {
-		ctx->model->interface.transformer_layer(ctx, l, prompt_len);
-	}
-
-	ctx->kv_pos += prompt_len;
-
-	free_memtype(&scaled_token_embeddings);
-	free_memtype(&pli_from_lookup_scaled);
-	free_memtype(&pli_from_projection);
-	free_memtype(&pli_from_projection_deinterleaved); // Don't forget to free the new buffer
-}
-
-// Function to calculate per-token magnitude
-void calculate_per_token_magnitude(float *magnitudes, const MemType *state, size_t num_tokens, int dim)
-{
-	for (size_t t = 0; t < num_tokens; t++) {
-		const float *token_vec = (const float *)state->data + t * dim;
-		float ss = 0.0;
-		for (int i = 0; i < dim; i++) {
-			ss += token_vec[i] * token_vec[i];
-		}
-
-		// Divide by the dimension 'dim' to calculate the mean of squares, then take the square root.
-		magnitudes[t] = sqrt(ss / dim);
-	}
-}
-
-// Function to create the parallel states
-void create_altup_parallel_states(struct TIEContext *ctx, MemType *base_state, size_t prompt_len,
-				  Tensor *altup_proj_tensor, MemType *destination)
-{
-	const int embed_dim = ctx->model->embed_dim;
-
-	// Get a pointer to the single, large altup_proj tensor
-	size_t matrix_size_bytes = (size_t)embed_dim * embed_dim * ggml_type_size(altup_proj_tensor->mem.type);
-
-	// Loop and create the other parallel states (state[1] through state[3])
-	for (int i = 1; i < ctx->model->altup_num_inputs; i++) {
-		MemType *dest_state = &destination[i];
-
-		// Create a temporary "view" of the i-th matrix within the flat tensor
-		Tensor altup_proj_slice = *altup_proj_tensor;
-		size_t offset = (size_t)(i - 1) * matrix_size_bytes;
-		altup_proj_slice.mem.data = (uint8_t *)altup_proj_tensor->mem.data + offset;
-
-		// Project: dest_state = base_state @ altup_projection_slice
-		dispatch_mat_mat(ctx, base_state, &altup_proj_slice, dest_state, prompt_len, embed_dim, embed_dim,
-				 true);
-
-		for (size_t t = 0; t < prompt_len; t++) {
-			const float *base_vec = (const float *)base_state->data + t * embed_dim;
-			float *dest_vec = (float *)dest_state->data + t * embed_dim;
-
-			// Calculate sum of squares for both vectors
-			float ss_base = 0.0;
-			float ss_dest = 0.0;
-			for (int d = 0; d < embed_dim; d++) {
-				ss_base += base_vec[d] * base_vec[d];
-				ss_dest += dest_vec[d] * dest_vec[d];
-			}
-
-			// Calculate the final scaling factor directly
-			const float scale_factor = sqrtf(ss_base / (ss_dest + 1e-12f));
-
-			// Apply the scaling
-			for (int d = 0; d < embed_dim; d++) {
-				dest_vec[d] *= scale_factor;
-			}
-		}
-	}
-}
-
-void calculate_and_deinterleave_pli_raw(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len,
-					MemType *dest_buffer)
-{
-	const int pli_dim = ctx->model->pli_dim;
-	const int num_layers = ctx->model->num_layers;
-
-	// Allocate a temporary buffer to hold the giant (e.g., 7680-dim) vector for ONE token.
-	MemType temp_pli_vector;
-	alloc_memtype(&temp_pli_vector, GGML_TYPE_F32, num_layers * pli_dim);
-
-	// Loop through each token in the prompt.
-	for (int i = 0; i < prompt_len; i++) {
-		int token_id = prompt_tokens[i];
-
-		// Look up the full (e.g., 7680-dim) vector for the current token from the PLI embedding table.
-		dispatch_embedding_row(&ctx->model->per_layer_token_embd, token_id, &temp_pli_vector,
-				       num_layers * pli_dim);
-
-		// De-interleave the temporary vector into the final destination buffer.
-		// This loop takes the stacked vector (e.g., [layer0_data, layer1_data, ...])
-		// and distributes it into the final [token, layer, dim] layout.
-		for (int l = 0; l < num_layers; l++) {
-			// Source: The l-th slice of the temporary vector.
-			MemType src_slice = mem_slice(&temp_pli_vector, l * pli_dim);
-
-			// Destination: The correct spot in the final buffer for token `i` at layer `l`.
-			size_t dest_offset = (i * num_layers * pli_dim) + (l * pli_dim);
-			MemType dest_slice = mem_slice(dest_buffer, dest_offset);
-
-			// Copy the 256 floats for this layer.
-			memcpy(dest_slice.data, src_slice.data, pli_dim * ggml_type_size(dest_slice.type));
-
-			float scale = sqrtf(256.0f);
-			float *data = (float *)dest_slice.data;
-			for (size_t d = 0; d < pli_dim; d++) {
-				data[d] *= scale;
-			}
-		}
-	}
-
-	free_memtype(&temp_pli_vector);
-}
-
-void post_process_altup_states(struct TIEContext *ctx,
-			       MemType *final_hidden_state, // Output: The single, final vector
-			       MemType *final_altup_states, // Input: The array of 4 states
-			       size_t n_tokens)
-{
-	size_t last_token_idx = n_tokens - 1;
-	const int embed_dim = ctx->model->embed_dim;
-	const int num_altup = ctx->model->altup_num_inputs;
-
-	// The active index is always 0 for Gemma-3N
-	const int active_idx = 0;
-
-	// Temporary buffer to hold the final versions of each state before averaging
-	MemType temp_states[num_altup];
-	for (int i = 0; i < num_altup; i++) {
-		alloc_memtype(&temp_states[i], GGML_TYPE_F32, embed_dim);
-	}
-
-	//  The active state (index 0) is our "base". Copy its last token's data directly.
-	MemType base_state_slice = mem_slice(&final_altup_states[active_idx], last_token_idx * embed_dim);
-	memcpy(temp_states[active_idx].data, base_state_slice.data, embed_dim * sizeof(float));
-
-	// Un-Project and Rescale the INACTIVE states (1, 2, 3)
-	float target_magnitude;
-	calculate_per_token_magnitude(&target_magnitude, &base_state_slice, 1, embed_dim);
-
-	size_t matrix_size_bytes =
-		(size_t)embed_dim * embed_dim * ggml_type_size(ctx->model->altup_unembd_proj.mem.type);
-
-	for (int i = 0; i < num_altup - 1; i++) {
-		// The inactive states are 1, 2, 3. The projection matrices are 0, 1, 2.
-		int inactive_state_idx = i + 1;
-		int proj_matrix_idx = i;
-
-		MemType *dest_state = &temp_states[inactive_state_idx];
-		MemType src_slice = mem_slice(&final_altup_states[inactive_state_idx], last_token_idx * embed_dim);
-
-		Tensor unembd_proj_slice = ctx->model->altup_unembd_proj;
-		unembd_proj_slice.mem.data =
-			(uint8_t *)unembd_proj_slice.mem.data + (size_t)proj_matrix_idx * matrix_size_bytes;
-
-		dispatch_mat_vec(ctx, &src_slice, &unembd_proj_slice, dest_state, embed_dim, embed_dim, false);
-
-		float new_magnitude;
-		calculate_per_token_magnitude(&new_magnitude, dest_state, 1, embed_dim);
-		float scale_factor = target_magnitude / (new_magnitude + 1e-12f);
-
-		float *dest_data = (float *)dest_state->data;
-		for (int d = 0; d < embed_dim; d++) {
-			dest_data[d] *= scale_factor;
-		}
-	}
-
-	// Average All States into the final_hidden_state buffer
-	float inv_num_altup = 1.0f / (float)num_altup;
-	float *final_data = (float *)final_hidden_state->data;
-	memset(final_data, 0, embed_dim * sizeof(float));
-
-	for (int i = 0; i < num_altup; i++) {
-		const float *src_data = (const float *)temp_states[i].data;
-		for (int d = 0; d < embed_dim; d++) {
-			final_data[d] += src_data[d]; // Sum first...
-		}
-	}
-
-	// Scale once at the end.
-	for (int d = 0; d < embed_dim; d++) {
-		final_data[d] *= inv_num_altup;
-	}
-
-	for (int i = 0; i < num_altup; i++) {
-		free_memtype(&temp_states[i]);
-	}
-}
-
-int transformer_layer_gemma3n(struct TIEContext *ctx, int layer_idx, int batch_len)
-{
-	LayerWeights *l = &ctx->model->layers[layer_idx];
-	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
-	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
-	AttentionType attn_type = ATTN_TYPE_LOCAL;
-	RopeCacheType *active_rope_cache = ctx->model->rope_cache_local;
-	const int pli_dim = ctx->model->pli_dim;
-	const int embed_dim = ctx->model->embed_dim;
-	const int DATA_ACTIVE_IDX = 0; // The first state is used for the main computation path
-	int sink_len = 4;
-
-
-	// The absolute starting position for this batch
-	int start_pos = ctx->kv_pos;
-
-	// Determine the attention and rope cache type for the current layer
-	if ((layer_idx + 1) % 5 == 0) {
-		attn_type = ATTN_TYPE_GLOBAL;
-		active_rope_cache = ctx->model->rope_cache_global; // Use the global cache
-	}
-
-	// Gemma-3n KV sharing logic
-	int first_kv_shared_layer_idx = ctx->model->num_layers - ctx->model->shared_kv_layers;
-	bool is_kv_shared_layer = (layer_idx >= first_kv_shared_layer_idx);
-
-	int kv_source_layer_idx = layer_idx;
-	bool store_full_length_kv = false;
-
-	if (is_kv_shared_layer) {
-		// For shared layers, find the last non-shared layer of the same type
-		int my_type = attn_type;
-		kv_source_layer_idx = -1;
-		for (int i = first_kv_shared_layer_idx - 1; i >= 0; --i) {
-			int prev_type = ((i + 1) % 5 == 0) ? ATTN_TYPE_GLOBAL : ATTN_TYPE_LOCAL;
-			if (prev_type == my_type) {
-				kv_source_layer_idx = i;
-				break;
-			}
-		}
-		if (kv_source_layer_idx < 0) {
-			fprintf(stderr, "[ERROR] No kv_source_layer_idx found for layer %d type %d\n", layer_idx,
-				my_type);
-			exit(1);
-		}
-	} else {
-		// For non-shared layers, decide if this is the last non-shared layer of its type
-		int my_type = attn_type;
-		store_full_length_kv = true;
-		for (int i = layer_idx + 1; i < first_kv_shared_layer_idx; ++i) {
-			int next_type = ((i + 1) % 5 == 0) ? ATTN_TYPE_GLOBAL : ATTN_TYPE_LOCAL;
-			if (next_type == my_type) {
-				store_full_length_kv = false;
-				break;
-			}
-		}
-	}
-
-	dispatch_altup_predict(ctx, ctx->mem.altup_predicted_states, ctx->mem.altup_hidden_states, l, batch_len,
-			       DATA_ACTIVE_IDX);
-
-	// Save First Residual: residual_1 = active_prediction.
-	memcpy(ctx->mem.residual_stratch.data, ctx->mem.altup_predicted_states[DATA_ACTIVE_IDX].data,
-	       batch_len * ctx->model->embed_dim * sizeof(float));
-
-	// ============ Attention Block ============
-	// RMSNorm on input
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-
-		// Create slices for the specific token being processed
-		MemType input_slice = mem_slice(&ctx->mem.altup_predicted_states[DATA_ACTIVE_IDX], offset);
-		MemType normed_slice = mem_slice(&ctx->mem.normed_qkv_input, offset);
-
-		dispatch_rms_norm(&input_slice, &l->attn_norm, &normed_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
-
-	MemType laurel_output;
-	alloc_memtype(&laurel_output, GGML_TYPE_F32, batch_len * ctx->model->embed_dim);
-
-	dispatch_laurel(ctx, &laurel_output, &ctx->mem.normed_qkv_input, l, batch_len);
-
-	// Compute Q/K/V Matrices
-	dispatch_mat_mat(ctx, &ctx->mem.normed_qkv_input, &l->attn_q, &ctx->mem.Q, batch_len, ctx->model->embed_dim,
-			 q_dim, true);
-
-	if (!is_kv_shared_layer) {
-		// For non shared layers, compute K and V normally
-		dispatch_mat_mat(ctx, &ctx->mem.normed_qkv_input, &l->attn_k, &ctx->mem.K, batch_len,
-				 ctx->model->embed_dim, kv_dim, true);
-
-		dispatch_mat_mat(ctx, &ctx->mem.normed_qkv_input, &l->attn_v, &ctx->mem.V, batch_len,
-				 ctx->model->embed_dim, kv_dim, true);
-	}
-
-	// Apply RoPE
-	for (int i = 0; i < batch_len; i++) {
-		// The absolute position for the current token in the batch
-		int absolute_pos = start_pos + i;
-
-		for (int h = 0; h < ctx->model->num_heads; h++) {
-			MemType Q_slice = mem_slice(&ctx->mem.Q, (size_t)i * q_dim + h * ctx->model->head_dim);
-
-			if (l->attn_q_norm.mem.data) {
-				dispatch_rms_norm(&Q_slice, &l->attn_q_norm, &Q_slice, ctx->model->head_dim,
-						  ctx->model->norm_eps);
-			}
-
-			// Use the absolute position for RoPE
-			dispatch_apply_rope_cache(active_rope_cache, &Q_slice, absolute_pos, ctx->model->head_dim);
-		}
-
-		if (!is_kv_shared_layer) {
-
-			for (int h = 0; h < ctx->model->num_kv_heads; h++) {
-				MemType K_slice = mem_slice(&ctx->mem.K, (size_t)i * kv_dim + h * ctx->model->head_dim);
-
-				if (l->attn_k_norm.mem.data) {
-					dispatch_rms_norm(&K_slice, &l->attn_k_norm, &K_slice, ctx->model->head_dim,
-							  ctx->model->norm_eps);
-				}
-
-				// Use the absolute position for RoPE
-				dispatch_apply_rope_cache(active_rope_cache, &K_slice, absolute_pos,
-							  ctx->model->head_dim);
-			}
-
-			for (int h = 0; h < ctx->model->num_kv_heads; h++) {
-				MemType V_slice = mem_slice(&ctx->mem.V, (size_t)i * kv_dim + h * ctx->model->head_dim);
-
-				dispatch_rms_norm_weightless(&V_slice, ctx->model->head_dim, ctx->model->norm_eps);
-			}
-		}
-	}
-
-	// Store K/V to cache
-	if (!is_kv_shared_layer) {
-		dispatch_store_KV_cache(ctx, layer_idx, start_pos, batch_len, sink_len);
-	}
-
-	// Multi-Head Attention Calculation
-	attention(ctx, batch_len, layer_idx, kv_source_layer_idx, start_pos, attn_type, attention_worker, sink_len);
-
-	// Output projection
-	dispatch_mat_mat(ctx, &ctx->mem.attn_output, &l->attn_out, &ctx->mem.attn_proj_output, batch_len, q_dim,
-			 ctx->model->embed_dim, true);
-
-	// Apply POST-ATTENTION norm
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-
-		MemType attn_proj_slice = mem_slice(&ctx->mem.attn_proj_output, offset);
-
-		dispatch_rms_norm(&attn_proj_slice, &l->post_attn_norm, &attn_proj_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
-
-	// Add the post-normed attention output to the original residual
-	dispatch_apply_residual(&ctx->mem.residual_stratch, &ctx->mem.attn_proj_output,
-				batch_len * ctx->model->embed_dim);
-
-	// Mix LAUREL and Attention: Compute attn_laurel_mix = (attn_with_residual + laurel_out) * (1.0f / sqrtf(2.0f)).
-	MemType attn_laurel_mix;
-	alloc_memtype(&attn_laurel_mix, GGML_TYPE_F32, batch_len * ctx->model->embed_dim);
-
-	float scale = 1.0f / sqrtf(2.0f);
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-
-		MemType attn_laurel_mix_slice = mem_slice(&attn_laurel_mix, offset);
-		MemType residual_stratch_slice = mem_slice(&ctx->mem.residual_stratch, offset);
-		MemType laurel_output_slice = mem_slice(&laurel_output, offset);
-
-		float *attn_laurel_mix_out = (float *)attn_laurel_mix_slice.data;
-		float *residual_stratch_data = (float *)residual_stratch_slice.data;
-		float *laurel_output_data = (float *)laurel_output_slice.data;
-
-		for (int d = 0; d < ctx->model->embed_dim; d++)
-			attn_laurel_mix_out[d] = (residual_stratch_data[d] + laurel_output_data[d]) * scale;
-	}
-
-	// Save Second Residual: residual_2 = attn_laurel_mix.
-	memcpy(ctx->mem.residual_stratch.data, attn_laurel_mix.data, batch_len * ctx->model->embed_dim * sizeof(float));
-
-	// ============ FFN Block ============
-	// RMSNorm
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-
-		// Create slices for the specific token being processed
-		MemType attn_laurel_mix_slice = mem_slice(&attn_laurel_mix, offset);
-		MemType normed_ffn_input_slice = mem_slice(&ctx->mem.normed_ffn_input, offset);
-
-		dispatch_rms_norm(&attn_laurel_mix_slice, &l->ffn_norm, &normed_ffn_input_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
-
-	// Gate + Up projections
-	dispatch_mat_mat(ctx, &ctx->mem.normed_ffn_input, &l->ffn_gate, &ctx->mem.gate_proj_output, batch_len,
-			 ctx->model->embed_dim, ctx->model->ffn_dim, true);
-	dispatch_mat_mat(ctx, &ctx->mem.normed_ffn_input, &l->ffn_up, &ctx->mem.up_proj_output, batch_len,
-			 ctx->model->embed_dim, ctx->model->ffn_dim, true);
-
-	if (layer_idx < 10) {
-		for (int i = 0; i < batch_len; i++) {
-			// Get a slice for the current token's gate vector
-			MemType gate_slice = mem_slice(&ctx->mem.gate_proj_output, i * ctx->model->ffn_dim);
-
-			// Apply sparsity to this token's slice only
-			dispatch_gaussian_topk(&gate_slice, ctx->model->ffn_dim);
-		}
-	}
-
-	/* Call the interface activation function */
-	dispatch_geglu_activation(&ctx->mem.gate_proj_output, &ctx->mem.up_proj_output,
-				  batch_len * ctx->model->ffn_dim);
-
-	// Down projection
-	dispatch_mat_mat(ctx, &ctx->mem.gate_proj_output, &l->ffn_down, &ctx->mem.ffn_down_output, batch_len,
-			 ctx->model->ffn_dim, ctx->model->embed_dim, true);
-
-	// Apply POST-FFN norm.
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-		MemType ffn_down_slice = mem_slice(&ctx->mem.ffn_down_output, offset);
-
-		dispatch_rms_norm(&ffn_down_slice, &l->post_ffw_norm, &ffn_down_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
-
-	// Second Residual Add.
-	// Add the post-normed FFN output to the residual
-	dispatch_apply_residual(&ctx->mem.residual_stratch, &ctx->mem.ffn_down_output,
-				batch_len * ctx->model->embed_dim);
-
-	// Create a temporary buffer to build the final output for THIS layer
-	MemType final_layer_output[ctx->model->altup_num_inputs];
-	for (int i = 0; i < ctx->model->altup_num_inputs; i++) {
-		alloc_memtype(&final_layer_output[i], GGML_TYPE_F32, batch_len * embed_dim);
-	}
-
-	// ctx->mem.residual_stratch is the final active output.
-	dispatch_altup_correct(ctx, final_layer_output, ctx->mem.altup_predicted_states, &ctx->mem.residual_stratch, l,
-			       batch_len, DATA_ACTIVE_IDX);
-
-	// The Final Gating and Refinement
-	MemType refinement_residual;
-	alloc_memtype(&refinement_residual, GGML_TYPE_F32, batch_len * embed_dim);
-
-	// Create a buffer to hold the contiguous per-layer inputs for this layer
-	MemType per_layer_input_for_layer;
-	alloc_memtype(&per_layer_input_for_layer, GGML_TYPE_F32, batch_len * pli_dim);
-
-	// Gather the scattered PLI data
-	get_per_layer_input_for_layer(&per_layer_input_for_layer, &ctx->mem.per_layer_inputs, layer_idx, batch_len,
-				      ctx->model->num_layers, pli_dim);
-
-	// Calculate the refinement_residual using the active slice from the corrected states
-	dispatch_pli_gating(
-		ctx, &refinement_residual,
-		&final_layer_output[DATA_ACTIVE_IDX], // The input is ALWAYS the active data path's corrected state
-		&per_layer_input_for_layer, l, batch_len);
-
-	// Apply the refinement to the INACTIVE states
-	for (int j = 0; j < ctx->model->altup_num_inputs; j++) {
-		if (j == DATA_ACTIVE_IDX)
-			continue;
-
-		dispatch_apply_residual(&final_layer_output[j], &refinement_residual, batch_len * embed_dim);
-	}
-
-	// Commit the temporary buffer back to the main state
-	for (int i = 0; i < ctx->model->altup_num_inputs; i++) {
-		memcpy(ctx->mem.altup_hidden_states[i].data, final_layer_output[i].data,
-		       batch_len * embed_dim * ggml_type_size(final_layer_output[i].type));
-
-		free_memtype(&final_layer_output[i]);
-	}
-
-	free_memtype(&refinement_residual);
-	free_memtype(&per_layer_input_for_layer);
-
-	return 0;
-};

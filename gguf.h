@@ -112,6 +112,13 @@ typedef struct {
 	uint8_t qs[128];    // Packed 4-bit quantized weights
 } block_q4_k;
 
+#define QK5_0 32
+typedef struct {
+	uint16_t d;       // Scale (2 bytes)
+	uint8_t qh[4];       // High bits (4 bytes)
+	uint8_t qs[16];      // Low bits (16 bytes, 2 nibbles each)
+} block_q5_0;
+
 #define QK8_0 32
 typedef struct {
 	uint16_t d;	  // delta

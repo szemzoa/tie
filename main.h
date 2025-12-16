@@ -110,8 +110,8 @@ struct TIEContext {
 	Tokenizer tokenizer;
 	ToolContext tool_context;
 
-//	volatile sig_atomic_t sigint_flag;
-//	volatile sig_atomic_t stop_generation;
+	//	volatile sig_atomic_t sigint_flag;
+	//	volatile sig_atomic_t stop_generation;
 };
 
 #endif
