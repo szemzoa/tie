@@ -716,7 +716,8 @@ void gguf_model_metadata_dump(struct GGUFModel *gguf)
 			break;
 
 		case GGUF_METADATA_VALUE_TYPE_STRING:
-			printf("str\t = %.*s\n", 64, (char *)metadata->data);
+			printf("str\t = %.*s\n", 128, (char *)metadata->data);
+			//			printf("str\t = %s\n", (char *)metadata->data);
 			break;
 
 		case GGUF_METADATA_VALUE_TYPE_ARRAY:
@@ -1240,7 +1241,7 @@ int gguf_model_read_token_merges(struct TIEContext *ctx, struct GGUFModel *gguf,
 
 	gguf->fptr = metadata->arr_offset;
 	ctx->model->merges_size = metadata->size;
-	//printf("model merges_size: %llu\n", ctx->model->merges_size);
+	// printf("model merges_size: %llu\n", ctx->model->merges_size);
 
 	for (i = 0; i < metadata->size; i++) {
 		str_len = *(uint64_t *)gguf->fptr;

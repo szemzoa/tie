@@ -29,7 +29,8 @@ int tools_init(struct TIEContext *ctx)
 
 	// Architecture Detection & Token Lookup
 	if (ctx->gguf_text->arch == ARCH_QWEN3 || ctx->gguf_text->arch == ARCH_QWEN3_MOE
-	    || ctx->gguf_text->arch == ARCH_QWEN3VL || ctx->gguf_text->arch == ARCH_QWEN3VL_MOE || ctx->gguf_text->arch == ARCH_GRANITE) {
+	    || ctx->gguf_text->arch == ARCH_QWEN3VL || ctx->gguf_text->arch == ARCH_QWEN3VL_MOE
+	    || ctx->gguf_text->arch == ARCH_GRANITE) {
 
 		tc->token_start_id = vocab_lookup_token_id(ctx->tokenizer.root, "<tool_call>", 11);
 		tc->token_end_id = vocab_lookup_token_id(ctx->tokenizer.root, "</tool_call>", 12);
@@ -48,9 +49,9 @@ int tools_init(struct TIEContext *ctx)
 
 void tools_release(struct TIEContext *ctx)
 {
-//	ToolContext *tc = &ctx->tool_context;
-//	if (tc->result_prompt)
-//		free(tc->result_prompt);
+	//	ToolContext *tc = &ctx->tool_context;
+	//	if (tc->result_prompt)
+	//		free(tc->result_prompt);
 }
 
 // Execution Logic
@@ -132,22 +133,31 @@ bool tools_process_token(struct TIEContext *ctx, int token)
 // Build the architecture-specific system prompt
 char *build_system_prompt_qwen3(struct TIEContext *ctx)
 {
-	// For Qwen, this is the standard tool prompt
+	/*
+		// For Qwen, this is the standard tool prompt
+		return strdup(
+			"<|im_start|>system\n"
+			"You are a helpful assistant.\n"
+			"\n# Tools\n"
+			"You may call one or more functions to assist with the user query.\n"
+			"You are provided with function signatures within <tools></tools> XML tags:\n"
+			"<tools>\n"
+			"{\"type\": \"function\", \"function\": { \"name\": \"set_lamp_state\", \"description\": \"Turn
+	   lamp on/off\", \"parameters\": { \"type\": \"object\", \"properties\": { \"state\": {\"type\": \"string\",
+	   \"enum\": [\"on\", \"off\"]} }, \"required\": [\"state\"] } }}\n"
+			"</tools>\n"
+			"\n# Tool Instructions\n"
+			"For each function call, return a json object with function name and arguments within
+	   <tool_call></tool_call> XML tags:\n"
+			"<tool_call>\n"
+			"{\"name\": <function-name>, \"arguments\": <args-json-object>}\n"
+			"</tool_call>\n"
+			"<|im_end|>\n");
+	*/
+
 	return strdup(
 		"<|im_start|>system\n"
-		"You are a helpful assistant.\n"
-		"\n# Tools\n"
-		"You may call one or more functions to assist with the user query.\n"
-		"You are provided with function signatures within <tools></tools> XML tags:\n"
-		"<tools>\n"
-		"{\"type\": \"function\", \"function\": { \"name\": \"set_lamp_state\", \"description\": \"Turn lamp on/off\", \"parameters\": { \"type\": \"object\", \"properties\": { \"state\": {\"type\": \"string\", \"enum\": [\"on\", \"off\"]} }, \"required\": [\"state\"] } }}\n"
-		"</tools>\n"
-		"\n# Tool Instructions\n"
-		"For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n"
-		"<tool_call>\n"
-		"{\"name\": <function-name>, \"arguments\": <args-json-object>}\n"
-		"</tool_call>\n"
-		"<|im_end|>\n");
+		"You are a helpful and harmless assistant.<|im_end|>\n");
 }
 
 char *build_system_prompt_gemma3(struct TIEContext *ctx)

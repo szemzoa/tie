@@ -14,7 +14,7 @@ CC_ARGS= -g -O3 -mfma -mavx2 -ffast-math -fno-associative-math -march=native -ff
 INCLUDE_DIRS= -I ./
 
 LIB_DIR=
-LIBS= -lm -lpthread -lreadline
+LIBS= -lm -lpthread
 
 CROSS=
 STRIP=$(CROSS)strip

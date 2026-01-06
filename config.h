@@ -1,10 +1,9 @@
 #ifndef __CONFIG_H__
 #define __CONFIG_H__
 
-//#define DUMP_MODEL_METADATA
-//#define DEBUG_TENSORS
-//#define DEBUG_TOKENS
-
+#define DUMP_MODEL_METADATA
+// #define DEBUG_TENSORS
+// #define DEBUG_TOKENS
 
 #define CONFIG_ENABLE_AVX2
 
@@ -30,9 +29,16 @@
 #define CLR_DIM "\033[2m"
 
 #define CLR_RED "\033[31m"
-#define CLR_GREEN "\033[32m"
+// #define CLR_RED "\e[38;5;160m"
+
+// #define CLR_GREEN "\033[32m"
+#define CLR_GREEN "\e[38;5;118m"
+
 #define CLR_YELLOW "\033[33m"
-#define CLR_BLUE "\033[34m"
+
+// #define CLR_BLUE "\033[34m"
+#define CLR_BLUE "\e[38;5;39m"
+
 #define CLR_MAGENTA "\033[35m"
 #define CLR_CYAN "\033[36m"
 #define CLR_WHITE "\033[37m"
@@ -40,7 +46,7 @@
 
 // helpers
 #define USER_PROMPT CLR_BOLD CLR_GREEN
-#define ASSISTANT_OUT CLR_BOLD CLR_CYAN
+#define ASSISTANT_OUT CLR_BLUE
 #define DEBUG CLR_DIM CLR_YELLOW
 #define THINK CLR_GRAY
 #define ERR CLR_BOLD CLR_RED

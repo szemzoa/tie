@@ -1314,12 +1314,12 @@ void language_model_info(struct TIEContext *ctx)
 	ModelParams *params = &ctx->model->def->params;
 
 	printf("Initialized %s language model with the following configuration:\n", ctx->model->def->name);
-	printf("Embed Dim: %d, Layers: %d, Heads: %d, KV Heads: %d, Head Dim: %d, Shared KV layers: %u\n",
+	printf("Embed Dim: %d\nLayers: %d\nHeads: %d\nKV Heads: %d\nHead Dim: %d\nShared KV layers: %u\n",
 	       ctx->model->embed_dim, ctx->model->num_layers, ctx->model->num_heads, ctx->model->num_kv_heads,
 	       ctx->model->head_dim, ctx->model->shared_kv_layers);
-	printf("FFN Dim: %d, Rope Base: %.1f, Seq Len: %d, Vocab: %llu\n", ctx->model->ffn_dim,
+	printf("FFN Dim: %d\nRope Base: %.1f\nSeq Len: %d\nVocab: %llu\n", ctx->model->ffn_dim,
 	       ctx->model->rope_freq_base, ctx->model->seq_length, ctx->model->vocab_size);
-	printf("Yarn Scale: %.2f, Eps: %f, Rope_scale: %.1f, Sliding_window: %u\n", ctx->model->yarn_scale_factor,
+	printf("Yarn Scale: %.2f\nEps: %f\nRope_scale: %.1f\nSliding_window: %u\n", ctx->model->yarn_scale_factor,
 	       ctx->model->norm_eps, ctx->model->rope_scale_factor, ctx->model->attn_sliding_window);
 	if (ctx->model->is_moe == 1)
 		printf("Expert Count: %d, Expert Used Count: %d, Expert FFN Dim: %d, Expert shared FFN Dim: %d, Expert leading dense layers: %d\n",

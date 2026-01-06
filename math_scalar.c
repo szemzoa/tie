@@ -1162,4 +1162,3 @@ void transpose_bf16_scalar(MemType *dest, const MemType *src, int rows, int cols
 		}
 	}
 }
-

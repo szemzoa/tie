@@ -13,8 +13,10 @@
 #include <locale.h>
 #include <dirent.h>
 #include <sys/stat.h>
-#include <readline/readline.h>
-#include <readline/history.h>
+#include <termios.h>
+#include <poll.h>
+#include <errno.h>
+#include <sys/ioctl.h>
 
 #include "main.h"
 #include "threadpool.h"
@@ -35,6 +37,12 @@ char think_buf[65536];
 size_t think_len = 0;
 int in_think = 0;
 
+bool think_visible = true;
+bool think_active = false;
+bool tab_pressed = false;
+
+static struct termios orig_term;
+
 
 int64_t elapsed_time_us(const struct timespec after, const struct timespec before)
 {
@@ -42,81 +50,80 @@ int64_t elapsed_time_us(const struct timespec after, const struct timespec befor
 	       + ((int64_t)after.tv_nsec - (int64_t)before.tv_nsec) / 1000;
 }
 
-static char *file_path_generator(const char *text, int state)
+void input_init(void)
 {
-	static DIR *dir = NULL;
-	static char directory[4096];
-	static char prefix[4096];
-	struct dirent *entry;
+	tcgetattr(STDIN_FILENO, &orig_term);
+	struct termios raw = orig_term;
+	raw.c_lflag &= ~(ICANON | ECHO);
+	raw.c_iflag &= ~(IXON | IXOFF);
+	tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
 
-	// First call: reset state
-	if (state == 0) {
-		// Split into directory + prefix
-		const char *slash = strrchr(text, '/');
+void input_shutdown(void)
+{
+	tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_term);
+}
 
-		if (slash) {
-			size_t len = slash - text + 1;
-			strncpy(directory, text, len);
-			directory[len] = '\0';
+bool input_readline(char *buf, size_t buflen)
+{
+	size_t len = 0;
+	memset(buf, 0, buflen);
 
-			strcpy(prefix, slash + 1);
-		} else {
-			strcpy(directory, "./");
-			strcpy(prefix, text);
+	while (1) {
+		char c;
+		if (read(STDIN_FILENO, &c, 1) != 1)
+			continue;
+
+		if (c == '\t') {
+			tab_pressed = true;
+			return true;
 		}
 
-		if (dir)
-			closedir(dir);
-		dir = opendir(directory);
-		if (!dir)
-			return NULL;
-	}
+		// Enter or Ctrl+Q
+		//        if (c == '\n' || c == '\r') {
+		if (c == 0x11) {
+			write(STDOUT_FILENO, "\n", 1);
+			return true;
+		}
 
-	// Enumerate directory entries
-	while ((entry = readdir(dir)) != NULL) {
-		if (strncmp(entry->d_name, prefix, strlen(prefix)) == 0) {
+		// Backspace handling
+		if (c == 0x7f || c == '\b') {
+			if (len > 0) {
+				// UTF-8 Logic: Remove bytes until we hit the start of the character.
+				// A UTF-8 continuation byte always starts with bits '10' (0x80-0xBF).
+				// A start byte or ASCII starts with '0' or '11'.
+				while (len > 0) {
+					// Remove last byte
+					len--;
+					unsigned char deleted = (unsigned char)buf[len];
+					buf[len] = 0;
 
-			static char buffer[4096];
-			snprintf(buffer, sizeof(buffer), "%s%s", directory, entry->d_name);
+					// If it was NOT a continuation byte, we have removed the whole char.
+					if ((deleted & 0xC0) != 0x80) {
+						break;
+					}
+				}
 
-			// If directory, add trailing '/'
-			struct stat st;
-			if (stat(buffer, &st) == 0 && S_ISDIR(st.st_mode)) {
-				strcat(buffer, "/");
+				// Erase the character from terminal
+				write(STDOUT_FILENO, "\b \b", 3);
 			}
+			continue;
+		}
 
-			return strdup(buffer);
+		if (c == 0x04) { // Ctrl-D
+			return false;
+		}
+
+		// Input acceptance
+		if (len + 1 < buflen) {
+			unsigned char uc = (unsigned char)c;
+
+			if (uc >= 32 || uc == '\n' || uc == '\r') {
+				buf[len++] = c;
+				write(STDOUT_FILENO, &c, 1);
+			}
 		}
 	}
-
-	closedir(dir);
-	dir = NULL;
-
-	return NULL;
-}
-
-static char **tie_completion(const char *text, int start, int end)
-{
-	// Trigger file completion only for "/img <PATH>"
-	if (strncmp(rl_line_buffer, "/img ", 5) == 0) {
-		// Complete only after "/img " including multiple directories
-		return rl_completion_matches(text, file_path_generator);
-	}
-
-	return NULL;
-}
-
-void init_readline()
-{
-	rl_attempted_completion_function = tie_completion;
-	rl_completion_append_character = '\0';
-
-#ifdef RL_COMPLETION_SUPPRESS_QUOTE
-	rl_completion_suppress_quote = 1;
-#endif
-#ifdef RL_COMPLETER_QUOTE_CHARACTERS
-	rl_completer_quote_characters = "";
-#endif
 }
 
 
@@ -145,10 +152,53 @@ void spinner_tick(const char *status)
 	static const char *frames[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
 	static int idx = 0;
 
-	printf("\r" THINK "[%s] %s", frames[idx], status);
+	printf("\r\033[K" THINK "%s %s" CLR_RESET, frames[idx], status);
 	fflush(stdout);
 
 	idx = (idx + 1) % 10;
+}
+
+// ioctl(STDOUT_FILENO, TIOCGWINSZ, ...)
+static int count_newlines(const char *s, size_t len)
+{
+	int count = 0;
+	for (size_t i = 0; i < len; i++) {
+		if (s[i] == '\n')
+			count++;
+	}
+	return count;
+}
+
+void toggle_think_visibility(void)
+{
+	if (!in_think)
+		return;
+
+	int lines_to_clear = count_newlines(think_buf, think_len);
+
+	think_visible = !think_visible;
+
+	if (think_visible) {
+		printf("\r\033[K");
+
+		printf(THINK);
+		if (think_len > 0) {
+			fwrite(think_buf, 1, think_len, stdout);
+		}
+		fflush(stdout);
+
+	} else {
+		for (int i = 0; i < lines_to_clear; i++) {
+			// \033[2K: Clear current line
+			// \033[A: Move cursor up one line
+			printf("\r\033[2K\033[A");
+		}
+
+		// Clear the line where the "<think>" header started
+		printf("\r\033[2K");
+
+		spinner_tick("Thinking...");
+	}
 }
 
 void generate_output(struct TIEContext *ctx, int current_token)
@@ -161,33 +211,50 @@ void generate_output(struct TIEContext *ctx, int current_token)
 	if (current_token == start_think) {
 		in_think = 1;
 		printf(THINK);
+		if (!think_visible) {
+			spinner_tick("Thinking...");
+		}
 	}
 
 	char piece[256];
 	int len = ctx->model->interface.tokenize_decode(ctx, current_token, piece, sizeof(piece));
 
 	if (len > 0) {
-		if (in_think == 1) {
-			spinner_tick("thinking...");
-
+		if (in_think) {
 			append_to_think_buffer(piece, len);
 
+			if (think_visible) {
+				fwrite(piece, 1, len, stdout);
+			} else {
+				spinner_tick("Thinking...");
+			}
 		} else {
 			fwrite(piece, 1, len, stdout);
-			fflush(stdout);
 		}
 	}
 
 	if (current_token == end_think) {
-		printf("\r\033[K");
-		printf("%s\n", think_buf);
+		if (!think_visible) {
+
+			printf("\r\033[K");
+			printf(THINK);
+
+			if (think_len > 0)
+				fwrite(think_buf, 1, think_len, stdout);
+		}
+
 		in_think = 0;
 		think_len = 0;
+
 		printf(CLR_RESET ASSISTANT_OUT);
 	}
+
+	fflush(stdout);
 }
 
-int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf, bool has_image, size_t *num_tokens)
+
+int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf, bool has_image, size_t *num_tokens,
+				  bool prefill_only)
 {
 	size_t user_text_token_count = 0;
 	size_t prompt_len = 0;
@@ -195,16 +262,39 @@ int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf,
 	if (ctx->model_vision == NULL)
 		has_image = false;
 
+	int *prompt_tokens = malloc(MAX_PROMPT_BATCH_SIZE * sizeof(int));
+	if (!prompt_tokens) {
+		perror("Failed to allocate prompt tokens buffer");
+		return NULL;
+	}
+
 	// Tokenize the actual user input text FIRST
 	int *user_text_tokens = ctx->model->interface.tokenize_encode(ctx, input_buf, &user_text_token_count);
 	if (!user_text_tokens)
 		return NULL;
 
-	int *prompt_tokens = malloc(MAX_PROMPT_BATCH_SIZE * sizeof(int));
-	if (!prompt_tokens) {
-		perror("Failed to allocate prompt tokens buffer");
+	if (prefill_only == true) {
+
+		for (int i = 0; i < user_text_token_count; i++)
+			prompt_tokens[i] = user_text_tokens[i];
+
 		free(user_text_tokens);
-		return NULL;
+
+#ifdef DEBUG_TOKENS
+		char buf[256];
+		for (int i = 0; i < user_text_token_count; i++) {
+			const char *p = get_token_string(ctx, prompt_tokens[i]);
+			int len = get_token_string_length(ctx, prompt_tokens[i]);
+
+			memset(buf, 0, 256);
+			memcpy(buf, p, len);
+
+			printf("Prefill Token #%u [%u] %s\n", i, prompt_tokens[i], buf);
+		}
+#endif
+
+		*num_tokens = user_text_token_count;
+		return prompt_tokens;
 	}
 
 	if (ctx->model->interface.build_prompt) {
@@ -329,12 +419,21 @@ int engine_decode(struct TIEContext *ctx, int max_new_tokens, int *out_tokens, s
 	Tensor *output_tensor = ctx->model->output.mem.data == NULL ? &ctx->model->token_embd : &ctx->model->output;
 
 	//	printf(DEBUG "\n--- Generation Start ---\n" ASSISTANT_OUT);
-	printf(DEBUG "\n" ASSISTANT_OUT);
+	printf("\n" ASSISTANT_OUT "%s: ", ctx->model->def->name);
 	clock_gettime(CLOCK_REALTIME, &start);
 
 	printf(CLR_RESET ASSISTANT_OUT);
 
 	for (int step = 0; step < max_new_tokens; step++) {
+
+		if (ctx->stop_generation)
+			break;
+
+		while (ctx->pause_generation) {
+			usleep(100000);
+			if (ctx->stop_generation)
+				break;
+		}
 
 		// Architecture Specific Post-Processing (ex: Gemma3N AltUp)
 		if (ctx->model->interface.post_generate_step)
@@ -481,6 +580,76 @@ ModelEvent pop_evt()
 	return evt;
 }
 
+static void timespec_add_ms(struct timespec *ts, long ms)
+{
+	ts->tv_nsec += ms * 1000000L;
+	if (ts->tv_nsec >= 1000000000L) {
+		ts->tv_sec += ts->tv_nsec / 1000000000L;
+		ts->tv_nsec %= 1000000000L;
+	}
+}
+
+ModelEvent pop_evt_timed(int timeout_ms)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	timespec_add_ms(&ts, timeout_ms);
+
+	pthread_mutex_lock(&evt_q.mutex);
+
+	// Wait until buffer is not empty OR timeout
+	while (evt_q.head == evt_q.tail) {
+		int rc = pthread_cond_timedwait(&evt_q.cond, &evt_q.mutex, &ts);
+		if (rc == ETIMEDOUT) {
+			pthread_mutex_unlock(&evt_q.mutex);
+			return (ModelEvent){.type = EVT_TIMEOUT};
+		}
+	}
+
+	ModelEvent evt = evt_q.buffer[evt_q.head];
+	evt_q.head = (evt_q.head + 1) % (QUEUE_SIZE * 4);
+
+	pthread_cond_signal(&evt_q.cond);
+	pthread_mutex_unlock(&evt_q.mutex);
+	return evt;
+}
+
+// Non-blocking check for keyboard input during generation
+void check_generation_interaction(struct TIEContext *ctx)
+{
+	char c;
+	struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN};
+
+	if (poll(&pfd, 1, 0) > 0) {
+
+		if (read(STDIN_FILENO, &c, 1) == 1) {
+
+			if (c == '\t') {
+
+				toggle_think_visibility();
+
+			} else if (c == 0x10) { // Ctrl+P
+				ctx->pause_generation = !ctx->pause_generation;
+				if (ctx->pause_generation) {
+					printf(DEBUG " [Paused] " CLR_RESET);
+				} else {
+					printf(DEBUG " [Resumed] " CLR_RESET);
+					if (!in_think)
+						printf(ASSISTANT_OUT);
+					else
+						printf(THINK);
+				}
+				fflush(stdout);
+
+			} else if (c == 0x13) { // Ctrl+S
+				ctx->stop_generation = true;
+				printf(DEBUG " [Stopping...] " CLR_RESET);
+				fflush(stdout);
+			}
+		}
+	}
+}
+
 void model_on_token(void *user_data, int token_id)
 {
 	ModelEvent evt = {.type = EVT_TOKEN, .token_id = token_id};
@@ -502,9 +671,13 @@ void *model_thread_main(void *arg)
 
 		if (cmd.type == CMD_GENERATE) {
 
+			ctx->stop_generation = false;
+			ctx->pause_generation = false;
+
 			// Build Prompt
 			size_t prompt_len = 0;
-			int *tokens = build_multimodal_turn_tokens(ctx, cmd.text, cmd.has_image, &prompt_len);
+			int *tokens = build_multimodal_turn_tokens(ctx, cmd.text, cmd.has_image, &prompt_len,
+								   cmd.prefill_only);
 
 			if (!tokens) {
 
@@ -547,17 +720,17 @@ void *model_thread_main(void *arg)
 	return NULL;
 }
 
-
-void read_user_input(char *input_buf, size_t buf_size)
+int read_user_input(char *input_buf, size_t buf_size)
 {
-	char *line = readline(USER_PROMPT "\n> ");
-	if (!line) {
-		input_buf[0] = '\0';
-		return;
+	printf(USER_PROMPT "\n> ");
+	fflush(stdout);
+
+	if (!input_readline(input_buf, buf_size)) {
+		//		push_cmd((ModelCommand){.type = CMD_EXIT});
+		return -2;
 	}
 
-	strncpy(input_buf, line, buf_size);
-	free(line);
+	return 0;
 }
 
 void run_ui_loop(struct TIEContext *ctx)
@@ -591,12 +764,27 @@ void run_ui_loop(struct TIEContext *ctx)
 		}
 	}
 
-	printf(ERR "\nWelcome to interactive chat. Type '/exit' to quit, '/img /path/xxx.bmp' to load an image.\n");
+	printf(CLR_RESET CLR_BOLD CLR_RED "\nWelcome to interactive chat. Available commands:\n");
+	if (ctx->model_vision) {
+		printf("'/img /path/xxx.bmp'\t- Load an image.\n");
+	}
+	printf("'CTRL+Q'\t\t- Send query.\n");
+	printf("'CTRL+P'\t\t- Pause generation.\n");
+	printf("'CTRL+S'\t\t- Stop generation.\n");
+	printf("'CTRL+D'\t\t- Quit.\n");
 
 	while (1) {
 
 		// User Input
-		read_user_input(input_buf, sizeof(input_buf));
+		if (read_user_input(input_buf, sizeof(input_buf)) == -2) {
+			push_cmd((ModelCommand){.type = CMD_EXIT});
+			break;
+		}
+
+		if (tab_pressed && think_active) {
+			toggle_think_visibility();
+			continue;
+		}
 
 		if (strncmp(input_buf, "/exit", 5) == 0) {
 			push_cmd((ModelCommand){.type = CMD_EXIT});
@@ -605,6 +793,11 @@ void run_ui_loop(struct TIEContext *ctx)
 
 		if (strncmp(input_buf, "/img ", 5) == 0) {
 			const char *path = input_buf + 5;
+
+			if (!ctx->model_vision) {
+				printf(ERR "[Vision is not supported]\n" CLR_RESET);
+				continue;
+			}
 
 			if (load_bmp_clip(path, ctx) == 0) {
 				printf(DEBUG "[Image loaded: %s]\n" CLR_RESET, path);
@@ -623,12 +816,19 @@ void run_ui_loop(struct TIEContext *ctx)
 		push_cmd(cmd);
 		image_loaded = false;
 
-		// Listening Mode (Blocking on Event Queue)
+		// Listening Mode (Blocking on Event Queue with Timeout)
 		while (1) {
 
-			ModelEvent evt = pop_evt();
+			// Check for User Input
+			check_generation_interaction(ctx);
 
-			if (evt.type == EVT_FINISHED) {
+			// Wait for Event (50ms)
+			ModelEvent evt = pop_evt_timed(50);
+
+			if (evt.type == EVT_TIMEOUT) {
+				continue;
+
+			} else if (evt.type == EVT_FINISHED) {
 				break;
 
 			} else if (evt.type == EVT_TOKEN) {
@@ -649,8 +849,6 @@ void run_ui_loop(struct TIEContext *ctx)
 
 				push_cmd(cmd);
 
-				// We stay in Listening Mode because the model will immediately start generating
-				// the answer after processing the tool result.
 				printf(DEBUG "[Tool] Result sent to model: %s\n" CLR_RESET, tc->result_prompt);
 			}
 		}
@@ -839,19 +1037,18 @@ AppConfig parse_args(int argc, char *argv[])
 
 char banner[] = {
 	"\n"
-	"\t████████╗██╗███████╗\n"
-	"\t╚══██╔══╝██║██╔════╝\n"
-	"\t   ██║   ██║█████╗  \n"
-	"\t   ██║   ██║██╔══╝  \n"
-	"\t   ██║   ██║███████╗\n"
-	"\t   ╚═╝   ╚═╝╚══════╝\n"
-	"\t	Toy Inference Engine v%u.%u\n\n"};
+	"████████╗██╗███████╗  TIE\n"
+	"╚══██╔══╝██║██╔════╝  Toy Inference Engine v%u.%u\n"
+	"   ██║   ██║█████╗\n"
+	"   ██║   ██║██╔══╝\n"
+	"   ██║   ██║███████╗\n"
+	"   ╚═╝   ╚═╝╚══════╝\n"};
 
 int main(int argc, char *argv[])
 {
 
 	printf(banner, VERSION_MAJOR, VERSION_MINOR);
-	//	printf("Toy Inference Engine v%u.%u\n", VERSION_MAJOR, VERSION_MINOR);
+	// printf("Toy Inference Engine v%u.%u\n", VERSION_MAJOR, VERSION_MINOR);
 
 	setlocale(LC_ALL, "en_US.UTF-8");
 
@@ -863,7 +1060,7 @@ int main(int argc, char *argv[])
 
 	// Init Engine
 	engine_alloc(ctx, ctx->config.num_threads);
-	init_readline();
+	input_init();
 
 	// Load Models
 	ctx->gguf_text = gguf_model_parse(ctx->config.model_path);
@@ -945,8 +1142,9 @@ int main(int argc, char *argv[])
 
 	// Cleanup
 	engine_release(ctx);
-	printf("Done.\n");
+	input_shutdown();
 
+	printf(CLR_RESET "Done.\n");
 	exit(EXIT_SUCCESS);
 
 	return 0;

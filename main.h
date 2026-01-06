@@ -28,9 +28,10 @@ typedef struct {
 } ModelCommand;
 
 typedef enum {
-	EVT_TOKEN,    // A new token generated
-	EVT_FINISHED, // Generation complete
-	EVT_TOOL_CALL // Model wants to call a tool (pause generation)
+	EVT_TOKEN,     // A new token generated
+	EVT_FINISHED,  // Generation complete
+	EVT_TOOL_CALL, // Model wants to call a tool (pause generation)
+	EVT_TIMEOUT,
 } EvtType;
 
 typedef struct {
@@ -110,8 +111,8 @@ struct TIEContext {
 	Tokenizer tokenizer;
 	ToolContext tool_context;
 
-	//	volatile sig_atomic_t sigint_flag;
-	//	volatile sig_atomic_t stop_generation;
+	volatile bool stop_generation;
+	volatile bool pause_generation;
 };
 
 #endif

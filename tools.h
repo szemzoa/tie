@@ -25,7 +25,7 @@ typedef struct {
 	char *(*func)(const char *args);
 } ToolDef;
 
-extern int  tools_init(struct TIEContext *ctx);
+extern int tools_init(struct TIEContext *ctx);
 extern void tools_release(struct TIEContext *ctx);
 extern void tools_register_default(struct TIEContext *ctx);
 extern bool tools_process_token(struct TIEContext *ctx, int token);

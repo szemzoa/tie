@@ -159,7 +159,7 @@ typedef struct {
 typedef struct {
 	float *conv_state;
 	float *ssm_state;
-	int conv_pos;		// ring buffer
+	int conv_pos; // ring buffer
 } LayerMambaState;
 
 typedef struct {
@@ -208,7 +208,7 @@ typedef struct {
 	MemType mamba_conv_states_memory; // The raw memory blocks
 	MemType mamba_ssm_states_memory;
 	MemType shared_expert_output;
-	MemType mamba_in_proj_output; 
+	MemType mamba_in_proj_output;
 
 	/* LFM2 */
 	MemType sconv_in_proj_output;
