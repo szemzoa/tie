@@ -2,27 +2,23 @@
 #define __CONFIG_H__
 
 #define DUMP_MODEL_METADATA
-// #define DEBUG_TENSORS
-// #define DEBUG_TOKENS
+//#define DEBUG_TENSORS
+//#define DEBUG_TOKENS
 
 #define CONFIG_ENABLE_AVX2
 
-/*  Internal memory buffer types:
- *	- GGML_TYPE_F32
- */
-#define INTERNAL_MEMORY_TYPE GGML_TYPE_F32
-#define KV_CACHE_TYPE GGML_TYPE_BF16
+#define INTERNAL_MEMORY_TYPE 	GGML_TYPE_F32
+#define KV_CACHE_TYPE 		GGML_TYPE_BF16
 
-#define MAX_PROMPT_BATCH_SIZE 4096
-#define MAX_THREADS 32
-#define MAX_TASKS 128
-#define MAX_GENERATE_TOKENS 8192
+#define MAX_PROMPT_BATCH_SIZE 	4096
+#define MAX_THREADS 		32
+#define MAX_TASKS 		128
+#define MAX_GENERATE_TOKENS 	8192
 
-#define TOOL_BUFFER_SIZE 2048
+#define TOOL_BUFFER_SIZE 	2048
 
-#define MAX_IMAGE_W 4096
-#define MAX_IMAGE_H 4096
-
+#define MAX_IMAGE_W 		4096
+#define MAX_IMAGE_H 		4096
 
 #define CLR_RESET "\033[0m"
 #define CLR_BOLD "\033[1m"

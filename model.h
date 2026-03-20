@@ -19,6 +19,8 @@ enum {
 	ARCH_GRANITE,
 	ARCH_LFM2,
 	ARCH_LFM2_MOE,
+	ARCH_QWEN35,
+	ARCH_QWEN35_MOE,
 };
 
 enum {
@@ -59,6 +61,11 @@ typedef enum {
 	SIZE_VISION_POOLED_EMBEDS,
 	SIZE_VISION_PROJ_EMBEDS,
 	SIZE_VISION_MERGER_TEMP,
+
+	/* QWEN3_5 SSM */
+	SIZE_QWEN35_SSM_QKV,
+	SIZE_QWEN35_SSM_DT_BETA,
+	SIZE_QWEN35_Q_GATE,
 } BufferSizeType;
 
 typedef struct {
@@ -241,6 +248,7 @@ typedef struct {
 	float embedding_scale;
 	float residual_scale;
 	float logit_scale;
+
 	int ssm_conv_kernel;
 	int ssm_state_size;
 	int ssm_group_count;
@@ -250,6 +258,10 @@ typedef struct {
 	/* LFM2 */
 	int conv_kernel_size;
 	int expert_leading_dense_layers;
+
+	/* QWEN3_5 */
+	int attention_value_length;
+	int full_attention_interval;
 } Model;
 
 typedef struct {

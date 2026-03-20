@@ -25,6 +25,7 @@ typedef struct {
 	char *text; // User input or Tool result
 	bool has_image;
 	bool prefill_only;
+	bool tool_result;
 } ModelCommand;
 
 typedef enum {

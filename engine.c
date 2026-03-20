@@ -38,8 +38,6 @@ void engine_alloc(struct TIEContext *ctx, int num_threads)
 
 	math_dispatch_init();
 
-	//	debug_init("debug_dump.log");
-
 	return;
 }
 
@@ -56,9 +54,8 @@ void engine_release(struct TIEContext *ctx)
 	tools_release(ctx);
 
 	thread_pool_destroy(thread_pool);
-	free(ctx);
 
-	//	debug_close();
+	free(ctx);
 }
 
 #if 1
@@ -178,6 +175,94 @@ int compare_tensor_with_file(const char *ref_filename, const float *your_c_tenso
 	return mismatch_found;
 }
 
+int save_tensor_to_file(const char *filename, const float *c_tensor, long num_elements)
+{
+	FILE *file = fopen(filename, "wb");
+	if (file == NULL) {
+		fprintf(stderr, "ERROR: Could not write file %s\n", filename);
+		return 1;
+	}
+
+	long elements_write = fwrite(c_tensor, sizeof(float), num_elements, file);
+	fclose(file);
+
+	if (elements_write != num_elements) {
+		fprintf(stderr, "ERROR: Write %lu instead of %lu\n", num_elements, elements_write);
+		return 1;
+	}
+
+	return 0;
+}
+
+int compare_tensor_with_file_offset(const char *ref_filename, const float *your_c_tensor, long num_elements, float tolerance,
+			     int offset)
+{
+	//	return 0;
+
+	FILE *file = fopen(ref_filename, "rb");
+	if (file == NULL) {
+		fprintf(stderr, "ERROR: Could not open reference file %s\n", ref_filename);
+		return 1;
+	}
+
+	float *ref_tensor = (float *)malloc(num_elements * sizeof(float));
+	if (ref_tensor == NULL) {
+		fprintf(stderr, "ERROR: Could not allocate memory for reference tensor\n");
+		fclose(file);
+		return 1;
+	}
+
+	fseek(file, sizeof(float) * offset, SEEK_SET);
+
+	long elements_read = fread(ref_tensor, sizeof(float), num_elements, file);
+	fclose(file);
+
+	if (elements_read != num_elements) {
+		fprintf(stderr, "ERROR: Read mismatch. Expected %ld elements, got %ld\n", num_elements, elements_read);
+		free(ref_tensor);
+		return 1;
+	}
+
+	printf("File: %s first %u elements from %u: ", ref_filename, DEBUG_MEMTYPE_NUM, offset);
+	for (int i = 0; i < DEBUG_MEMTYPE_NUM; i++) {
+		printf("%.10f, ", ref_tensor[i]);
+	}
+	printf("\n");
+
+	printf("Mem: %s first %u elements: ", ref_filename, DEBUG_MEMTYPE_NUM, offset);
+	for (int i = 0; i < DEBUG_MEMTYPE_NUM; i++) {
+		printf("%.10f, ", your_c_tensor[i]);
+	}
+	printf("\n");
+
+	int mismatch_found = 0;
+	for (long i = 0; i < num_elements; i++) {
+		float diff = fabsf(your_c_tensor[i] - ref_tensor[i]);
+
+		if (diff > tolerance) {
+			fprintf(stderr, "\n--- MISMATCH DETECTED - tolerance: %.10f---\n", tolerance);
+			fprintf(stderr, "File: %s\n", ref_filename);
+			fprintf(stderr, "Index: %ld (elements: %ld)\n", i, num_elements);
+			fprintf(stderr, "  C Value:   %f\n", your_c_tensor[i]);
+			fprintf(stderr, "  Ref Value: %f\n", ref_tensor[i]);
+			fprintf(stderr, "  Difference: %f\n", diff);
+
+			mismatch_found = 1;
+			break;
+		}
+	}
+
+	free(ref_tensor);
+
+	if (!mismatch_found) {
+		printf("SUCCESS: %s matches the reference. Tolerance: %.10f, size=%lu, offset=%u\n", ref_filename, tolerance, num_elements, offset);
+	} else {
+		exit(EXIT_FAILURE);
+	}
+
+	return mismatch_found;
+}
+
 int load_tensor_from_file(const char *ref_filename, float *dest_tensor, long num_elements)
 {
 	FILE *file = fopen(ref_filename, "rb");
@@ -199,7 +284,7 @@ int load_tensor_from_file(const char *ref_filename, float *dest_tensor, long num
 }
 #endif
 
-
+#if 0
 // A fast, high-precision expf approximation by Nicol N. Schraudolph.
 inline float expf_fast(float x)
 {
@@ -223,6 +308,7 @@ inline float expf_fast(float x)
 
 	return u.f + u.f * p;
 }
+#endif
 
 void *xaligned_alloc(size_t alignment, size_t size_bytes)
 {
@@ -293,12 +379,12 @@ static inline void *get_kv_head(const MemType *cache, int t, int kv_head_idx, in
 	return (uint8_t *)cache->data + offset_elements * element_size;
 }
 
-
 void silu_table_init()
 {
 	for (int i = 0; i < SILU_TABLE_SIZE; ++i) {
 		float x = SILU_X_MIN + (SILU_X_MAX - SILU_X_MIN) * i / (SILU_TABLE_SIZE - 1);
-		silu_table[i] = x / (1.0f + expf_fast(-x));
+//		silu_table[i] = x / (1.0f + expf_fast(-x));
+		silu_table[i] = x / (1.0f + expf(-x));
 	}
 }
 
@@ -306,13 +392,13 @@ float silu_lookup(float x)
 {
 	if (!isfinite(x)) {
 		// If x is not a valid number, we can't use the lookup table.
-		return x / (1.0f + expf_fast(-x));
+		return x / (1.0f + expf(-x));
 	}
 
 	if (x <= SILU_X_MIN)
-		return x / (1.0f + expf_fast(-x));
+		return x / (1.0f + expf(-x));
 	if (x >= SILU_X_MAX)
-		return x / (1.0f + expf_fast(-x));
+		return x / (1.0f + expf(-x));
 
 	float range = (SILU_X_MAX - SILU_X_MIN);
 	float position = (x - SILU_X_MIN) * (SILU_TABLE_SIZE - 1) / range;
@@ -419,9 +505,15 @@ void text_rope_cache_init(struct TIEContext *ctx, int seq_len, int start_pos)
 	Model *lm = ctx->model;
 	RopeCacheType *rope_cache = ctx->model->rope_cache_global;
 	MemLayout *mem = &ctx->mem;
+	int head_dim = lm->head_dim;
+	int half_head_dim = head_dim / 2;
+	const int rope_dim = ctx->model->rope_dimension_count;
 
-	const int head_dim = lm->head_dim;
-	const int half_head_dim = head_dim / 2;
+	if (rope_dim != 0) {
+	    head_dim = rope_dim;
+	    half_head_dim = head_dim / 2;
+	}
+
 	const float rope_base = lm->rope_freq_base;
 
 	// Calculate inv_freq
@@ -501,6 +593,14 @@ void text_rope_cache_extend(struct TIEContext *ctx, int pos)
 {
 	Model *lm = ctx->model;
 	RopeCacheType *rope_cache = ctx->model->rope_cache_global;
+	const int rope_dim = ctx->model->rope_dimension_count;
+	int head_dim = lm->head_dim;
+	int half_head_dim = head_dim / 2;
+
+	if (rope_dim != 0) {
+	    head_dim = rope_dim;
+	    half_head_dim = head_dim / 2;
+	}
 
 	//    printf("%s pos: %u\n", __FUNCTION__, pos);
 
@@ -509,8 +609,6 @@ void text_rope_cache_extend(struct TIEContext *ctx, int pos)
 		return;
 	}
 
-	const int head_dim = lm->head_dim;	// 128
-	const int half_head_dim = head_dim / 2; // 64
 	const float rope_base = lm->rope_freq_base;
 
 	// Calculate inv_freq
@@ -659,8 +757,8 @@ void attention_worker(void *arg)
 	struct TIEContext *ctx = task->ctx;
 	AttentionType attn_type = task->attn_type;
 	int sink_len = task->sink_len;
-
-	int q_dim = ctx->model->num_heads * ctx->model->head_dim;
+	int head_dim = task->head_dim;
+	int q_dim = ctx->model->num_heads * head_dim;
 	LayerKVCache *cache = &ctx->kv_cache[task->kv_source_layer_idx];
 
 	// scratch buffers
@@ -685,17 +783,17 @@ void attention_worker(void *arg)
 		for (int h = task->head_start; h < task->head_end; h++) {
 
 			// QUERY PREP
-			MemType q_head_slice = mem_slice(&ctx->mem.Q, (size_t)i * q_dim + h * ctx->model->head_dim);
+			MemType q_head_slice = mem_slice(&ctx->mem.Q, (size_t)i * q_dim + h * head_dim);
 			MemType out_head_slice =
-				mem_slice(&ctx->mem.attn_output, (size_t)i * q_dim + h * ctx->model->head_dim);
+				mem_slice(&ctx->mem.attn_output, (size_t)i * q_dim + h * head_dim);
 
-			dispatch_convert(&q_head_slice, q_head_fp32_scratch, ctx->model->head_dim);
+			dispatch_convert(&q_head_slice, q_head_fp32_scratch, head_dim);
 
 			// Q-Scaling (Gemma-3)
 			if (ctx->gguf_text->arch == ARCH_GEMMA3) {
-				float q_scale = 1.0f / sqrtf((float)ctx->model->head_dim);
+				float q_scale = 1.0f / sqrtf((float)head_dim);
 				float *q_fp32_data = (float *)q_head_fp32_scratch->data;
-				for (int k = 0; k < ctx->model->head_dim; k++)
+				for (int k = 0; k < head_dim; k++)
 					q_fp32_data[k] *= q_scale;
 			}
 
@@ -707,11 +805,11 @@ void attention_worker(void *arg)
 
 				// Check mask
 				if (!is_token_masked(ctx, attn_type, absolute_pos, t)) {
-					void *k_head = get_kv_head(&cache->k, t, kv_head_idx, ctx->model->head_dim,
+					void *k_head = get_kv_head(&cache->k, t, kv_head_idx, head_dim,
 								   ctx->model->num_kv_heads, ring_size, sink_len);
 					MemType k_head_slice = {.type = cache->k.type, .data = k_head};
 					float score = dispatch_dot_product(q_head_fp32_scratch, &k_head_slice,
-									   ctx->model->head_dim);
+									   head_dim);
 
 					attn_scores_buffer[compact_idx] = score * ctx->model->attn_scale;
 				} else {
@@ -724,11 +822,11 @@ void attention_worker(void *arg)
 			for (int t = rolling_start; t <= absolute_pos; t++) {
 				// Check mask
 				if (!is_token_masked(ctx, attn_type, absolute_pos, t)) {
-					void *k_head = get_kv_head(&cache->k, t, kv_head_idx, ctx->model->head_dim,
+					void *k_head = get_kv_head(&cache->k, t, kv_head_idx, head_dim,
 								   ctx->model->num_kv_heads, ring_size, sink_len);
 					MemType k_head_slice = {.type = cache->k.type, .data = k_head};
 					float score = dispatch_dot_product(q_head_fp32_scratch, &k_head_slice,
-									   ctx->model->head_dim);
+									   head_dim);
 
 					attn_scores_buffer[compact_idx] = score * ctx->model->attn_scale;
 				} else {
@@ -761,7 +859,7 @@ void attention_worker(void *arg)
 				attn_scores_buffer[k] *= inv_sum;
 
 			// WEIGHTED SUM
-			memset(out_head_slice.data, 0, ctx->model->head_dim * ggml_type_size(out_head_slice.type));
+			memset(out_head_slice.data, 0, head_dim * ggml_type_size(out_head_slice.type));
 			compact_idx = 0;
 
 			// Sum Sink
@@ -770,10 +868,10 @@ void attention_worker(void *arg)
 				if (weight < 1e-10f)
 					continue;
 
-				void *v_head = get_kv_head(&cache->v, t, kv_head_idx, ctx->model->head_dim,
+				void *v_head = get_kv_head(&cache->v, t, kv_head_idx, head_dim,
 							   ctx->model->num_kv_heads, ring_size, sink_len);
 				MemType v_slice = {.type = cache->v.type, .data = v_head};
-				dispatch_accumulate_weighted_V(&v_slice, &out_head_slice, weight, ctx->model->head_dim);
+				dispatch_accumulate_weighted_V(&v_slice, &out_head_slice, weight, head_dim);
 			}
 
 			// Sum Ring
@@ -782,17 +880,17 @@ void attention_worker(void *arg)
 				if (weight < 1e-10f)
 					continue;
 
-				void *v_head = get_kv_head(&cache->v, t, kv_head_idx, ctx->model->head_dim,
+				void *v_head = get_kv_head(&cache->v, t, kv_head_idx, head_dim,
 							   ctx->model->num_kv_heads, ring_size, sink_len);
 				MemType v_slice = {.type = cache->v.type, .data = v_head};
-				dispatch_accumulate_weighted_V(&v_slice, &out_head_slice, weight, ctx->model->head_dim);
+				dispatch_accumulate_weighted_V(&v_slice, &out_head_slice, weight, head_dim);
 			}
 		}
 	}
 }
 
 void attention(struct TIEContext *ctx, int batch_len, int layer_idx, int kv_source_layer_idx, int start_pos,
-	       AttentionType attn_type, attention_fn worker, int sink_len)
+	       AttentionType attn_type, attention_fn worker, int sink_len, int head_dim)
 {
 	int num_threads = thread_pool->num_threads;
 	attention_worker_task_t tasks[num_threads];
@@ -822,6 +920,7 @@ void attention(struct TIEContext *ctx, int batch_len, int layer_idx, int kv_sour
 				.head_start = head_start, // Each thread gets a different slice of heads
 				.head_end = head_end,	  //
 				.sink_len = sink_len,
+				.head_dim = head_dim,
 			};
 			thread_pool_submit(thread_pool, worker, &tasks[t]);
 		}
@@ -854,6 +953,7 @@ void attention(struct TIEContext *ctx, int batch_len, int layer_idx, int kv_sour
 			.head_start = 0,		   // Each thread processes all heads
 			.head_end = ctx->model->num_heads, //
 			.sink_len = sink_len,
+			.head_dim = head_dim,
 		};
 		thread_pool_submit(thread_pool, worker, &tasks[t]);
 	}

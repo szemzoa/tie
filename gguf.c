@@ -327,11 +327,11 @@ int gguf_metadata_get_value(struct GGUFModel *gguf, char *key, void *value)
 
 int gguf_metadata_get_type(struct GGUFModel *gguf, char *key)
 {
-	GGUFMetadata *metadata;
+//	GGUFMetadata *metadata;
 	uint64_t i = 0;
 
 	for (i = 0; i < gguf->metadata_num; i++) {
-		metadata = &gguf->metadata[i];
+//		metadata = &gguf->metadata[i];
 
 		if (!strcmp(gguf->metadata[i].name, key)) {
 			return gguf->metadata[i].type;
@@ -343,11 +343,11 @@ int gguf_metadata_get_type(struct GGUFModel *gguf, char *key)
 
 GGUFMetadata *gguf_metadata_get(struct GGUFModel *gguf, char *key)
 {
-	GGUFMetadata *metadata;
+//	GGUFMetadata *metadata;
 	uint64_t i = 0;
 
 	for (i = 0; i < gguf->metadata_num; i++) {
-		metadata = &gguf->metadata[i];
+//		metadata = &gguf->metadata[i];
 
 		if (!strcmp(gguf->metadata[i].name, key)) {
 			return &gguf->metadata[i];

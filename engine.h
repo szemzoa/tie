@@ -2,6 +2,7 @@
 #define __ENGINE_H__
 
 #include <stdbool.h>
+#include <math.h>
 #include "gguf.h"
 #include "config.h"
 
@@ -122,6 +123,12 @@ typedef struct {
 	Tensor attn_q_bias;
 	Tensor attn_v_bias;
 
+	/* QWEN3_5 */
+	Tensor attn_qkv;
+	Tensor attn_gate;
+	Tensor ssm_alpha;
+	Tensor ssm_beta;
+
 } LayerWeights;
 
 typedef struct {
@@ -214,6 +221,11 @@ typedef struct {
 	MemType sconv_in_proj_output;
 	MemType sconv_conv_output;
 	LayerConvState *lfm2_conv_states;
+
+	/* Qwen3.5 */
+	MemType qkv_buf;
+	MemType ssm_dt_buf;
+	MemType ssm_beta_buf;
 } MemLayout;
 
 typedef struct {
@@ -268,6 +280,7 @@ typedef struct {
 	int head_start;
 	int head_end;
 	int sink_len;
+	int head_dim;
 } attention_worker_task_t;
 
 typedef struct {
@@ -282,12 +295,15 @@ typedef void (*attention_fn)(void *args);
 
 extern float silu_table[SILU_TABLE_SIZE];
 
-
 extern void engine_alloc(struct TIEContext *ctx, int num_threads);
 extern void engine_release(struct TIEContext *ctx);
 
 extern int compare_tensor_with_file(const char *ref_filename, const float *your_c_tensor, long num_elements,
 				    float tolerance, int debug_offset);
+extern int compare_tensor_with_file_offset(const char *ref_filename, const float *your_c_tensor, long num_elements, float tolerance,
+			     int offset);
+extern int save_tensor_to_file(const char *filename, const float *c_tensor, long num_elements);
+
 extern void debug_memtype_f32(MemType *mem, char *name, int layer_idx, int debug_offset);
 extern int load_tensor_from_file(const char *ref_filename, float *dest_tensor, long num_elements);
 
@@ -315,11 +331,12 @@ extern void process_embeddings(struct TIEContext *ctx, MemType *embeddings, size
 
 extern void softmax(float *x, int size);
 extern void attention(struct TIEContext *ctx, int batch_len, int layer_idx, int kv_source_layer_idx, int start_pos,
-		      AttentionType attn_type, attention_fn worker, int sink_len);
+		      AttentionType attn_type, attention_fn worker, int sink_len, int head_dim);
 extern void attention_worker(void *arg);
 
 extern void process_expert_task(void *arg);
 extern void find_top_k(const float *router_logits, int expert_count, int k, ExpertChoice *top_k);
+
 
 extern void process_prompt_gemma3n(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len);
 extern void prepare_next_token_gemma3n(struct TIEContext *ctx, int next_token);

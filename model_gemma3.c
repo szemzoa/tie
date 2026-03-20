@@ -16,6 +16,7 @@
 int transformer_layer_gemma3(struct TIEContext *ctx, int layer_idx, int batch_len);
 int build_prompt_gemma3(struct TIEContext *ctx, int *prompt_tokens, int *user_text_tokens, int user_text_token_count,
 			bool has_image);
+char *build_system_prompt_gemma3(struct TIEContext *ctx);
 
 static const TensorDef GEMMA3_GLOBAL_TENSORS[] = {
 	DECLARE_GLOBAL_TENSORS_BASE_DEFS,
@@ -200,16 +201,9 @@ int transformer_layer_gemma3(struct TIEContext *ctx, int layer_idx, int batch_le
 
 	// Attention Block
 	// RMSNorm
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-
-		// Create slices for the specific token being processed
-		MemType hidden_state_slice = mem_slice(&ctx->mem.hidden_state, offset);
-		MemType normed_input_slice = mem_slice(&ctx->mem.normed_qkv_input, offset);
-
-		dispatch_rms_norm(&hidden_state_slice, &l->attn_norm, &normed_input_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
+	dispatch_rms_norm_batched(&ctx->mem.hidden_state, &l->attn_norm, &ctx->mem.normed_qkv_input,
+				  ctx->model->embed_dim, ctx->model->norm_eps, batch_len,
+				  ctx->model->embed_dim);
 
 	// Compute Q/K/V Matrices
 	dispatch_mat_mat(ctx, &ctx->mem.normed_qkv_input, &l->attn_q, &ctx->mem.Q, batch_len, ctx->model->embed_dim,
@@ -222,54 +216,45 @@ int transformer_layer_gemma3(struct TIEContext *ctx, int layer_idx, int batch_le
 			 kv_dim, true);
 
 	// Apply RoPE
-	for (int i = 0; i < batch_len; i++) {
-		// The absolute position for the current token in the batch
-		int absolute_pos = start_pos + i;
+	for (int h = 0; h < ctx->model->num_heads; h++) {
+		MemType Q_slice = mem_slice(&ctx->mem.Q, (size_t)h * ctx->model->head_dim);
 
-		for (int h = 0; h < ctx->model->num_heads; h++) {
-			MemType Q_slice = mem_slice(&ctx->mem.Q, (size_t)i * q_dim + h * ctx->model->head_dim);
-
-			if (l->attn_q_norm.mem.data) {
-				dispatch_rms_norm(&Q_slice, &l->attn_q_norm, &Q_slice, ctx->model->head_dim,
-						  ctx->model->norm_eps);
-			}
-
-			// Use the absolute position for RoPE
-			dispatch_apply_rope_cache(active_rope_cache, &Q_slice, absolute_pos, ctx->model->head_dim);
+		if (l->attn_q_norm.mem.data) {
+			dispatch_rms_norm_batched(&Q_slice, &l->attn_q_norm, &Q_slice,
+						  ctx->model->head_dim, ctx->model->norm_eps,
+						  batch_len, q_dim);
 		}
 
-		for (int h = 0; h < ctx->model->num_kv_heads; h++) {
-			MemType K_slice = mem_slice(&ctx->mem.K, (size_t)i * kv_dim + h * ctx->model->head_dim);
+		dispatch_apply_rope_cache_batched(active_rope_cache, &Q_slice, start_pos,
+						  ctx->model->head_dim, batch_len, q_dim);
+	}
 
-			if (l->attn_k_norm.mem.data) {
-				dispatch_rms_norm(&K_slice, &l->attn_k_norm, &K_slice, ctx->model->head_dim,
-						  ctx->model->norm_eps);
-			}
+	for (int h = 0; h < ctx->model->num_kv_heads; h++) {
+		MemType K_slice = mem_slice(&ctx->mem.K, (size_t)h * ctx->model->head_dim);
 
-			// Use the absolute position for RoPE
-			dispatch_apply_rope_cache(active_rope_cache, &K_slice, absolute_pos, ctx->model->head_dim);
+		if (l->attn_k_norm.mem.data) {
+			dispatch_rms_norm_batched(&K_slice, &l->attn_k_norm, &K_slice,
+						  ctx->model->head_dim, ctx->model->norm_eps,
+						  batch_len, kv_dim);
 		}
+		dispatch_apply_rope_cache_batched(active_rope_cache, &K_slice, start_pos,
+						  ctx->model->head_dim, batch_len, kv_dim);
 	}
 
 	// Store K/V to cache
 	dispatch_store_KV_cache(ctx, layer_idx, start_pos, batch_len, sink_len);
 
 	// Multi-Head Attention Calculation
-	attention(ctx, batch_len, layer_idx, layer_idx, start_pos, attn_type, attention_worker, sink_len);
+	attention(ctx, batch_len, layer_idx, layer_idx, start_pos, attn_type, attention_worker, sink_len, ctx->model->head_dim);
 
 	// Output projection
 	dispatch_mat_mat(ctx, &ctx->mem.attn_output, &l->attn_out, &ctx->mem.attn_proj_output, batch_len, q_dim,
 			 ctx->model->embed_dim, true);
 
 	// POST-ATTENTION norm
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-
-		MemType attn_proj_slice = mem_slice(&ctx->mem.attn_proj_output, offset);
-
-		dispatch_rms_norm(&attn_proj_slice, &l->post_attn_norm, &attn_proj_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
+	dispatch_rms_norm_batched(&ctx->mem.attn_proj_output, &l->post_attn_norm, &ctx->mem.attn_proj_output,
+				  ctx->model->embed_dim, ctx->model->norm_eps, batch_len,
+				  ctx->model->embed_dim);
 
 	// Add the attention residual.
 	// Add the post-normed attention output to the original residual we saved.
@@ -280,23 +265,15 @@ int transformer_layer_gemma3(struct TIEContext *ctx, int layer_idx, int batch_le
 	memcpy(ctx->mem.hidden_state.data, ctx->mem.residual_stratch.data,
 	       batch_len * ctx->model->embed_dim * sizeof(float));
 
-
 	// FFN Block
 	// Save the residual for the FFN block.
 	memcpy(ctx->mem.residual_stratch.data, ctx->mem.hidden_state.data,
 	       batch_len * ctx->model->embed_dim * sizeof(float));
 
 	// RMSNorm
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-
-		// Create slices for the specific token being processed
-		MemType hidden_state_slice = mem_slice(&ctx->mem.hidden_state, offset);
-		MemType normed_ffn_input_slice = mem_slice(&ctx->mem.normed_ffn_input, offset);
-
-		dispatch_rms_norm(&hidden_state_slice, &l->ffn_norm, &normed_ffn_input_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
+	dispatch_rms_norm_batched(&ctx->mem.hidden_state, &l->ffn_norm, &ctx->mem.normed_ffn_input,
+				  ctx->model->embed_dim, ctx->model->norm_eps, batch_len,
+				  ctx->model->embed_dim);
 
 	// Gate + Up projections
 	dispatch_mat_mat(ctx, &ctx->mem.normed_ffn_input, &l->ffn_gate, &ctx->mem.gate_proj_output, batch_len,
@@ -313,13 +290,9 @@ int transformer_layer_gemma3(struct TIEContext *ctx, int layer_idx, int batch_le
 			 ctx->model->ffn_dim, ctx->model->embed_dim, true);
 
 	// POST-FFN norm.
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-		MemType ffn_down_slice = mem_slice(&ctx->mem.ffn_down_output, offset);
-
-		dispatch_rms_norm(&ffn_down_slice, &l->post_ffw_norm, &ffn_down_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
+	dispatch_rms_norm_batched(&ctx->mem.ffn_down_output, &l->post_ffw_norm, &ctx->mem.ffn_down_output,
+				  ctx->model->embed_dim, ctx->model->norm_eps, batch_len,
+				  ctx->model->embed_dim);
 
 	// Second Residual Add.
 	// Add the post-normed FFN output to the residual we saved
@@ -374,4 +347,33 @@ int build_prompt_gemma3(struct TIEContext *ctx, int *prompt_tokens, int *user_te
 	prompt_tokens[prompt_len++] = def->params.newline_token_id;
 
 	return prompt_len;
+}
+
+char *build_system_prompt_gemma3(struct TIEContext *ctx)
+{
+	return strdup(
+		"<bos><start_of_turn>system\n"
+		"You have access to functions. If you decide to invoke any of the function(s), you MUST put it in the format of\n"
+		"{\"name\": function name, \"parameters\": dictionary of argument name and its value}\n"
+		"\n"
+		"IMPORTANT: You must use the EXACT function names and parameter names defined below.\n"
+		"You SHOULD NOT include any other text in the response if you call a function\n"
+		"[\n"
+		"  {\n"
+		"    \"name\": \"set_lamp_state\",\n"
+		"    \"description\": \"Control a smart lamp\",\n"
+		"    \"parameters\": {\n"
+		"      \"type\": \"object\",\n"
+		"      \"properties\": {\n"
+		"        \"state\": {\n"
+		"          \"type\": \"string\",\n"
+		"          \"enum\": [\"on\", \"off\"],\n"
+		"          \"description\": \"Turn the lamp on or off\"\n"
+		"        }\n"
+		"      },\n"
+		"      \"required\": [\"state\"]\n"
+		"    }\n"
+		"  }\n"
+		"]\n"
+		"<end_of_turn>\n");
 }

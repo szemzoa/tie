@@ -26,6 +26,7 @@ typedef void (*layer_norm_fn)(MemType *dest, const MemType *src, const Tensor *w
 typedef void (*conv_2d_fn)(MemType *dest, const MemType *src_image, const Tensor *kernel_tensor,
 			   const Tensor *bias_tensor, int H_in, int W_in, int stride, int padding);
 typedef void (*transpose_fn)(MemType *dest, const MemType *src, int rows, int cols);
+typedef void (*l2_norm_fn)(void *X, int size, float eps);
 
 typedef struct {
 	GGMLType input_type;
@@ -177,17 +178,43 @@ typedef struct {
 	int accel;
 } transpose_dispatch_t;
 
+typedef struct {
+	GGMLType input_type;
+//	GGMLType output_type;
+	l2_norm_fn func;
+	int accel;
+} l2_norm_dispatch_t;
 
+extern void dispatch_l2_norm(MemType *X_slice, int size, float eps);
 extern void dispatch_embedding_row(const Tensor *W, int row_index, MemType *O_slice, int embed_dim);
 extern void dispatch_rms_norm(const MemType *X_slice, const Tensor *W, MemType *O_slice, int size, float eps);
+extern void dispatch_rms_norm_centered(const MemType *X_slice, const Tensor *W, MemType *O_slice, int size, float eps);
+extern void dispatch_rms_norm_batched(const MemType *X, const Tensor *W, MemType *O, int size, float eps, int batch_len,
+				      int stride);
+extern void dispatch_rms_norm_centered_batched(const MemType *X, const Tensor *W, MemType *O, int size, float eps, int batch_len,
+				      int stride);
 extern void dispatch_mat_vec(struct TIEContext *ctx, const MemType *X, const Tensor *W, MemType *O, int in_dim,
 			     int out_dim, int use_threads);
 extern void dispatch_mat_mat(struct TIEContext *ctx, const MemType *X, const Tensor *W, MemType *O, int batch_len,
 			     int in_dim, int out_dim, int use_threads);
+
 extern void dispatch_apply_rope_cache(RopeCacheType *rope_cache, MemType *X_slice, int pos, int head_dim);
+extern void dispatch_apply_rope_cache_batched(RopeCacheType *rope_cache, MemType *X, int start_pos, int head_dim,
+					      int batch_len, int stride);
+
 extern void dispatch_apply_rope_cache_interleaved(RopeCacheType *rope_cache, MemType *X_slice, int pos, int head_dim);
+extern void dispatch_apply_rope_cache_interleaved_batched(RopeCacheType *rope_cache, MemType *X, int start_pos, int head_dim,
+					      int batch_len, int stride);
+
 extern void dispatch_apply_mrope_cache(RopeCacheType *rope_cache, MemType *X_slice, int pos, int head_dim);
+extern void dispatch_apply_mrope_cache_batched(RopeCacheType *rope_cache, MemType *X, int start_pos, int head_dim,
+					      int batch_len, int stride);
+
 extern void dispatch_accumulate_weighted_V(const MemType *V_slice, MemType *O_slice, float weight, int size);
+extern void dispatch_sconv1d(struct TIEContext *ctx, int layer_idx, MemType *qkv_buf, int channels, int batch_len, int kernel_size);
+extern void dispatch_gated_delta_net(struct TIEContext *ctx, int layer_idx, MemType *q_buf, MemType *k_buf, MemType *v_buf,
+			      MemType *alpha_buf, MemType *beta_buf, MemType *gate_buf, MemType *output, int batch_len,
+			      int n_heads, int n_kv_heads, int d_head, int qkv_stride);
 extern void dispatch_store_KV_cache(struct TIEContext *ctx, int layer_idx, int start_pos, int batch_len, int sink_len);
 extern void dispatch_apply_residual(MemType *acc, const MemType *residual, int size);
 extern void dispatch_apply_residual_scaled(MemType *acc, const MemType *residual, int size, float scale);

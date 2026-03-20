@@ -27,6 +27,8 @@ const ModelArch known_archs[] = {
 	{"granite", ARCH_GRANITE, &GRANITE_DEF, NULL},
 	{"lfm2", ARCH_LFM2, &LFM2_DEF, NULL},
 	{"lfm2moe", ARCH_LFM2_MOE, &LFM2_MOE_DEF, NULL},
+	{"qwen35", ARCH_QWEN35, &QWEN35_DEF, NULL},
+	{"qwen35moe", ARCH_QWEN35_MOE, &QWEN35_MOE_DEF, NULL},
 };
 
 const ModelArch known_projectors[] = {
@@ -201,8 +203,14 @@ static int model_load_tensor(struct GGUFModel *model, char *name, Tensor *tensor
 
 	if ((gguf_tensor = gguf_get_tensor(model, name)) == NULL)
 		return -1;
-
+/*
+	if (strstr(name, "ssm_conv1d.weight") || strstr(name, "attn_qkv.weight")) {
+		printf("DEBUG: tensor %s shape: [%" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %" PRIu64 "] type: %d\n", 
+			name, gguf_tensor->dimensions[0], gguf_tensor->dimensions[1], gguf_tensor->dimensions[2], gguf_tensor->dimensions[3], gguf_tensor->type);
+	}
+*/
 	tensor->mem.type = gguf_tensor->type;
+	tensor->mem.n_bytes = gguf_tensor->size;
 	tensor->size_in_bytes = gguf_tensor->size;
 
 	for (int i = 0; i < 4; i++)
@@ -229,6 +237,10 @@ static int model_load_tensor(struct GGUFModel *model, char *name, Tensor *tensor
 
 		tensor->is_mmaped = false;
 	}
+
+//	printf("LOAD TENSOR: %s [%llu, %llu, %llu, %llu] type=%d size=%zu\n", name,
+//	       tensor->dimensions[0], tensor->dimensions[1], tensor->dimensions[2], tensor->dimensions[3],
+//	       tensor->mem.type, tensor->mem.n_bytes);
 
 	model->tensor_loaded++;
 	return 0;
@@ -278,9 +290,9 @@ int model_load_weights(struct GGUFModel *gguf, void *model_struct, const ModelDe
 			snprintf(name_buffer, sizeof(name_buffer), tdef->name_fmt, i);
 			if (model_load_tensor(gguf, name_buffer, dest_tensor, use_mmap) != 0) {
 
-				if (tdef->flags & FLAG_OPTIONAL) {
-					// printf("Info: Optional tensor '%s' not found.\n", tdef->name_fmt);
-				} else {
+				if (!(tdef->flags & FLAG_OPTIONAL)) {
+					//					printf("Info: Optional tensor '%s' not
+					// found.\n", tdef->name_fmt); 				} else {
 					fprintf(stderr, "Failed to load required tensor %s\n", tdef->name_fmt);
 					return -1;
 				}
@@ -406,6 +418,18 @@ int model_init_mem_language(struct TIEContext *ctx, const ModelDef *def)
 		case SIZE_ROPE_COS:
 			alloc_size = ctx->model->seq_length * ctx->model->head_dim * MAX_PROMPT_BATCH_SIZE;
 			break;
+		case SIZE_QWEN35_SSM_QKV:
+			// QKV buffer: Q[group_count*state_size] + K[group_count*state_size] + V[ssm_inner_size]
+			alloc_size = (2 * ctx->model->ssm_group_count * ctx->model->ssm_state_size + ctx->model->ssm_inner_size) * MAX_PROMPT_BATCH_SIZE;
+			break;
+		case SIZE_QWEN35_SSM_DT_BETA:
+			// DT and Beta have shape [ssm_time_step_rank] per token
+			alloc_size = ctx->model->ssm_time_step_rank * MAX_PROMPT_BATCH_SIZE;
+			break;
+		case SIZE_QWEN35_Q_GATE:
+			// Q+Gate buffer for full attention: 2 * num_heads * head_dim per token
+			alloc_size = 2 * ctx->model->num_heads * ctx->model->head_dim * MAX_PROMPT_BATCH_SIZE;
+			break;
 		default:
 			return -1;
 		}
@@ -457,49 +481,60 @@ int model_init_mem_language(struct TIEContext *ctx, const ModelDef *def)
 		}
 	}
 
-	// Special Mamba-2 Buffers
+	// Special Mamba-2 Buffers for Qwen3.5
+	// Based on llama.cpp qwen35.cpp:
+	// num_v_heads = ssm_dt_rank (time_step_rank)
+	// head_v_dim = ssm_d_inner / ssm_dt_rank (ssm_inner_size / ssm_time_step_rank)
+	// State shape: [num_v_heads, head_v_dim, head_v_dim] - square matrix per head
+	int ssm_qkv_size = ctx->model->ssm_inner_size * 3; // The 3 * ssm_inner_size projection
+
 	size_t total_conv_elements = 0;
 	size_t total_ssm_elements = 0;
 	int mamba_layer_count = 0;
 
 	for (int i = 0; i < ctx->model->num_layers; i++) {
 		if (ctx->model->layer_types[i] == LAYER_TYPE_MAMBA2) {
-			// Granite: inner_size=3072, conv_kernel=4, state_size=128
-			total_conv_elements += (size_t)ctx->model->ssm_inner_size * ctx->model->ssm_conv_kernel;
-			total_ssm_elements += (size_t)ctx->model->ssm_inner_size * ctx->model->ssm_state_size;
+			// Conv State: [conv_dim, conv_kernel] where conv_dim = 3 * ssm_inner_size
+			total_conv_elements += (size_t)ssm_qkv_size * ctx->model->ssm_conv_kernel;
+			// SSM State: [n_heads, d_head, d_head] where:
+			// n_heads = ssm_time_step_rank
+			// d_head = ssm_inner_size / ssm_time_step_rank
+			int n_heads_ssm = ctx->model->ssm_time_step_rank;
+			int d_head_ssm = ctx->model->ssm_inner_size / n_heads_ssm;
+			int d_state_ssm = ctx->model->ssm_state_size;
+			total_ssm_elements += (size_t)n_heads_ssm * d_head_ssm * d_state_ssm;
+
 			mamba_layer_count++;
 		}
 	}
 
-	//  Allocate the Big Blocks (if needed)
 	if (mamba_layer_count > 0) {
+		// Allocate the Big Blocks
 		alloc_memtype(&ctx->mem.mamba_conv_states_memory, GGML_TYPE_F32, total_conv_elements);
 		alloc_memtype(&ctx->mem.mamba_ssm_states_memory, GGML_TYPE_F32, total_ssm_elements);
 
-		// Zero them out (Crucial for Recurrent State!)
+		// Initial zeroing is vital!
 		memset(ctx->mem.mamba_conv_states_memory.data, 0, ctx->mem.mamba_conv_states_memory.n_bytes);
 		memset(ctx->mem.mamba_ssm_states_memory.data, 0, ctx->mem.mamba_ssm_states_memory.n_bytes);
 
-		// Allocate the array of structs
 		ctx->mem.mamba_states = calloc(ctx->model->num_layers, sizeof(LayerMambaState));
-		alloc_memtype(&ctx->mem.mamba_in_proj_output, GGML_TYPE_F32,
-			      ctx->model->ssm_proj_dim * MAX_PROMPT_BATCH_SIZE);
-	}
 
-	// Distribute Memory Pointers
-	float *conv_ptr = (float *)ctx->mem.mamba_conv_states_memory.data;
-	float *ssm_ptr = (float *)ctx->mem.mamba_ssm_states_memory.data;
+		// Distribute Memory Pointers
+		float *conv_ptr = (float *)ctx->mem.mamba_conv_states_memory.data;
+		float *ssm_ptr = (float *)ctx->mem.mamba_ssm_states_memory.data;
 
-	for (int i = 0; i < ctx->model->num_layers; i++) {
-		if (ctx->model->layer_types[i] == LAYER_TYPE_MAMBA2) {
-			// Assign pointers
-			ctx->mem.mamba_states[i].conv_state = conv_ptr;
-			ctx->mem.mamba_states[i].ssm_state = ssm_ptr;
-			ctx->mem.mamba_states[i].conv_pos = 0;
+		for (int i = 0; i < ctx->model->num_layers; i++) {
+			if (ctx->model->layer_types[i] == LAYER_TYPE_MAMBA2) {
+				ctx->mem.mamba_states[i].conv_state = conv_ptr;
+				ctx->mem.mamba_states[i].ssm_state = ssm_ptr;
+				ctx->mem.mamba_states[i].conv_pos = 0;
 
-			// Advance pointers
-			conv_ptr += (size_t)ctx->model->ssm_inner_size * ctx->model->ssm_conv_kernel;
-			ssm_ptr += (size_t)ctx->model->ssm_inner_size * ctx->model->ssm_state_size;
+				conv_ptr += (size_t)ssm_qkv_size * ctx->model->ssm_conv_kernel;
+				// State: [n_heads, d_head, d_head]
+				int n_heads_ssm = ctx->model->ssm_time_step_rank;
+				int d_head_ssm = ctx->model->ssm_inner_size / n_heads_ssm;
+				ssm_ptr += (size_t)n_heads_ssm * d_head_ssm * d_head_ssm;
+			}
 		}
 	}
 
@@ -508,8 +543,7 @@ int model_init_mem_language(struct TIEContext *ctx, const ModelDef *def)
 		alloc_memtype(&ctx->mem.shared_expert_output, GGML_TYPE_F32, ctx->model->expert_shared_ffn_dim);
 	}
 
-
-	/* LFM2 ShortConv Buffers */
+	/* ShortConv Buffers */
 	int shortconv_layer_count = 0;
 	for (int i = 0; i < ctx->model->num_layers; i++) {
 		if (ctx->model->layer_types[i] == LAYER_TYPE_SHORTCONV) {
@@ -533,9 +567,6 @@ int model_init_mem_language(struct TIEContext *ctx, const ModelDef *def)
 
 		for (int i = 0; i < ctx->model->num_layers; i++) {
 			if (ctx->model->layer_types[i] == LAYER_TYPE_SHORTCONV) {
-				// Use your aligned allocator (xaligned_alloc) directly
-				// Do NOT use alloc_memtype here unless LayerConvState has a MemType field.
-
 				ctx->mem.lfm2_conv_states[i].buffer = xaligned_alloc(32, state_bytes);
 
 				if (!ctx->mem.lfm2_conv_states[i].buffer) {
@@ -676,7 +707,6 @@ int model_language_init(struct TIEContext *ctx, Model *model, const ModelDef *de
 	int mamba_layer_idx = -1;
 	uint32_t *kv_heads;
 
-
 	printf("\n[%s] init\n", def->name);
 
 	/* Init language model defaults */
@@ -739,8 +769,6 @@ int model_language_init(struct TIEContext *ctx, Model *model, const ModelDef *de
 		break;
 
 	case ARCH_GRANITE:
-		ctx->model->layer_types = malloc(ctx->model->num_layers * sizeof(uint8_t));
-
 		// Iterate the KV array
 		kv_heads = (uint32_t *)ctx->model->attn_head_count_kv.data;
 		if (ctx->model->attn_head_count_kv.size != ctx->model->num_layers) {
@@ -841,6 +869,24 @@ int model_language_init(struct TIEContext *ctx, Model *model, const ModelDef *de
 		ctx->model->attn_scale = 1.0f / sqrtf((float)ctx->model->head_dim);
 		break;
 
+	case ARCH_QWEN35:
+		ctx->model->attn_scale = 1.0f / sqrtf((float)ctx->model->head_dim);
+		ctx->model->use_mrope = 1;
+
+		/* update model layer types if layer is NOT attention */
+		for (int i = 0; i < ctx->model->num_layers; i++) {
+			if ((i + 1) % ctx->model->full_attention_interval == 0) {
+				ctx->model->layer_types[i] = LAYER_TYPE_ATTENTION;
+				attn_layer_idx = i;
+			} else {
+				ctx->model->layer_types[i] = LAYER_TYPE_MAMBA2;
+			}
+//			printf("layer#%u is %s\n", i,
+//			       ctx->model->layer_types[i] == LAYER_TYPE_MAMBA2 ? "MAMBA2" : "ATTENTION");
+		}
+
+		break;
+
 	default:
 		printf(CLR_RED "!!! %s: %s model not defined? !!!\n", __FUNCTION__, def->name);
 		printf(CLR_RESET);
@@ -848,32 +894,13 @@ int model_language_init(struct TIEContext *ctx, Model *model, const ModelDef *de
 	}
 
 	// Initialize RoPE cache
-	printf("init: RoPE cache, length: %u, dim: %u\n", ctx->model->context_size, ctx->model->head_dim);
+	printf("init: RoPE cache, length: %u\n", ctx->model->context_size);
 	ctx->model->interface.build_rope_cache(ctx, ctx->model->context_size);
 
 	init_KV_cache(ctx);
 
 	if (model_init_mem_language(ctx, def) != 0)
 		return -1;
-
-#if 0
-	if (ctx->mem.mamba_states) {
-    	    for (int l = 0; l < ctx->model->num_layers; l++) {
-        	LayerMambaState *s = &ctx->mem.mamba_states[l];
-
-        	// Reset Convolution State
-        	size_t conv_size = ctx->model->ssm_inner_size * ctx->model->ssm_conv_kernel * sizeof(float);
-        	memset(s->conv_state, 0, conv_size);
-
-        	// Reset SSM State
-        	size_t ssm_size = ctx->model->ssm_time_step_rank * 64 * ctx->model->ssm_state_size * sizeof(float);
-        	memset(s->ssm_state, 0, ssm_size);
-
-        	// Reset Ring Buffer Index
-        	s->conv_pos = 0;
-    	    }
-	}
-#endif
 
 	return 0;
 }
@@ -1345,6 +1372,14 @@ void language_model_info(struct TIEContext *ctx)
 		printf("SSM: conv_kernel: %u, state_size: %u, group_count: %u, inner_size: %u, time_step_rank: %u\n",
 		       ctx->model->ssm_conv_kernel, ctx->model->ssm_state_size, ctx->model->ssm_group_count,
 		       ctx->model->ssm_inner_size, ctx->model->ssm_time_step_rank);
+		
+		// Validate SSM dimensions (matching llama.cpp qwen35.cpp)
+		int n_heads_ssm = ctx->model->ssm_time_step_rank;
+		int d_head_ssm = ctx->model->ssm_inner_size / n_heads_ssm;
+		printf("SSM: derived n_heads(dt_rank)=%d, d_head=%d\n", n_heads_ssm, d_head_ssm);
+		printf("SSM: state shape per layer: [%d, %d, %d] = %zu elements\n", 
+		       n_heads_ssm, d_head_ssm, d_head_ssm, 
+		       (size_t)n_heads_ssm * d_head_ssm * d_head_ssm);
 	}
 
 	printf("Context_length: %u\n", ctx->model->seq_length);

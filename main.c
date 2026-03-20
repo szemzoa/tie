@@ -42,6 +42,7 @@ bool think_active = false;
 bool tab_pressed = false;
 
 static struct termios orig_term;
+char *prompt = NULL;
 
 
 int64_t elapsed_time_us(const struct timespec after, const struct timespec before)
@@ -80,8 +81,8 @@ bool input_readline(char *buf, size_t buflen)
 		}
 
 		// Enter or Ctrl+Q
-		//        if (c == '\n' || c == '\r') {
-		if (c == 0x11) {
+		if (c == '\n' || c == '\r' || c == 0x11) {
+//		if (c == 0x11) {
 			write(STDOUT_FILENO, "\n", 1);
 			return true;
 		}
@@ -252,9 +253,8 @@ void generate_output(struct TIEContext *ctx, int current_token)
 	fflush(stdout);
 }
 
-
 int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf, bool has_image, size_t *num_tokens,
-				  bool prefill_only)
+				  bool prefill_only, bool tool_result)
 {
 	size_t user_text_token_count = 0;
 	size_t prompt_len = 0;
@@ -272,6 +272,10 @@ int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf,
 	int *user_text_tokens = ctx->model->interface.tokenize_encode(ctx, input_buf, &user_text_token_count);
 	if (!user_text_tokens)
 		return NULL;
+
+	if (tool_result == true) {
+		printf("Tool result\n");
+	}
 
 	if (prefill_only == true) {
 
@@ -297,12 +301,25 @@ int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf,
 		return prompt_tokens;
 	}
 
-	if (ctx->model->interface.build_prompt) {
+	if (tool_result == false) {
+
+	    if (ctx->model->interface.build_prompt) {
 		prompt_len = ctx->model->interface.build_prompt(ctx, prompt_tokens, user_text_tokens,
 								user_text_token_count, has_image);
+	    }
+
+	} else {
+
+		for (int i = 0; i < user_text_token_count; i++)
+			prompt_tokens[i] = user_text_tokens[i];
+
+		prompt_len = user_text_token_count;
 	}
 
 	free(user_text_tokens);
+
+//	prompt_len = 1;
+//	prompt_tokens[0] = 12675;
 
 #ifdef DEBUG_TOKENS
 	char buf[256];
@@ -322,7 +339,6 @@ int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf,
 		int w_patches = 0;
 
 		if (has_image && ctx->model_vision) {
-
 			// Retrieve dimensions from the most recently processed image
 			int raw_w = ctx->vision_mem.image_raw_width;
 			int raw_h = ctx->vision_mem.image_raw_height;
@@ -331,6 +347,7 @@ int *build_multimodal_turn_tokens(struct TIEContext *ctx, const char *input_buf,
 		}
 
 		build_mrope_position_ids(ctx, prompt_tokens, prompt_len, has_image, ctx->kv_pos, h_patches, w_patches);
+
 		text_rope_cache_init(ctx, prompt_len, ctx->kv_pos);
 	}
 
@@ -355,7 +372,7 @@ int engine_prefill(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len
 	// Custom Prompt Processor (if defined)
 	if (ctx->model->interface.process_prompt_custom) {
 		ctx->model->interface.process_prompt_custom(ctx, prompt_tokens, prompt_len);
-		return 0;
+		goto _engine_prefill_finished;
 	}
 
 	// Process Vision Encoder
@@ -396,6 +413,7 @@ int engine_prefill(struct TIEContext *ctx, int *prompt_tokens, size_t prompt_len
 	// Run Transformer Layers
 	process_embeddings(ctx, &ctx->mem.hidden_state, current_pos);
 
+_engine_prefill_finished:
 	clock_gettime(CLOCK_REALTIME, &end);
 	float tps = (float)prompt_len / (elapsed_time_us(end, start) / 1000000.0f);
 	printf(DEBUG "--- Prefill Complete: %llu ms %.2f tps---\n" CLR_RESET, elapsed_time_us(end, start) / 1000, tps);
@@ -677,7 +695,7 @@ void *model_thread_main(void *arg)
 			// Build Prompt
 			size_t prompt_len = 0;
 			int *tokens = build_multimodal_turn_tokens(ctx, cmd.text, cmd.has_image, &prompt_len,
-								   cmd.prefill_only);
+								   cmd.prefill_only, cmd.tool_result);
 
 			if (!tokens) {
 
@@ -694,7 +712,6 @@ void *model_thread_main(void *arg)
 				push_evt((ModelEvent){.type = EVT_FINISHED});
 				continue;
 			}
-
 
 			// Run Decode
 			engine_decode(ctx, MAX_GENERATE_TOKENS, generated_tokens, prompt_len, model_on_token, NULL);
@@ -724,6 +741,13 @@ int read_user_input(char *input_buf, size_t buf_size)
 {
 	printf(USER_PROMPT "\n> ");
 	fflush(stdout);
+
+	if (prompt != NULL) {
+	    sprintf(input_buf, "%s", prompt);
+	    prompt = NULL;
+	    fflush(stdout);
+	    return 0;
+	}
 
 	if (!input_readline(input_buf, buf_size)) {
 		//		push_cmd((ModelCommand){.type = CMD_EXIT});
@@ -762,6 +786,9 @@ void run_ui_loop(struct TIEContext *ctx)
 					break;
 			}
 		}
+
+		if (ctx->model->add_bos_token == 1)
+			ctx->model->bos_token_sent = 1;
 	}
 
 	printf(CLR_RESET CLR_BOLD CLR_RED "\nWelcome to interactive chat. Available commands:\n");
@@ -845,7 +872,7 @@ void run_ui_loop(struct TIEContext *ctx)
 				tc->state = TOOL_STATE_IDLE;
 
 				ModelCommand cmd = {
-					.type = CMD_GENERATE, .text = tc->result_prompt, .has_image = false};
+					.type = CMD_GENERATE, .text = tc->result_prompt, .has_image = false, .tool_result = true};
 
 				push_cmd(cmd);
 
@@ -892,6 +919,10 @@ static void handle_mmap(AppConfig *cfg, const char *v)
 {
 	cfg->use_mmap = 1;
 }
+static void handle_prompt(AppConfig *cfg, const char *v)
+{
+	prompt = (char *)v;
+}
 
 static void print_help(const char *progname);
 
@@ -910,6 +941,7 @@ static const ArgSpec arg_table[] = {
 	{"top-p", 'P', 1, handle_top_p, "Nucleus sampling (top-p)"},
 	{"top-k", 'K', 1, handle_top_k, "Top-k sampling"},
 	{"mmap", 'M', 0, handle_mmap, "Use mmap to load model"},
+	{"prompt", 'q', 1, handle_prompt, "Use prompt instead of interactive mode"},
 	{"help", 'h', 0, handle_help, "Show help message"},
 };
 static const int arg_table_count = sizeof(arg_table) / sizeof(arg_table[0]);
@@ -1133,6 +1165,8 @@ int main(int argc, char *argv[])
 	printf("pad_token_id: %d\n", ctx->model->pad_token_id);
 	printf("eos_token_id: %d\n", ctx->model->eos_token_id);
 #endif
+
+//	printf(CLR_CYAN "\n---CHAT_TEMPLATE---\n\n%s\n\n" CLR_RESET, gguf_metadata_get_string(ctx->gguf_text, "tokenizer.chat_template"));
 
 	start_think = get_special_token_id(ctx, "<think>", -1);
 	end_think = get_special_token_id(ctx, "</think>", -1);

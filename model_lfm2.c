@@ -20,6 +20,7 @@
 int transformer_layer_lfm2(struct TIEContext *ctx, int layer_idx, int batch_len);
 int build_prompt_lfm2(struct TIEContext *ctx, int *prompt_tokens, int *user_text_tokens, int user_text_token_count,
 		      bool has_image);
+char *build_system_prompt_lfm2(struct TIEContext *ctx);
 
 static const TensorDef LFM2_GLOBAL_TENSORS[] = {
 	{"token_embd.weight", offsetof(Model, token_embd), FLAG_NONE},
@@ -107,6 +108,7 @@ ModelDef LFM2_DEF = {
 		},
 	.interface =
 		{
+			.build_system_prompt = build_system_prompt_lfm2,
 			.tokenize_encode = tokenize_bpe,
 			.tokenize_decode = decode_token_bpe,
 			.build_prompt = build_prompt_lfm2,
@@ -159,6 +161,7 @@ ModelDef LFM2_MOE_DEF = {.arch = ARCH_LFM2_MOE,
 				 },
 			 .interface =
 				 {
+					 .build_system_prompt = build_system_prompt_lfm2,
 					 .tokenize_encode = tokenize_bpe,
 					 .tokenize_decode = decode_token_bpe,
 					 .build_prompt = build_prompt_lfm2,
@@ -340,12 +343,9 @@ int transformer_layer_lfm2(struct TIEContext *ctx, int layer_idx, int batch_len)
 
 
 	// RMSNorm
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = i * ctx->model->embed_dim;
-		MemType hidden = mem_slice(&ctx->mem.hidden_state, offset);
-		MemType normed = mem_slice(&ctx->mem.normed_qkv_input, offset);
-		dispatch_rms_norm(&hidden, &l->attn_norm, &normed, ctx->model->embed_dim, ctx->model->norm_eps);
-	}
+	dispatch_rms_norm_batched(&ctx->mem.hidden_state, &l->attn_norm, &ctx->mem.normed_qkv_input,
+				  ctx->model->embed_dim, ctx->model->norm_eps, batch_len,
+				  ctx->model->embed_dim);
 
 	// MIXER BLOCK (Attention or ShortConv)
 	if (layer_type == LAYER_TYPE_ATTENTION) {
@@ -363,29 +363,31 @@ int transformer_layer_lfm2(struct TIEContext *ctx, int layer_idx, int batch_len)
 				 ctx->model->embed_dim, kv_dim, true);
 
 		// RoPE
-		for (int i = 0; i < batch_len; i++) {
-			int absolute_pos = start_pos + i;
-			for (int h = 0; h < ctx->model->num_heads; h++) {
-				MemType Q_slice = mem_slice(&ctx->mem.Q, (size_t)i * q_dim + h * ctx->model->head_dim);
+		for (int h = 0; h < ctx->model->num_heads; h++) {
+				MemType Q_slice = mem_slice(&ctx->mem.Q, (size_t)h * ctx->model->head_dim);
+
 				if (l->attn_q_norm.mem.data)
-					dispatch_rms_norm(&Q_slice, &l->attn_q_norm, &Q_slice, ctx->model->head_dim,
-							  ctx->model->norm_eps);
-				dispatch_apply_rope_cache(ctx->model->rope_cache_global, &Q_slice, absolute_pos,
-							  ctx->model->head_dim);
-			}
-			for (int h = 0; h < ctx->model->num_kv_heads; h++) {
-				MemType K_slice = mem_slice(&ctx->mem.K, (size_t)i * kv_dim + h * ctx->model->head_dim);
+					dispatch_rms_norm_batched(&Q_slice, &l->attn_q_norm, &Q_slice,
+								  ctx->model->head_dim, ctx->model->norm_eps, batch_len, q_dim);
+
+				dispatch_apply_rope_cache_batched(ctx->model->rope_cache_global, &Q_slice, start_pos,
+							  ctx->model->head_dim, batch_len, q_dim);
+		}
+
+		for (int h = 0; h < ctx->model->num_kv_heads; h++) {
+				MemType K_slice = mem_slice(&ctx->mem.K, (size_t)h * ctx->model->head_dim);
+
 				if (l->attn_k_norm.mem.data)
-					dispatch_rms_norm(&K_slice, &l->attn_k_norm, &K_slice, ctx->model->head_dim,
-							  ctx->model->norm_eps);
-				dispatch_apply_rope_cache(ctx->model->rope_cache_global, &K_slice, absolute_pos,
-							  ctx->model->head_dim);
-			}
+					dispatch_rms_norm_batched(&K_slice, &l->attn_k_norm, &K_slice,
+								  ctx->model->head_dim, ctx->model->norm_eps, batch_len, kv_dim);
+
+				dispatch_apply_rope_cache_batched(ctx->model->rope_cache_global, &K_slice, start_pos,
+							  ctx->model->head_dim, batch_len, kv_dim);
 		}
 
 		dispatch_store_KV_cache(ctx, layer_idx, start_pos, batch_len, sink_len);
 
-		attention(ctx, batch_len, layer_idx, layer_idx, start_pos, attn_type, attention_worker, sink_len);
+		attention(ctx, batch_len, layer_idx, layer_idx, start_pos, attn_type, attention_worker, sink_len, ctx->model->head_dim);
 
 		dispatch_mat_mat(ctx, &ctx->mem.attn_output, &l->attn_out, &ctx->mem.attn_proj_output, batch_len, q_dim,
 				 ctx->model->embed_dim, true);
@@ -401,12 +403,9 @@ int transformer_layer_lfm2(struct TIEContext *ctx, int layer_idx, int batch_len)
 
 	// FFN BLOCK (Hybrid Dense/MoE)
 	// RMSNorm
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = i * ctx->model->embed_dim;
-		MemType hidden = mem_slice(&ctx->mem.hidden_state, offset);
-		MemType normed = mem_slice(&ctx->mem.normed_ffn_input, offset);
-		dispatch_rms_norm(&hidden, &l->ffn_norm, &normed, ctx->model->embed_dim, ctx->model->norm_eps);
-	}
+	dispatch_rms_norm_batched(&ctx->mem.hidden_state, &l->ffn_norm, &ctx->mem.normed_ffn_input,
+				  ctx->model->embed_dim, ctx->model->norm_eps, batch_len,
+				  ctx->model->embed_dim);
 
 	// Only use MoE if layer_idx >= leading_dense_block_count
 	bool use_moe_ffn = ctx->model->is_moe && (layer_idx >= ctx->model->expert_leading_dense_layers);
@@ -525,7 +524,12 @@ int build_prompt_lfm2(struct TIEContext *ctx, int *prompt_tokens, int *user_text
 	ModelDef *vdef = ctx->model->def;
 	int prompt_len = 0;
 
-	prompt_tokens[prompt_len++] = def->params.sot_token_id;
+	if (ctx->model->add_bos_token == 1 && ctx->model->bos_token_sent == 0) {
+		prompt_tokens[prompt_len++] = def->params.sot_token_id;
+		ctx->model->bos_token_sent = 1;
+	}
+//	prompt_tokens[prompt_len++] = def->params.sot_token_id;
+
 	prompt_tokens[prompt_len++] = 6;
 	prompt_tokens[prompt_len++] = def->params.role_user_token_id;
 	prompt_tokens[prompt_len++] = def->params.newline_token_id;
@@ -574,4 +578,12 @@ int build_prompt_lfm2(struct TIEContext *ctx, int *prompt_tokens, int *user_text
 	prompt_tokens[prompt_len++] = def->params.newline_token_id;
 
 	return prompt_len;
+}
+
+char *build_system_prompt_lfm2(struct TIEContext *ctx)
+{
+	return strdup(
+    		"<|startoftext|><|im_start|>system\nYou are a helpful assistant trained by Liquid AI.\n"
+		"List of tools: <|tool_list_start|>[{\"type\": \"function\", \"function\": { \"name\": \"set_lamp_state\", \"description\": \"Turn lamp on/off\",\"parameters\""
+		"{ \"type\": \"object\", \"properties\": { \"state\": {\"type\": \"string\", \"enum\": [\"on\", \"off\"]} }, \"required\": [\"state\"] } }}]<|tool_list_end|><|im_end|>\n");
 }

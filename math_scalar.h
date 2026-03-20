@@ -14,13 +14,17 @@ extern void convert_f32_f32_scalar(const void *src, void *dest, int size);
 extern float dot_product_f32_f32_scalar(const void *__restrict a, const void *__restrict b, int size);
 extern float dot_product_f32_bf16_scalar(const void *__restrict a, const void *__restrict b, int size);
 extern void get_embedding_row_q4k_f32_scalar(const Tensor *W, int row_index, void *dest, int embed_dim);
+extern void get_embedding_row_q5k_f32_scalar(const Tensor *W, int row_index, void *dest, int embed_dim);
 extern void get_embedding_row_q6k_f32_scalar(const Tensor *W, int row_index, void *dest, int embed_dim);
 extern void get_embedding_row_bf16_f32_scalar(const Tensor *W, int row_index, void *dest, int embed_dim);
 extern void get_embedding_row_f32_f32_scalar(const Tensor *W, int row_index, void *dest, int embed_dim);
 extern void apply_residual_f32_f32_scalar(void *acc_void, const void *residual_void, int size);
 extern void apply_residual_scaled_f32_f32_scalar(void *acc_void, const void *residual_void, int size, float scale);
 
+extern void l2_norm_f32_scalar(void *__restrict X, int size, float eps);
 extern void rms_norm_f32_f32_f32_scalar(void *__restrict O, const void *__restrict X, const Tensor *__restrict W,
+					int size, float eps);
+extern void rms_norm_centered_f32_f32_f32_scalar(void *__restrict O, const void *__restrict X, const Tensor *__restrict W,
 					int size, float eps);
 extern void mat_vec_row_bf16_q4k_f32_scalar(const void *X, const void *w_void, void *O, int in_dim, int start_row,
 					    int end_row);
@@ -60,5 +64,11 @@ extern void layer_norm_f32_f32_f32_f32_scalar(MemType *dest, const MemType *src,
 					      const Tensor *bias, int size, float eps);
 extern void transpose_f32_scalar(MemType *dest, const MemType *src, int rows, int cols);
 extern void transpose_bf16_scalar(MemType *dest, const MemType *src, int rows, int cols);
+
+extern void get_embedding_row_q5k_f32_scalar(const Tensor *W, int row_index, void *dest, int embed_dim);
+extern void get_embedding_row_q8_0_f32_scalar(const Tensor *W, int row_index, void *dest, int embed_dim);
+
+extern void mat_vec_row_f32_q8_0_f32_scalar(const void *X, const void *w_void, void *O, int in_dim, int start_row, int end_row);
+extern void mat_vec_row_f32_q5k_f32_scalar(const void *X, const void *w_void, void *O, int in_dim, int start_row, int end_row);
 
 #endif

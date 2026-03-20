@@ -15,6 +15,7 @@
 int transformer_layer_granite(struct TIEContext *ctx, int layer_idx, int batch_len);
 int build_prompt_granite(struct TIEContext *ctx, int *prompt_tokens, int *user_text_tokens, int user_text_token_count,
 			 bool has_image);
+char *build_system_prompt_granite(struct TIEContext *ctx);
 
 static const TensorDef GRANITE_GLOBAL_TENSORS[] = {
 	DECLARE_GLOBAL_TENSORS_BASE_DEFS,
@@ -137,15 +138,9 @@ int transformer_layer_granite(struct TIEContext *ctx, int layer_idx, int batch_l
 
 
 	// Input Layernorm
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-		MemType hidden_slice = mem_slice(&ctx->mem.hidden_state, offset);
-		MemType normed_slice = mem_slice(&ctx->mem.normed_qkv_input, offset);
-
-		// RMSNorm
-		dispatch_rms_norm(&hidden_slice, &l->attn_norm, &normed_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
+	dispatch_rms_norm_batched(&ctx->mem.hidden_state, &l->attn_norm, &ctx->mem.normed_qkv_input,
+				  ctx->model->embed_dim, ctx->model->norm_eps, batch_len,
+				  ctx->model->embed_dim);
 
 	// ATTENTION
 	int kv_dim = ctx->model->num_kv_heads * ctx->model->head_dim;
@@ -183,7 +178,7 @@ int transformer_layer_granite(struct TIEContext *ctx, int layer_idx, int batch_l
 	dispatch_store_KV_cache(ctx, layer_idx, start_pos, batch_len, sink_len);
 
 	// Attention
-	attention(ctx, batch_len, layer_idx, layer_idx, start_pos, ATTN_TYPE_GLOBAL, attention_worker, sink_len);
+	attention(ctx, batch_len, layer_idx, layer_idx, start_pos, ATTN_TYPE_GLOBAL, attention_worker, sink_len, ctx->model->head_dim);
 
 	// Output Projection
 	dispatch_mat_mat(ctx, &ctx->mem.attn_output, &l->attn_out, &ctx->mem.attn_proj_output, batch_len, q_dim,
@@ -195,13 +190,9 @@ int transformer_layer_granite(struct TIEContext *ctx, int layer_idx, int batch_l
 				       batch_len * ctx->model->embed_dim, res_scale);
 
 	// POST-NORM
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-		MemType hidden_slice = mem_slice(&ctx->mem.hidden_state, offset);
-		MemType normed_slice = mem_slice(&ctx->mem.normed_ffn_input, offset); // Reuse buffer
-		dispatch_rms_norm(&hidden_slice, &l->ffn_norm, &normed_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
+	dispatch_rms_norm_batched(&ctx->mem.hidden_state, &l->ffn_norm, &ctx->mem.normed_ffn_input,
+				  ctx->model->embed_dim, ctx->model->norm_eps, batch_len,
+				  ctx->model->embed_dim);
 
 	// Gate + Up projections
 	dispatch_mat_mat(ctx, &ctx->mem.normed_ffn_input, &l->ffn_gate, &ctx->mem.gate_proj_output, batch_len,
@@ -256,4 +247,18 @@ int build_prompt_granite(struct TIEContext *ctx, int *prompt_tokens, int *user_t
 	prompt_tokens[prompt_len++] = end_role;
 
 	return prompt_len;
+}
+
+char *build_system_prompt_granite(struct TIEContext *ctx)
+{
+	return strdup(
+		"<|start_of_role|>system<|end_of_role|>You are a helpful assistant with access to the following tools. You may call one or more tools to assist with the user query.\n"
+		"You are provided with function signatures within <tools></tools> XML tags:\n"
+		"<tools>\n"
+		"{\"type\": \"function\", \"function\": {\"name\": \"get_current_weather\", \"description\": \"Get the current weather for a specified city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"Name of the city\"}}, \"required\": [\"city\"]}}}\n"
+		"</tools>\n"
+		"For each tool call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n"
+		"<tool_call>\n"
+		"{\"name\": <function-name>, \"arguments\": <args-json-object>}\n"
+		"</tool_call>. If a tool does not exist in the provided list of tools, notify the user that you do not have the ability to fulfill the request.<|end_of_text|>\n");
 }

@@ -31,8 +31,4 @@ extern void tools_register_default(struct TIEContext *ctx);
 extern bool tools_process_token(struct TIEContext *ctx, int token);
 extern void tools_execute_pending(struct TIEContext *ctx);
 
-extern char *build_system_prompt_qwen3(struct TIEContext *ctx);
-extern char *build_system_prompt_gemma3(struct TIEContext *ctx);
-extern char *build_system_prompt_granite(struct TIEContext *ctx);
-
 #endif

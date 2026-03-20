@@ -105,19 +105,26 @@ typedef struct {
 	uint16_t d;	   // super-block scale (fp16)
 } block_q6_k;
 
+#define K_SCALE_SIZE 12
+
 typedef struct {
 	uint16_t d;	    // ggml_half (IEEE 754 half-precision)
 	uint16_t dmin;	    // ggml_half
-	uint8_t scales[12]; // Packed 6-bit scale/min pairs
+	uint8_t scales[K_SCALE_SIZE]; // Packed 6-bit scale/min pairs
 	uint8_t qs[128];    // Packed 4-bit quantized weights
 } block_q4_k;
 
-#define QK5_0 32
+// 5-bit quantization
+// 8 blocks of 32 elements each
+// weight is represented as x = a * q + b
+// Effectively 5.5 bits per weight
 typedef struct {
-	uint16_t d;	// Scale (2 bytes)
-	uint8_t qh[4];	// High bits (4 bytes)
-	uint8_t qs[16]; // Low bits (16 bytes, 2 nibbles each)
-} block_q5_0;
+	uint16_t d;	    // ggml_half (IEEE 754 half-precision)
+	uint16_t dmin;	    // ggml_half
+	uint8_t scales[K_SCALE_SIZE]; // Packed 6-bit scale/min pairs
+	uint8_t qh[QK_K/8]; // quants, high bit
+	uint8_t qs[QK_K/2]; // quants, low 4 bits
+} block_q5_K;
 
 #define QK8_0 32
 typedef struct {

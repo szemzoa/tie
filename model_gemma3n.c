@@ -943,16 +943,9 @@ int transformer_layer_gemma3n(struct TIEContext *ctx, int layer_idx, int batch_l
 
 	// Attention Block
 	// RMSNorm
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-
-		// Create slices for the specific token being processed
-		MemType input_slice = mem_slice(&ctx->mem.altup_predicted_states[DATA_ACTIVE_IDX], offset);
-		MemType normed_slice = mem_slice(&ctx->mem.normed_qkv_input, offset);
-
-		dispatch_rms_norm(&input_slice, &l->attn_norm, &normed_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
+	dispatch_rms_norm_batched(&ctx->mem.altup_predicted_states[DATA_ACTIVE_IDX], &l->attn_norm, &ctx->mem.normed_qkv_input,
+				  ctx->model->embed_dim, ctx->model->norm_eps, batch_len,
+				  ctx->model->embed_dim);
 
 	MemType laurel_output;
 	alloc_memtype(&laurel_output, GGML_TYPE_F32, batch_len * ctx->model->embed_dim);
@@ -1018,21 +1011,17 @@ int transformer_layer_gemma3n(struct TIEContext *ctx, int layer_idx, int batch_l
 	}
 
 	// Multi-Head Attention Calculation
-	attention(ctx, batch_len, layer_idx, kv_source_layer_idx, start_pos, attn_type, attention_worker, sink_len);
+	attention(ctx, batch_len, layer_idx, kv_source_layer_idx, start_pos, attn_type, attention_worker, sink_len, ctx->model->head_dim);
 
 	// Output projection
 	dispatch_mat_mat(ctx, &ctx->mem.attn_output, &l->attn_out, &ctx->mem.attn_proj_output, batch_len, q_dim,
 			 ctx->model->embed_dim, true);
 
 	// Apply POST-ATTENTION norm
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
+	dispatch_rms_norm_batched(&ctx->mem.attn_proj_output, &l->post_attn_norm, &ctx->mem.attn_proj_output,
+				  ctx->model->embed_dim, ctx->model->norm_eps, batch_len,
+				  ctx->model->embed_dim);
 
-		MemType attn_proj_slice = mem_slice(&ctx->mem.attn_proj_output, offset);
-
-		dispatch_rms_norm(&attn_proj_slice, &l->post_attn_norm, &attn_proj_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
 
 	// Add the post-normed attention output to the original residual
 	dispatch_apply_residual(&ctx->mem.residual_stratch, &ctx->mem.attn_proj_output,
@@ -1063,16 +1052,9 @@ int transformer_layer_gemma3n(struct TIEContext *ctx, int layer_idx, int batch_l
 
 	// FFN Block
 	// RMSNorm
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-
-		// Create slices for the specific token being processed
-		MemType attn_laurel_mix_slice = mem_slice(&attn_laurel_mix, offset);
-		MemType normed_ffn_input_slice = mem_slice(&ctx->mem.normed_ffn_input, offset);
-
-		dispatch_rms_norm(&attn_laurel_mix_slice, &l->ffn_norm, &normed_ffn_input_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
+	dispatch_rms_norm_batched(&attn_laurel_mix, &l->ffn_norm, &ctx->mem.normed_ffn_input,
+				  ctx->model->embed_dim, ctx->model->norm_eps, batch_len,
+				  ctx->model->embed_dim);
 
 	// Gate + Up projections
 	dispatch_mat_mat(ctx, &ctx->mem.normed_ffn_input, &l->ffn_gate, &ctx->mem.gate_proj_output, batch_len,
@@ -1099,13 +1081,9 @@ int transformer_layer_gemma3n(struct TIEContext *ctx, int layer_idx, int batch_l
 			 ctx->model->ffn_dim, ctx->model->embed_dim, true);
 
 	// Apply POST-FFN norm
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-		MemType ffn_down_slice = mem_slice(&ctx->mem.ffn_down_output, offset);
-
-		dispatch_rms_norm(&ffn_down_slice, &l->post_ffw_norm, &ffn_down_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
+	dispatch_rms_norm_batched(&ctx->mem.ffn_down_output, &l->post_ffw_norm, &ctx->mem.ffn_down_output,
+				  ctx->model->embed_dim, ctx->model->norm_eps, batch_len,
+				  ctx->model->embed_dim);
 
 	// Second Residual Add.
 	// Add the post-normed FFN output to the residual

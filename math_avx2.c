@@ -603,6 +603,121 @@ __attribute__((target("avx2"))) float dot_product_f32_q4k_avx2(const float *x, c
 	return hsum_f32_avx2(acc0);
 }
 
+__attribute__((target("avx2"))) float dot_product_f32_q5k_avx2(const float *x, const block_q5_K *block)
+{
+	const float d = fp16_to_fp32(block->d);
+	const float dmin = fp16_to_fp32(block->dmin);
+
+	// Pre-calculate scales/mins (same as Q4_K)
+	float scales[8], mins[8];
+	for (int i = 0; i < 8; i += 2) {
+		uint8_t s1, m1, s2, m2;
+		get_scale_min_k4(i + 0, block->scales, &s1, &m1);
+		get_scale_min_k4(i + 1, block->scales, &s2, &m2);
+		scales[i] = d * s1;
+		mins[i] = dmin * m1;
+		scales[i + 1] = d * s2;
+		mins[i + 1] = dmin * m2;
+	}
+
+	__m256 acc = _mm256_setzero_ps();
+
+	const uint8_t *ql = block->qs;  // 128 bytes = 256 nibbles
+	const uint8_t *qh = block->qh;  // 32 bytes, each bit controls one element
+
+	// Q5_K dequantization follows the scalar pattern exactly:
+	// - 4 iterations of 64 elements each
+	// - Each iteration uses 2 scales (32 elements each)
+	// - qh bits: iteration 0 uses bits 0,1; iter 1 uses bits 2,3; etc.
+	for (int iter = 0; iter < 4; iter++) {
+		int is = iter * 2;  // Scale index: 0, 2, 4, 6
+		__m256 d1 = _mm256_set1_ps(scales[is]);
+		__m256 m1 = _mm256_set1_ps(mins[is]);
+		__m256 d2 = _mm256_set1_ps(scales[is + 1]);
+		__m256 m2 = _mm256_set1_ps(mins[is + 1]);
+
+		// Bit masks for this iteration
+		uint8_t bit0 = (1 << (iter * 2));     // 1, 4, 16, 64
+		uint8_t bit1 = (1 << (iter * 2 + 1)); // 2, 8, 32, 128
+
+		// Process 32 elements for low nibbles (scale is)
+		for (int l = 0; l < 32; l += 8) {
+			// Load 8 low nibbles
+			__m128i q8 = _mm_loadu_si64(ql + l);
+			__m128i qlo = _mm_and_si128(q8, _mm_set1_epi8(0x0F));
+			__m256 qlo_f32 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(qlo));
+
+			// Load 8 x values
+			__m256 xv = _mm256_loadu_ps(x + iter * 64 + l);
+
+			// Extract high bits: check if bit0 is set in qh[l..l+7]
+			float qh_bits[8];
+			for (int k = 0; k < 8; k++) {
+				qh_bits[k] = (qh[l + k] & bit0) ? 16.0f : 0.0f;
+			}
+			__m256 qh_vec = _mm256_loadu_ps(qh_bits);
+
+			// q = ql + qh_bit
+			__m256 q = _mm256_add_ps(qlo_f32, qh_vec);
+
+			// dequant = d1 * q - m1
+			__m256 y = _mm256_sub_ps(_mm256_mul_ps(d1, q), m1);
+
+			// acc += x * y
+			acc = _mm256_fmadd_ps(xv, y, acc);
+		}
+
+		// Process 32 elements for high nibbles (scale is+1)
+		for (int l = 0; l < 32; l += 8) {
+			// Load 8 high nibbles
+			__m128i q8 = _mm_loadu_si64(ql + l);
+			__m128i qhi = _mm_and_si128(_mm_srli_epi16(q8, 4), _mm_set1_epi8(0x0F));
+			__m256 qhi_f32 = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(qhi));
+
+			// Load 8 x values
+			__m256 xv = _mm256_loadu_ps(x + iter * 64 + 32 + l);
+
+			// Extract high bits: check if bit1 is set in qh[l..l+7]
+			float qh_bits[8];
+			for (int k = 0; k < 8; k++) {
+				qh_bits[k] = (qh[l + k] & bit1) ? 16.0f : 0.0f;
+			}
+			__m256 qh_vec = _mm256_loadu_ps(qh_bits);
+
+			// q = qh_nibble + qh_bit
+			__m256 q = _mm256_add_ps(qhi_f32, qh_vec);
+
+			// dequant = d2 * q - m2
+			__m256 y = _mm256_sub_ps(_mm256_mul_ps(d2, q), m2);
+
+			// acc += x * y
+			acc = _mm256_fmadd_ps(xv, y, acc);
+		}
+
+		ql += 32;  // Advance to next 32 bytes (64 nibbles)
+	}
+
+	return hsum_f32_avx2(acc);
+}
+
+__attribute__((target("avx2"))) void mat_vec_row_f32_q5k_f32_avx2(const void *X, const void *w_void, void *O,
+								  int in_dim, int start_row, int end_row)
+{
+	const block_q5_K *w = (const block_q5_K *)w_void;
+	const int nb = in_dim / QK_K;
+	const float *x = (const float *)X;
+	float *o = (float *)O;
+
+	for (int i = start_row; i < end_row; i++) {
+		const block_q5_K *w_row = w + (long long)i * nb;
+		float sum = 0.0f;
+		for (int j = 0; j < nb; j++) {
+			sum += dot_product_f32_q5k_avx2(x + j * QK_K, &w_row[j]);
+		}
+		o[i] = sum;
+	}
+}
+
 __attribute__((target("avx2"))) void apply_rope_cache_f32_avx2(RopeCacheType *rope_cache, void *X, int pos,
 							       int head_dim)
 {

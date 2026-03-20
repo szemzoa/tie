@@ -851,13 +851,13 @@ MemType *process_image_vision_qwen3vl(struct TIEContext *ctx)
 
 
 	if (ctx->vision_mem.image_raw_width > vm->image_size || ctx->vision_mem.image_raw_height > vm->image_size) {
-		printf("invalid image size, supports max %u x %u\n", vm->image_size, vm->image_size);
+		printf(ERR "invalid image size, supports max %u x %u\n", vm->image_size, vm->image_size);
 		return NULL;
 	}
 
 	if ((ctx->vision_mem.image_raw_width % vm->patch_size != 0)
 	    || (ctx->vision_mem.image_raw_height % vm->patch_size != 0)) {
-		printf("invalid image size, supports %upx grid only\n", vm->patch_size);
+		printf(ERR "invalid image size, supports %upx grid only\n", vm->patch_size);
 		return NULL;
 	}
 
@@ -914,7 +914,7 @@ void vision_create_embeddings_gemma3(struct TIEContext *ctx)
 	const int num_patches_side = image_size / patch_size;	     // 64 (H_out, W_out)
 	const int num_patches = num_patches_side * num_patches_side; // 4096 (seq_len)
 
-	printf("%s, image_size: %u, patch_size: %u, embed_dim: %u, num_patches_side: %u, num_patches: %u\n",
+	printf(DEBUG "%s, image_size: %u, patch_size: %u, embed_dim: %u, num_patches_side: %u, num_patches: %u\n",
 	       __FUNCTION__, image_size, patch_size, embed_dim, num_patches_side, num_patches);
 
 	// Allocate a temporary buffer for the Conv2D output
@@ -926,7 +926,7 @@ void vision_create_embeddings_gemma3(struct TIEContext *ctx)
 		return;
 	}
 
-	printf("Running Conv2D patch embedding\n");
+	printf(DEBUG "Running Conv2D patch embedding\n");
 	dispatch_conv_2d(&conv_output_mem,     // Dest: [1152, 64, 64]
 			 &mem->image_raw,      // Src: [3, 896, 896]
 			 &vm->patch_embd,      // Kernel: [1152, 3, 14, 14]
@@ -940,7 +940,7 @@ void vision_create_embeddings_gemma3(struct TIEContext *ctx)
 	// The output of conv is [C_out, H_out, W_out] = [1152, 64, 64] (planar)
 	// The transformer needs [seq_len, C_out] = [4096, 1152]
 	// We must permute [1152, 64, 64] -> [64, 64, 1152] and then flatten.
-	printf("Permuting Conv2D output to [seq_len, embed_dim]...\n");
+	printf(DEBUG "Permuting Conv2D output to [seq_len, embed_dim]...\n");
 	float *dest_data = (float *)mem->patch_embeds.data;			// [4096, 1152]
 	const float *conv_data = (const float *)conv_output_mem.data;		// [1152, 64, 64]
 	const size_t H_out_W_out = (size_t)num_patches_side * num_patches_side; // 4096
@@ -1106,7 +1106,7 @@ MemType *process_image_vision_gemma3(struct TIEContext *ctx)
 
 
 	if (ctx->vision_mem.image_raw_width != vm->image_size || ctx->vision_mem.image_raw_height != vm->image_size) {
-		printf("invalid image size, supports %u x %u only\n", vm->image_size, vm->image_size);
+		printf(ERR "invalid image size, supports %u x %u only\n", vm->image_size, vm->image_size);
 		return NULL;
 	}
 

@@ -15,6 +15,8 @@ extern ModelDef LFM2_MOE_DEF;
 extern ModelDef GRANITE_DEF;
 extern ModelDef QWEN3VL_CLIP_DEF;
 extern ModelDef GEMMA3_CLIP_DEF;
+extern ModelDef QWEN35_DEF;
+extern ModelDef QWEN35_MOE_DEF;
 
 
 // Common language model definitions

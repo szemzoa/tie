@@ -30,7 +30,7 @@ int tools_init(struct TIEContext *ctx)
 	// Architecture Detection & Token Lookup
 	if (ctx->gguf_text->arch == ARCH_QWEN3 || ctx->gguf_text->arch == ARCH_QWEN3_MOE
 	    || ctx->gguf_text->arch == ARCH_QWEN3VL || ctx->gguf_text->arch == ARCH_QWEN3VL_MOE
-	    || ctx->gguf_text->arch == ARCH_GRANITE) {
+	    || ctx->gguf_text->arch == ARCH_GRANITE || ctx->gguf_text->arch == ARCH_QWEN35 || ctx->gguf_text->arch == ARCH_QWEN35_MOE) {
 
 		tc->token_start_id = vocab_lookup_token_id(ctx->tokenizer.root, "<tool_call>", 11);
 		tc->token_end_id = vocab_lookup_token_id(ctx->tokenizer.root, "</tool_call>", 12);
@@ -40,7 +40,20 @@ int tools_init(struct TIEContext *ctx)
 
 		return 0;
 
-	} else {
+	}
+#if 1
+	 else if (ctx->gguf_text->arch == ARCH_LFM2 || ctx->gguf_text->arch == ARCH_LFM2_MOE) {
+
+		tc->token_start_id = vocab_lookup_token_id(ctx->tokenizer.root, "<|tool_call_start|>", 19);
+		tc->token_end_id = vocab_lookup_token_id(ctx->tokenizer.root, "<|tool_call_end|>", 17);
+
+		if (tc->token_start_id == -1)
+			printf("WARN: <|tool_call_start|> token not found!\n");
+
+		return 0;
+	}
+#endif
+	else {
 		// Default
 		tc->token_start_id = -1; // Disable if not supported
 		return -1;
@@ -74,8 +87,12 @@ void tools_execute_pending(struct TIEContext *ctx)
 	// Qwen expects:
 	// <|im_start|>user\n<tool_response>\n{result}\n</tool_response><|im_end|>\n<|im_start|>assistant\n
 	char fmt_buf[4096];
+//	snprintf(fmt_buf, sizeof(fmt_buf),
+//		 "<|im_start|>user\n<tool_response>\n%s\n</tool_response><|im_end|>\n<|im_start|>assistant\n",
+//		 execution_result);
+
 	snprintf(fmt_buf, sizeof(fmt_buf),
-		 "<|im_start|>user\n<tool_response>\n%s\n</tool_response><|im_end|>\n<|im_start|>assistant\n",
+		 "<|im_start|>tool\n<|tool_response_start|>\n%s\n<|tool_response_end|><|im_end|>\n<|im_start|>assistant\n",
 		 execution_result);
 
 	tc->result_prompt = strdup(fmt_buf);
@@ -88,6 +105,7 @@ bool tools_process_token(struct TIEContext *ctx, int token)
 {
 	ToolContext *tc = &ctx->tool_context;
 
+
 	// Safety check
 	if (tc->token_start_id == -1)
 		return false; // Tools disabled
@@ -96,6 +114,7 @@ bool tools_process_token(struct TIEContext *ctx, int token)
 	if (tc->state == TOOL_STATE_IDLE) {
 		if (token == tc->token_start_id) {
 			// Found <tool_call>. Start buffering. Swallow this token.
+			printf("tool call start\n");
 			tc->state = TOOL_STATE_BUFFERING;
 			tc->buf_len = 0;
 			tc->buffer[0] = '\0';
@@ -109,6 +128,8 @@ bool tools_process_token(struct TIEContext *ctx, int token)
 		if (token == tc->token_end_id) {
 			// Found </tool_call>. Execute.
 			tc->buffer[tc->buf_len] = '\0';
+
+			printf("tool call end\n");
 
 			tc->state = TOOL_STATE_CALL_READY;
 			return true;
@@ -128,77 +149,4 @@ bool tools_process_token(struct TIEContext *ctx, int token)
 	}
 
 	return false;
-}
-
-// Build the architecture-specific system prompt
-char *build_system_prompt_qwen3(struct TIEContext *ctx)
-{
-	/*
-		// For Qwen, this is the standard tool prompt
-		return strdup(
-			"<|im_start|>system\n"
-			"You are a helpful assistant.\n"
-			"\n# Tools\n"
-			"You may call one or more functions to assist with the user query.\n"
-			"You are provided with function signatures within <tools></tools> XML tags:\n"
-			"<tools>\n"
-			"{\"type\": \"function\", \"function\": { \"name\": \"set_lamp_state\", \"description\": \"Turn
-	   lamp on/off\", \"parameters\": { \"type\": \"object\", \"properties\": { \"state\": {\"type\": \"string\",
-	   \"enum\": [\"on\", \"off\"]} }, \"required\": [\"state\"] } }}\n"
-			"</tools>\n"
-			"\n# Tool Instructions\n"
-			"For each function call, return a json object with function name and arguments within
-	   <tool_call></tool_call> XML tags:\n"
-			"<tool_call>\n"
-			"{\"name\": <function-name>, \"arguments\": <args-json-object>}\n"
-			"</tool_call>\n"
-			"<|im_end|>\n");
-	*/
-
-	return strdup(
-		"<|im_start|>system\n"
-		"You are a helpful and harmless assistant.<|im_end|>\n");
-}
-
-char *build_system_prompt_gemma3(struct TIEContext *ctx)
-{
-	return strdup(
-		"<bos><start_of_turn>system\n"
-		"You have access to functions. If you decide to invoke any of the function(s), you MUST put it in the format of\n"
-		"{\"name\": function name, \"parameters\": dictionary of argument name and its value}\n"
-		"\n"
-		"IMPORTANT: You must use the EXACT function names and parameter names defined below.\n"
-		"You SHOULD NOT include any other text in the response if you call a function\n"
-		"[\n"
-		"  {\n"
-		"    \"name\": \"set_lamp_state\",\n"
-		"    \"description\": \"Control a smart lamp\",\n"
-		"    \"parameters\": {\n"
-		"      \"type\": \"object\",\n"
-		"      \"properties\": {\n"
-		"        \"state\": {\n"
-		"          \"type\": \"string\",\n"
-		"          \"enum\": [\"on\", \"off\"],\n"
-		"          \"description\": \"Turn the lamp on or off\"\n"
-		"        }\n"
-		"      },\n"
-		"      \"required\": [\"state\"]\n"
-		"    }\n"
-		"  }\n"
-		"]\n"
-		"<end_of_turn>\n");
-}
-
-char *build_system_prompt_granite(struct TIEContext *ctx)
-{
-	return strdup(
-		"<|start_of_role|>system<|end_of_role|>You are a helpful assistant with access to the following tools. You may call one or more tools to assist with the user query.\n"
-		"You are provided with function signatures within <tools></tools> XML tags:\n"
-		"<tools>\n"
-		"{\"type\": \"function\", \"function\": {\"name\": \"get_current_weather\", \"description\": \"Get the current weather for a specified city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"Name of the city\"}}, \"required\": [\"city\"]}}}\n"
-		"</tools>\n"
-		"For each tool call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n"
-		"<tool_call>\n"
-		"{\"name\": <function-name>, \"arguments\": <args-json-object>}\n"
-		"</tool_call>. If a tool does not exist in the provided list of tools, notify the user that you do not have the ability to fulfill the request.<|end_of_text|>\n");
 }

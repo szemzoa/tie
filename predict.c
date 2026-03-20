@@ -30,7 +30,8 @@ static float *softmax(float *logits, int size)
 	if (!probs)
 		return NULL;
 
-	float max_logit = -INFINITY;
+//	float max_logit = -INFINITY;
+	float max_logit;
 	for (int i = 0; i < size; i++) {
 		if (logits[i] > 80.0f)
 			logits[i] = 80.0f;
@@ -41,7 +42,7 @@ static float *softmax(float *logits, int size)
 			max_logit = logits[i];
 		}
 	}
-
+#if 0
 	// Handle case where all logits are -infinity
 	if (max_logit == -INFINITY) {
 		for (int i = 0; i < size; i++) {
@@ -49,6 +50,7 @@ static float *softmax(float *logits, int size)
 		}
 		return probs;
 	}
+#endif
 
 	float sum = 0.0f;
 	for (int i = 0; i < size; i++) {

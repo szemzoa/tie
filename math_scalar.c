@@ -5,7 +5,6 @@
 
 #include "math_scalar.h"
 #include "engine.h"
-#include "threadpool.h"
 
 
 inline float bf16_to_fp32(uint16_t bf16)
@@ -286,6 +285,85 @@ void dequantize_row_q6_k_f32_scalar(const void *__restrict__ q_void, float *__re
 	}
 }
 
+void dequantize_row_q5_K_scalar(const void *__restrict__ q_void, float *__restrict__ y, int k)
+{
+	const block_q5_K *x = (const block_q5_K *)q_void;
+	const int64_t nb = k / QK_K;
+
+	for (int i = 0; i < nb; i++) {
+		const uint8_t *ql = x[i].qs;
+		const uint8_t *qh = x[i].qh;
+
+		const float d = fp16_to_fp32(x[i].d);
+		const float min = fp16_to_fp32(x[i].dmin);
+
+		int is = 0;
+		uint8_t sc, m;
+		uint8_t u1 = 1, u2 = 2;
+		for (int j = 0; j < QK_K; j += 64) {
+			get_scale_min_k4(is + 0, x[i].scales, &sc, &m);
+			const float d1 = d * sc;
+			const float m1 = min * m;
+			get_scale_min_k4(is + 1, x[i].scales, &sc, &m);
+			const float d2 = d * sc;
+			const float m2 = min * m;
+			for (int l = 0; l < 32; ++l)
+				*y++ = d1 * ((ql[l] & 0xF) + (qh[l] & u1 ? 16 : 0)) - m1;
+			for (int l = 0; l < 32; ++l)
+				*y++ = d2 * ((ql[l] >> 4) + (qh[l] & u2 ? 16 : 0)) - m2;
+			ql += 32;
+			is += 2;
+			u1 <<= 2;
+			u2 <<= 2;
+		}
+	}
+}
+
+void l2_norm_f32_scalar(void *__restrict X, int size, float eps)
+{
+	float *x = (float *)X;
+
+	float sum = 0.0f;
+
+	for (int i = 0; i < size; i++)
+		sum = fmaf(x[i], x[i], sum);
+
+	float inv_norm = 1.0f / sqrtf(sum + eps);
+
+	for (int i = 0; i < size; i++)
+		x[i] *= inv_norm;
+}
+
+// Implements: output = (x / sqrt(variance + eps)) * (1.0 + weight)
+void rms_norm_centered_f32_f32_f32_scalar(void *__restrict O, const void *__restrict X, const Tensor *__restrict W,
+					  int size, float eps)
+{
+	float *o = (float *)O;
+	float *x = (float *)X;
+	float *weight = W->mem.data;
+
+	// Unrolled accumulation for faster reduction
+	float ss0 = 0.0f, ss1 = 0.0f, ss2 = 0.0f, ss3 = 0.0f;
+	int i = 0;
+	for (; i <= size - 4; i += 4) {
+		ss0 = fmaf(x[i + 0], x[i + 0], ss0);
+		ss1 = fmaf(x[i + 1], x[i + 1], ss1);
+		ss2 = fmaf(x[i + 2], x[i + 2], ss2);
+		ss3 = fmaf(x[i + 3], x[i + 3], ss3);
+	}
+	float ss = ss0 + ss1 + ss2 + ss3;
+	for (; i < size; i++) {
+		ss = fmaf(x[i], x[i], ss);
+	}
+
+	float inv_rms = 1.0f / sqrtf(ss / size + eps);
+
+	// Apply weight and scale (1.0 + weight)
+	for (int i = 0; i < size; ++i) {
+		o[i] = x[i] * (1.0f + weight[i]) * inv_rms;
+	}
+}
+
 // Implements: output = (x / sqrt(variance + eps)) * weight
 void rms_norm_f32_f32_f32_scalar(void *__restrict O, const void *__restrict X, const Tensor *__restrict W, int size,
 				 float eps)
@@ -476,6 +554,11 @@ void mat_vec_row_f32_bf16_f32_scalar(const void *X, const void *w_void, void *O,
 		int j = 0;
 		const uint16_t *w_row = &w_bf16[i * in_dim];
 
+		if (i == 4224) {
+			printf("DEBUG: scalar weight row 4224 first 5: %04x, %04x, %04x, %04x, %04x\n", w_row[0],
+			       w_row[1], w_row[2], w_row[3], w_row[4]);
+		}
+
 		for (; j <= in_dim - 4; j += 4) {
 			uint32_t w_bits0 = ((uint32_t)w_row[j]) << 16;
 			uint32_t w_bits1 = ((uint32_t)w_row[j + 1]) << 16;
@@ -560,6 +643,18 @@ void get_embedding_row_q4k_f32_scalar(const Tensor *W, int row_index, void *dest
 	for (int block_idx = 0; block_idx < blocks_per_row; block_idx++)
 		dequantize_row_q4_k_f32_scalar(&src[row_block_offset + block_idx], (float *)dest + block_idx * QK_K,
 					       QK_K);
+}
+
+void get_embedding_row_q5k_f32_scalar(const Tensor *W, int row_index, void *dest, int embed_dim)
+{
+	int blocks_per_row = embed_dim / QK_K;
+
+	block_q5_K *src = (block_q5_K *)W->mem.data;
+	long long row_block_offset = (long long)row_index * blocks_per_row;
+
+	for (int block_idx = 0; block_idx < blocks_per_row; block_idx++) {
+		dequantize_row_q5_K_scalar(&src[row_block_offset + block_idx], (float *)dest + block_idx * QK_K, QK_K);
+	}
 }
 
 void get_embedding_row_q6k_f32_scalar(const Tensor *W, int row_index, void *dest, int embed_dim)
@@ -1160,5 +1255,100 @@ void transpose_bf16_scalar(MemType *dest, const MemType *src, int rows, int cols
 		for (int j = 0; j < cols; ++j) {
 			dest_data[j * rows + i] = src_data[i * cols + j];
 		}
+	}
+}
+
+void get_embedding_row_q8_0_f32_scalar(const Tensor *W, int row_index, void *dest, int embed_dim)
+{
+	const block_q8_0 *w = (const block_q8_0 *)W->mem.data + (row_index * (embed_dim / QK8_0));
+	float *d = (float *)dest;
+	for (int i = 0; i < embed_dim / QK8_0; i++) {
+		float scale = fp16_to_fp32(w[i].d); //
+		for (int j = 0; j < QK8_0; j++) {
+			d[i * QK8_0 + j] = w[i].qs[j] * scale;
+		}
+	}
+}
+
+static float dot_product_f32_q8_0_scalar(const float *x, const block_q8_0 *w, int in_dim)
+{
+	float sum = 0.0f;
+	int nb = in_dim / QK8_0;
+	for (int i = 0; i < nb; i++) {
+		float d = fp16_to_fp32(w[i].d);
+		for (int j = 0; j < QK8_0; j++) {
+			sum += x[i * QK8_0 + j] * (d * w[i].qs[j]);
+		}
+	}
+	return sum;
+}
+
+void mat_vec_row_f32_q8_0_f32_scalar(const void *X, const void *w_void, void *O, int in_dim, int start_row, int end_row)
+{
+	const float *x = (const float *)X;
+	float *o = (float *)O;
+	const block_q8_0 *w = (const block_q8_0 *)w_void;
+	int nb = in_dim / QK8_0;
+	for (int i = start_row; i < end_row; i++) {
+		o[i] = dot_product_f32_q8_0_scalar(x, w + i * nb, in_dim);
+	}
+}
+
+void mat_vec_row_f32_q5k_f32_scalar(const void *X, const void *w_void, void *O, int in_dim, int start_row, int end_row)
+{
+	const float *x = (const float *)X;
+	const block_q5_K *w = (const block_q5_K *)w_void;
+	float *out = (float *)O;
+	const int nb = in_dim / QK_K;
+
+	for (int r = start_row; r < end_row; r++) {
+		double row_sum = 0.0;
+		const block_q5_K *row_blocks = w + (size_t)r * nb;
+
+		for (int i = 0; i < nb; i++) {
+			const block_q5_K *block = &row_blocks[i];
+			const float *x_block = x + (size_t)i * QK_K;
+
+			const float d = fp16_to_fp32(block->d);
+			const float min = fp16_to_fp32(block->dmin);
+			const uint8_t *ql = block->qs;
+			const uint8_t *qh = block->qh;
+
+			int is = 0;
+			uint8_t sc, m;
+			uint8_t u1 = 1, u2 = 2;
+
+			for (int j = 0; j < QK_K; j += 64) {
+				// Get sub-block scales/mins using your existing helper
+				get_scale_min_k4(is + 0, block->scales, &sc, &m);
+				const float d1 = d * sc;
+				const float m1 = min * m;
+
+				get_scale_min_k4(is + 1, block->scales, &sc, &m);
+				const float d2 = d * sc;
+				const float m2 = min * m;
+
+				const float *x_ptr = x_block + j;
+
+				// Process 32 elements using low nibbles and current mask bit (u1)
+				for (int l = 0; l < 32; ++l) {
+					float val = d1 * ((float)(ql[l] & 0xF) + (qh[l] & u1 ? 16.0f : 0.0f)) - m1;
+					row_sum += (double)x_ptr[l] * val;
+				}
+
+				// Process 32 elements using high nibbles and current mask bit (u2)
+				for (int l = 0; l < 32; ++l) {
+					float val = d2 * ((float)(ql[l] >> 4) + (qh[l] & u2 ? 16.0f : 0.0f)) - m2;
+					row_sum += (double)x_ptr[l + 32] * val;
+				}
+
+				// Advance state according to your dequantize loop
+				ql += 32;
+				is += 2;
+				u1 <<= 2;
+				u2 <<= 2;
+			}
+		}
+		out[r] = (float)row_sum;
 	}
 }

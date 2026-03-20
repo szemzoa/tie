@@ -16,6 +16,7 @@
 int transformer_layer_qwen3(struct TIEContext *ctx, int layer_idx, int batch_len);
 int build_prompt_qwen3(struct TIEContext *ctx, int *prompt_tokens, int *user_text_tokens, int user_text_token_count,
 		       bool has_image);
+char *build_system_prompt_qwen3(struct TIEContext *ctx);
 
 
 static const TensorDef QWEN3_GLOBAL_TENSORS[] = {
@@ -311,66 +312,50 @@ int transformer_layer_qwen3(struct TIEContext *ctx, int layer_idx, int batch_len
 
 	// Attention Block
 	// RMSNorm
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-
-		// Create slices for the specific token being processed
-		MemType hidden_state_slice = mem_slice(&ctx->mem.hidden_state, offset);
-		MemType normed_input_slice = mem_slice(&ctx->mem.normed_qkv_input, offset);
-
-		dispatch_rms_norm(&hidden_state_slice, &l->attn_norm, &normed_input_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
+	dispatch_rms_norm_batched(&ctx->mem.hidden_state, &l->attn_norm, &ctx->mem.normed_qkv_input,
+				  ctx->model->embed_dim, ctx->model->norm_eps, batch_len,
+				  ctx->model->embed_dim);
 
 	// Compute Q/K/V Matrices
 	dispatch_mat_mat(ctx, &ctx->mem.normed_qkv_input, &l->attn_q, &ctx->mem.Q, batch_len, ctx->model->embed_dim,
 			 q_dim, true);
-
 	dispatch_mat_mat(ctx, &ctx->mem.normed_qkv_input, &l->attn_k, &ctx->mem.K, batch_len, ctx->model->embed_dim,
 			 kv_dim, true);
-
 	dispatch_mat_mat(ctx, &ctx->mem.normed_qkv_input, &l->attn_v, &ctx->mem.V, batch_len, ctx->model->embed_dim,
 			 kv_dim, true);
 
 	// Apply RoPE
-	for (int i = 0; i < batch_len; i++) {
-		// The absolute position for the current token in the batch
-		int absolute_pos = start_pos + i;
+	for (int h = 0; h < ctx->model->num_heads; h++) {
+		MemType Q_slice = mem_slice(&ctx->mem.Q, (size_t)h * ctx->model->head_dim);
 
-		for (int h = 0; h < ctx->model->num_heads; h++) {
-			MemType Q_slice = mem_slice(&ctx->mem.Q, (size_t)i * q_dim + h * ctx->model->head_dim);
-
-			if (l->attn_q_norm.mem.data) {
-				dispatch_rms_norm(&Q_slice, &l->attn_q_norm, &Q_slice, ctx->model->head_dim,
-						  ctx->model->norm_eps);
-			}
-
-			// Use the absolute position for RoPE
-			if (ctx->model->use_mrope == 0) {
-				dispatch_apply_rope_cache(active_rope_cache, &Q_slice, absolute_pos,
-							  ctx->model->head_dim);
-			} else {
-				dispatch_apply_mrope_cache(active_rope_cache, &Q_slice, absolute_pos,
-							   ctx->model->head_dim);
-			}
+		if (l->attn_q_norm.mem.data) {
+			dispatch_rms_norm_batched(&Q_slice, &l->attn_q_norm, &Q_slice,
+						  ctx->model->head_dim, ctx->model->norm_eps,
+						  batch_len, q_dim);
 		}
+		if (ctx->model->use_mrope == 0) {
+			dispatch_apply_rope_cache_batched(active_rope_cache, &Q_slice, start_pos,
+							  ctx->model->head_dim, batch_len, q_dim);
+		} else {
+			dispatch_apply_mrope_cache_batched(active_rope_cache, &Q_slice, start_pos,
+							  ctx->model->head_dim, batch_len, q_dim);
+		}
+	}
 
-		for (int h = 0; h < ctx->model->num_kv_heads; h++) {
-			MemType K_slice = mem_slice(&ctx->mem.K, (size_t)i * kv_dim + h * ctx->model->head_dim);
+	for (int h = 0; h < ctx->model->num_kv_heads; h++) {
+		MemType K_slice = mem_slice(&ctx->mem.K, (size_t)h * ctx->model->head_dim);
 
-			if (l->attn_k_norm.mem.data) {
-				dispatch_rms_norm(&K_slice, &l->attn_k_norm, &K_slice, ctx->model->head_dim,
-						  ctx->model->norm_eps);
-			}
-
-			// Use the absolute position for RoPE
-			if (ctx->model->use_mrope == 0) {
-				dispatch_apply_rope_cache(active_rope_cache, &K_slice, absolute_pos,
-							  ctx->model->head_dim);
-			} else {
-				dispatch_apply_mrope_cache(active_rope_cache, &K_slice, absolute_pos,
-							   ctx->model->head_dim);
-			}
+		if (l->attn_k_norm.mem.data) {
+			dispatch_rms_norm_batched(&K_slice, &l->attn_k_norm, &K_slice,
+						  ctx->model->head_dim, ctx->model->norm_eps,
+						  batch_len, kv_dim);
+		}
+		if (ctx->model->use_mrope == 0) {
+			dispatch_apply_rope_cache_batched(active_rope_cache, &K_slice, start_pos,
+							ctx->model->head_dim, batch_len, kv_dim);
+		} else {
+			dispatch_apply_mrope_cache_batched(active_rope_cache, &K_slice, start_pos,
+							ctx->model->head_dim, batch_len, kv_dim);
 		}
 	}
 
@@ -378,7 +363,7 @@ int transformer_layer_qwen3(struct TIEContext *ctx, int layer_idx, int batch_len
 	dispatch_store_KV_cache(ctx, layer_idx, start_pos, batch_len, sink_len);
 
 	// Multi-Head Attention Calculation
-	attention(ctx, batch_len, layer_idx, layer_idx, start_pos, attn_type, attention_worker, sink_len);
+	attention(ctx, batch_len, layer_idx, layer_idx, start_pos, attn_type, attention_worker, sink_len, ctx->model->head_dim);
 
 	// Output projection
 	dispatch_mat_mat(ctx, &ctx->mem.attn_output, &l->attn_out, &ctx->mem.attn_proj_output, batch_len, q_dim,
@@ -389,16 +374,9 @@ int transformer_layer_qwen3(struct TIEContext *ctx, int layer_idx, int batch_len
 
 	// FFN Block
 	// RMSNorm
-	for (int i = 0; i < batch_len; i++) {
-		size_t offset = (size_t)i * ctx->model->embed_dim;
-
-		// Create slices for the specific token being processed
-		MemType hidden_state_slice = mem_slice(&ctx->mem.hidden_state, offset);
-		MemType normed_ffn_input_slice = mem_slice(&ctx->mem.normed_ffn_input, offset);
-
-		dispatch_rms_norm(&hidden_state_slice, &l->ffn_norm, &normed_ffn_input_slice, ctx->model->embed_dim,
-				  ctx->model->norm_eps);
-	}
+	dispatch_rms_norm_batched(&ctx->mem.hidden_state, &l->ffn_norm, &ctx->mem.normed_ffn_input,
+				  ctx->model->embed_dim, ctx->model->norm_eps, batch_len,
+				  ctx->model->embed_dim);
 
 	// MoE
 	if (ctx->model->is_moe) {
@@ -538,7 +516,7 @@ int build_prompt_qwen3(struct TIEContext *ctx, int *prompt_tokens, int *user_tex
 
 		int num_patches = merged_w * merged_h;
 
-		printf("Dynamic Vision Tokens: %dx%d image -> %dx%d patches -> %d tokens\n", raw_w, raw_h, merged_w,
+		printf(DEBUG "Dynamic Vision Tokens: %dx%d image -> %dx%d patches -> %d tokens\n", raw_w, raw_h, merged_w,
 		       merged_h, num_patches);
 
 		// <|vision_start|>
@@ -572,4 +550,34 @@ int build_prompt_qwen3(struct TIEContext *ctx, int *prompt_tokens, int *user_tex
 		prompt_tokens[prompt_len++] = def->params.newline_token_id;
 
 	return prompt_len;
+}
+
+// Build the architecture-specific system prompt
+char *build_system_prompt_qwen3(struct TIEContext *ctx)
+{
+	/*
+		// For Qwen, this is the standard tool prompt
+		return strdup(
+			"<|im_start|>system\n"
+			"You are a helpful assistant.\n"
+			"\n# Tools\n"
+			"You may call one or more functions to assist with the user query.\n"
+			"You are provided with function signatures within <tools></tools> XML tags:\n"
+			"<tools>\n"
+			"{\"type\": \"function\", \"function\": { \"name\": \"set_lamp_state\", \"description\": \"Turn
+	   lamp on/off\", \"parameters\": { \"type\": \"object\", \"properties\": { \"state\": {\"type\": \"string\",
+	   \"enum\": [\"on\", \"off\"]} }, \"required\": [\"state\"] } }}\n"
+			"</tools>\n"
+			"\n# Tool Instructions\n"
+			"For each function call, return a json object with function name and arguments within
+	   <tool_call></tool_call> XML tags:\n"
+			"<tool_call>\n"
+			"{\"name\": <function-name>, \"arguments\": <args-json-object>}\n"
+			"</tool_call>\n"
+			"<|im_end|>\n");
+	*/
+
+	return strdup(
+		"<|im_start|>system\n"
+		"You are a helpful and harmless assistant.<|im_end|>\n");
 }
